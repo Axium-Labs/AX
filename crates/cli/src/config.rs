@@ -82,9 +82,8 @@ impl AxConfig {
         let contents =
             toml::to_string_pretty(self).context("failed to encode ~/.ax/config.toml")?;
         let temporary = path.with_extension("toml.tmp");
-        fs::write(&temporary, contents).with_context(|| {
-            format!("failed to write {}", temporary.display())
-        })?;
+        fs::write(&temporary, contents)
+            .with_context(|| format!("failed to write {}", temporary.display()))?;
         fs::rename(&temporary, path).with_context(|| {
             format!(
                 "failed to move {} to {}",

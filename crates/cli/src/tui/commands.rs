@@ -171,6 +171,7 @@ pub(super) async fn execute_slash(
             );
             app.push(TranscriptKind::Status, format!("Compact current context\nCurrent context  {before} / {}\n• Summarizing conversation…", selection.context_capacity()));
             let result = if let Some(runtime) = state.runtime.as_mut() {
+                runtime.set_context("[retrieved-memory]", None);
                 runtime.compact_now(|_| {}).await?
             } else {
                 None
@@ -182,7 +183,7 @@ pub(super) async fn execute_slash(
                     .map_or(0, runtime_core::AgentKernel::estimated_context_tokens);
                 if let Some(session) = state.current_session.as_ref() {
                     let session_id = session.id.clone();
-                    state.store()?.replace_old_messages_with_summary(
+                    state.store()?.save_context_summary(
                         &session_id,
                         u32::try_from(compression.retained_messages).unwrap_or(u32::MAX),
                         &compression.summary,
@@ -387,11 +388,12 @@ fn open_skills(state: &mut ReplState, pane: &mut BottomPane) -> Result<()> {
 }
 
 fn open_tools(state: &ReplState, pane: &mut BottomPane) {
-    let items = tools(&state.mcp_tools)
+    let mut items: Vec<SurfaceItem> = tools(&state.mcp_tools)
         .names()
         .into_iter()
         .map(|name| item(name, name, "available"))
         .collect();
+    items.push(item("mcp", "mcp", "capability catalog / lazy gateway"));
     pane.push_view(SurfaceView::manager(
         "Tools",
         "tools",
@@ -434,7 +436,7 @@ async fn mcp_items(state: &mut ReplState) -> Result<Vec<SurfaceItem>> {
         .collect())
 }
 
-fn permission_items(config: &crate::PermissionConfig) -> Vec<SurfaceItem> {
+fn permission_items(config: &crate::PermissionStore) -> Vec<SurfaceItem> {
     vec![
         item("shell", "Shell", &config.get("shell").to_string()),
         item(
@@ -457,7 +459,7 @@ fn permission_items(config: &crate::PermissionConfig) -> Vec<SurfaceItem> {
     ]
 }
 
-fn permissions(config: &crate::PermissionConfig) -> Box<dyn super::bottom_pane::PaneView> {
+fn permissions(config: &crate::PermissionStore) -> Box<dyn super::bottom_pane::PaneView> {
     SurfaceView::manager(
         "Permissions",
         "permissions",
@@ -476,7 +478,7 @@ fn status_panel(
         .current_session
         .as_ref()
         .map_or(0, |s| s.message_count);
-    let lines = vec![
+    let mut lines = vec![
         "Runtime".into(),
         format!("Version           {}", env!("CARGO_PKG_VERSION")),
         "Mode              Agent".into(),
@@ -498,6 +500,21 @@ fn status_panel(
         "Environment".into(),
         format!("Directory         {}", app.directory),
     ];
+    lines.push(format!(
+        "Budget            {} steps / {} tool calls / {}s",
+        state.execution_budget.max_steps,
+        state.execution_budget.max_tool_calls,
+        state.execution_budget.turn_timeout_secs
+    ));
+    lines.push("Latency (count / avg ms / max ms)".into());
+    for (label, metric) in tool::telemetry::snapshot() {
+        lines.push(format!(
+            "{label}: {} / {} / {}",
+            metric.count,
+            metric.total_micros / u128::from(metric.count.max(1)) / 1000,
+            metric.max_micros / 1000
+        ));
+    }
     SurfaceView::info("AX Status", lines)
 }
 
@@ -664,8 +681,14 @@ fn open_session(
     app: &mut App,
     selection: &ModelSelection,
 ) -> Result<()> {
-    if state.open_session(id)? {
-        super::restore_transcript(app, &state.loaded_messages, selection);
+    if state.open_session(id, selection.context_capacity() / 2)? {
+        let history = state
+            .store()?
+            .load_messages(id, None, u32::MAX)?
+            .iter()
+            .map(crate::restore_message)
+            .collect::<Vec<_>>();
+        super::restore_transcript(app, &history, selection);
         app.push(TranscriptKind::Status, "Session resumed");
     } else {
         app.push(TranscriptKind::Error, format!("Session not found: {id}"));
@@ -715,7 +738,75 @@ pub(super) async fn apply_modal_action(
             app.push(TranscriptKind::Status, format!("Deleted session {id}"));
         }
         ModalAction::SurfaceSelected { surface, id } => {
-            if surface == "login-auth-type" {
+            if surface == "session-memory" {
+                match id.as_str() {
+                    "compact" => {
+                        execute_slash("/compact", state, selection, app, pane).await?;
+                    }
+                    "facts" => {
+                        let facts = state.memory_records(memory::MemoryScope::Session)?;
+                        pane.push_view(SurfaceView::info(
+                            "Session facts",
+                            facts
+                                .into_iter()
+                                .map(|fact| format!("{} = {}", fact.key, fact.value))
+                                .collect(),
+                        ));
+                    }
+                    "summary" => {
+                        let summary = match state.current_session.clone() {
+                            Some(session) => state
+                                .store()?
+                                .session_summary(&session.id)?
+                                .unwrap_or_else(|| "No summary yet".into()),
+                            None => "No active session".into(),
+                        };
+                        pane.push_view(SurfaceView::info(
+                            "Context summary",
+                            summary.lines().map(str::to_owned).collect(),
+                        ));
+                    }
+                    "messages" => {
+                        let history = match state.current_session.clone() {
+                            Some(session) => {
+                                state.store()?.load_messages(&session.id, None, u32::MAX)?
+                            }
+                            None => Vec::new(),
+                        };
+                        pane.push_view(SurfaceView::info(
+                            "Stored history",
+                            history
+                                .iter()
+                                .flat_map(|m| {
+                                    format!("{:?}: {}", m.role, m.content)
+                                        .lines()
+                                        .map(str::to_owned)
+                                        .collect::<Vec<_>>()
+                                })
+                                .collect(),
+                        ));
+                    }
+                    "clear" => {
+                        if let Some(session) = state.current_session.clone() {
+                            for fact in state.memory_records(memory::MemoryScope::Session)? {
+                                state.store()?.forget_scoped(
+                                    memory::MemoryScope::Session,
+                                    &session.id,
+                                    &fact.key,
+                                )?;
+                            }
+                            if let Some(runtime) = state.runtime.as_mut() {
+                                runtime.set_context("[retrieved-memory]", None);
+                            }
+                        }
+                        app.push(
+                            TranscriptKind::Status,
+                            "Session facts cleared; conversation history preserved",
+                        );
+                    }
+                    _ => {}
+                }
+            } else if surface == "login-auth-type" {
                 open_login_provider_list(pane, &id)?;
             } else if let Some(capability) = surface.strip_prefix("permission-choice:") {
                 let decision = match id.as_str() {
@@ -903,18 +994,22 @@ fn open_surface_detail(
                 "Actions".into(),
             ],
             vec![
+                item("facts", "View session facts", ""),
                 item("summary", "View summary", ""),
                 item("messages", "View stored messages", ""),
                 item("compact", "Compact now", ""),
-                item("clear", "Clear session memory", ""),
+                item("clear", "Clear session facts", "history preserved"),
             ],
             "Esc back",
         ),
         "memory" => {
-            let category = if id == "project" { "project" } else { "global" };
+            let scope = if id == "project" {
+                memory::MemoryScope::Project
+            } else {
+                memory::MemoryScope::Global
+            };
             let memories = state
-                .store()?
-                .list_long_term(Some(category), 100)?
+                .memory_records(scope)?
                 .into_iter()
                 .map(|m| item(&m.key, &m.key, &m.value))
                 .collect();
@@ -927,7 +1022,7 @@ fn open_surface_detail(
                 "memory-items",
                 vec!["Type to search".into()],
                 memories,
-                "A add · E edit · D delete · Enter details · Esc back",
+                "Remember key=value in chat · Esc back",
             )
         }
         "skills" => SurfaceView::info(

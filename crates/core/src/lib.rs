@@ -1,5 +1,10 @@
 //! The provider-agnostic agent runtime kernel.
 
+mod budget;
+mod context;
+pub use budget::ExecutionBudget;
+pub use context::select_context;
+
 use std::{collections::VecDeque, sync::Arc};
 
 use async_trait::async_trait;
@@ -7,7 +12,7 @@ use model::{FunctionSpec, Message, ModelError, ModelProvider, ModelRequest, Tool
 use serde_json::Value;
 use thiserror::Error;
 use tokio::task::JoinSet;
-use tool::{SafetyLevel, ToolError, ToolRegistry};
+use tool::{SafetyLevel, ToolError, ToolPermission, ToolRegistry};
 
 #[derive(Clone, Debug)]
 pub enum AgentEvent {
@@ -73,21 +78,23 @@ pub enum AgentError {
     },
     #[error("agent exceeded the maximum of {0} model steps")]
     StepLimit(usize),
+    #[error("execution budget exhausted: {0}")]
+    Budget(String),
     #[error("agent worker failed: {0}")]
     WorkerJoin(String),
 }
 
 #[async_trait]
 pub trait ApprovalPolicy: Send + Sync {
-    async fn approve(&self, tool: &str, input: &Value, safety: SafetyLevel) -> bool;
+    async fn approve(&self, tool: &str, input: &Value, permission: ToolPermission) -> bool;
 }
 
 pub struct DenyDangerous;
 
 #[async_trait]
 impl ApprovalPolicy for DenyDangerous {
-    async fn approve(&self, _tool: &str, _input: &Value, safety: SafetyLevel) -> bool {
-        safety == SafetyLevel::Safe
+    async fn approve(&self, _tool: &str, _input: &Value, permission: ToolPermission) -> bool {
+        permission.safety == SafetyLevel::Safe
     }
 }
 
@@ -95,7 +102,7 @@ pub struct AllowAll;
 
 #[async_trait]
 impl ApprovalPolicy for AllowAll {
-    async fn approve(&self, _tool: &str, _input: &Value, _safety: SafetyLevel) -> bool {
+    async fn approve(&self, _tool: &str, _input: &Value, _permission: ToolPermission) -> bool {
         true
     }
 }
@@ -105,7 +112,7 @@ pub struct AgentKernel {
     tools: ToolRegistry,
     approval: Arc<dyn ApprovalPolicy>,
     messages: Vec<Message>,
-    max_steps: usize,
+    budget: ExecutionBudget,
     compression: CompressionPolicy,
 }
 
@@ -121,9 +128,21 @@ impl AgentKernel {
             tools,
             approval,
             messages: Vec::new(),
-            max_steps: 12,
+            budget: ExecutionBudget::default(),
             compression: CompressionPolicy::default(),
         }
+    }
+
+    #[must_use]
+    pub fn with_execution_budget(mut self, budget: ExecutionBudget) -> Self {
+        self.budget = budget;
+        self
+    }
+
+    #[must_use]
+    pub fn with_tool(mut self, tool: impl tool::Tool + 'static) -> Self {
+        self.tools.register(tool);
+        self
     }
 
     #[must_use]
@@ -143,6 +162,15 @@ impl AgentKernel {
         self.messages.push(message);
     }
 
+    /// Replace ephemeral retrieved context, rather than accumulating stale copies.
+    pub fn set_context(&mut self, prefix: &str, message: Option<Message>) {
+        self.messages
+            .retain(|m| m.role != model::Role::System || !m.content.starts_with(prefix));
+        if let Some(message) = message {
+            self.messages.push(message);
+        }
+    }
+
     #[must_use]
     pub fn fork_with_messages(&self, messages: Vec<Message>) -> Self {
         Self {
@@ -150,7 +178,7 @@ impl AgentKernel {
             tools: self.tools.clone(),
             approval: Arc::clone(&self.approval),
             messages,
-            max_steps: self.max_steps,
+            budget: self.budget,
             compression: self.compression.clone(),
         }
     }
@@ -204,6 +232,7 @@ impl AgentKernel {
     where
         F: FnMut(AgentEvent) + Send,
     {
+        let _timer = tool::telemetry::Timer::new("context.compress");
         let estimated_tokens_before = self.estimated_context_tokens();
         let threshold = self
             .provider
@@ -214,7 +243,14 @@ impl AgentKernel {
         if (!force && estimated_tokens_before < threshold) || self.messages.len() <= retain + 1 {
             return Ok(None);
         }
-        let split = self.messages.len().saturating_sub(retain);
+        let proposed = self.messages.len().saturating_sub(retain);
+        let split = (0..=proposed)
+            .rev()
+            .find(|&index| self.messages[index].role == model::Role::User)
+            .unwrap_or(0);
+        if split == 0 {
+            return Ok(None);
+        }
         let old_messages = &self.messages[..split];
         let persistent_context = old_messages
             .iter()
@@ -304,6 +340,42 @@ impl AgentKernel {
     where
         F: FnMut(AgentEvent) + Send,
     {
+        let timeout = std::time::Duration::from_secs(self.budget.turn_timeout_secs.max(1));
+        let result = tokio::time::timeout(timeout, self.run_turn_inner(input, emit))
+            .await
+            .unwrap_or_else(|_| Err(AgentError::Budget("turn timeout".into())));
+        if result.is_err() {
+            // Persist a valid tool-call transcript even if a deadline interrupts execution.
+            let answered = self
+                .messages
+                .iter()
+                .filter_map(|m| m.tool_call_id.clone())
+                .collect::<std::collections::HashSet<_>>();
+            let pending = self
+                .messages
+                .iter()
+                .flat_map(|m| &m.tool_calls)
+                .filter(|call| !answered.contains(&call.id))
+                .map(|call| call.id.clone())
+                .collect::<Vec<_>>();
+            for id in pending {
+                self.messages.push(Message::tool(
+                    id,
+                    "Execution interrupted before a tool result was available.",
+                ));
+            }
+        }
+        result
+    }
+
+    async fn run_turn_inner<F>(
+        &mut self,
+        input: impl Into<String>,
+        emit: F,
+    ) -> Result<String, AgentError>
+    where
+        F: FnMut(AgentEvent) + Send,
+    {
         let emit = std::sync::Mutex::new(emit);
         (emit.lock().unwrap())(AgentEvent::TurnStarted);
         self.messages.push(Message::user(input));
@@ -320,7 +392,8 @@ impl AgentKernel {
             })
             .collect::<Vec<_>>();
 
-        for _ in 0..self.max_steps {
+        let mut calls_used = 0;
+        for _ in 0..self.budget.max_steps {
             (emit.lock().unwrap())(AgentEvent::ModelStarted {
                 provider: self.provider.name().to_owned(),
                 model: self.provider.model_id().to_owned(),
@@ -331,6 +404,7 @@ impl AgentKernel {
             let mut on_thinking = |delta: String| {
                 (emit.lock().unwrap())(AgentEvent::ThinkingDelta { delta });
             };
+            let model_timer = tool::telemetry::Timer::new("model.request");
             let response = self
                 .provider
                 .complete_stream(
@@ -342,6 +416,7 @@ impl AgentKernel {
                     &mut on_thinking,
                 )
                 .await?;
+            drop(model_timer);
             let content = response.content;
             let tool_calls = response.tool_calls;
             self.messages
@@ -352,6 +427,10 @@ impl AgentKernel {
                 return Ok(content);
             }
 
+            if calls_used + tool_calls.len() > self.budget.max_tool_calls {
+                return Err(AgentError::Budget("tool call limit".into()));
+            }
+            calls_used += tool_calls.len();
             for call in tool_calls {
                 let name = call.function.name;
                 (emit.lock().unwrap())(AgentEvent::ToolStarted { name: name.clone() });
@@ -368,10 +447,16 @@ impl AgentKernel {
                     .ok_or_else(|| ToolError::Unknown(name.clone()))?;
                 let approved = self
                     .approval
-                    .approve(&name, &input, tool.safety(&input))
+                    .approve(&name, &input, tool.permission(&input))
                     .await;
                 let result = if approved {
-                    tool.execute(input).await
+                    let _timer = tool::telemetry::Timer::new(format!("tool.{}", tool.name()));
+                    tokio::time::timeout(
+                        std::time::Duration::from_secs(self.budget.tool_timeout_secs.max(1)),
+                        tool.execute(input),
+                    )
+                    .await
+                    .unwrap_or_else(|_| Err(ToolError::Execution("tool timeout".into())))
                 } else {
                     Err(ToolError::PermissionDenied(name.clone()))
                 };
@@ -386,11 +471,12 @@ impl AgentKernel {
             }
         }
 
-        Err(AgentError::StepLimit(self.max_steps))
+        Err(AgentError::StepLimit(self.budget.max_steps))
     }
 }
 
-fn estimate_tokens(messages: &[Message]) -> usize {
+#[must_use]
+pub fn estimate_tokens(messages: &[Message]) -> usize {
     messages
         .iter()
         .map(|message| {
@@ -601,6 +687,9 @@ mod tests {
             json!({"type": "object"})
         }
 
+        fn capability(&self, _input: &Value) -> tool::Capability {
+            tool::Capability::Process
+        }
         fn safety(&self, _input: &Value) -> SafetyLevel {
             SafetyLevel::Safe
         }
@@ -726,5 +815,80 @@ mod tests {
                 .expect("second agent should succeed"),
             "second"
         );
+    }
+    #[tokio::test]
+    async fn tool_budget_stops_before_execution_and_keeps_valid_transcript() {
+        let provider = ScriptedProvider {
+            model: "test".into(),
+            responses: Mutex::new(VecDeque::from([ModelResponse {
+                content: String::new(),
+                tool_calls: vec![ToolCall {
+                    id: "pending".into(),
+                    kind: "function".into(),
+                    function: FunctionCall {
+                        name: "echo".into(),
+                        arguments: "{}".into(),
+                    },
+                }],
+                finish_reason: None,
+            }])),
+        };
+        let mut tools = ToolRegistry::new();
+        tools.register(EchoTool);
+        let mut kernel = AgentKernel::new(Arc::new(provider), tools, Arc::new(AllowAll))
+            .with_execution_budget(ExecutionBudget {
+                max_tool_calls: 0,
+                ..ExecutionBudget::default()
+            });
+        assert!(matches!(
+            kernel.run_turn("test", |_| {}).await,
+            Err(AgentError::Budget(_))
+        ));
+        assert_eq!(
+            kernel.messages().last().unwrap().tool_call_id.as_deref(),
+            Some("pending")
+        );
+        assert!(
+            kernel
+                .messages()
+                .last()
+                .unwrap()
+                .content
+                .contains("interrupted")
+        );
+    }
+
+    struct PendingProvider;
+    #[async_trait]
+    impl ModelProvider for PendingProvider {
+        fn name(&self) -> &'static str {
+            "pending"
+        }
+        fn model_id(&self) -> &'static str {
+            "pending"
+        }
+        fn context_window(&self) -> usize {
+            1000
+        }
+        async fn complete(&self, _request: ModelRequest) -> Result<ModelResponse, ModelError> {
+            std::future::pending().await
+        }
+    }
+    #[tokio::test]
+    async fn turn_timeout_is_enforced_while_model_is_waiting() {
+        let mut kernel = AgentKernel::new(
+            Arc::new(PendingProvider),
+            ToolRegistry::new(),
+            Arc::new(AllowAll),
+        )
+        .with_execution_budget(ExecutionBudget {
+            turn_timeout_secs: 1,
+            ..ExecutionBudget::default()
+        });
+        assert!(matches!(
+            kernel.run_turn("wait", |_| {}).await,
+            Err(AgentError::Budget(_))
+        ));
+        assert_eq!(kernel.messages()[0].content, "wait");
     }
 }

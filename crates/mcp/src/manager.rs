@@ -46,6 +46,15 @@ impl McpManager {
             .collect()
     }
 
+    /// Metadata-only discovery. Never starts a process or opens a connection.
+    #[must_use]
+    pub fn capability_catalog(&self) -> Value {
+        serde_json::json!(self.configs.iter().map(|(name,config)| serde_json::json!({
+            "server":name, "description":config.description, "capabilities":config.capabilities,
+            "enabled":config.enabled,"connected":self.clients.contains_key(name),"transport":transport_name(config)
+        })).collect::<Vec<_>>())
+    }
+
     /// Disconnects a lazily started server. The next use reconnects it.
     pub fn disconnect(&mut self, server: &str) -> bool {
         self.clients.remove(server).is_some()
@@ -57,6 +66,7 @@ impl McpManager {
     ///
     /// Returns an error when the server is unknown, disabled, or unavailable.
     pub async fn discover_tools(&mut self, server: &str) -> Result<Vec<McpTool>, McpError> {
+        let _timer = tool::telemetry::Timer::new("mcp.discover");
         self.client(server).await?.list_tools().await
     }
 
@@ -71,6 +81,7 @@ impl McpManager {
         tool: &str,
         arguments: Value,
     ) -> Result<ToolCallResult, McpError> {
+        let _timer = tool::telemetry::Timer::new("mcp.call");
         self.client(server).await?.call_tool(tool, arguments).await
     }
 
@@ -83,6 +94,7 @@ impl McpManager {
             if !config.enabled {
                 return Err(McpError::DisabledServer(server.to_owned()));
             }
+            let _timer = tool::telemetry::Timer::new("mcp.connect");
             let client = McpClient::connect(server, config).await?;
             self.clients.insert(server.to_owned(), client);
         }

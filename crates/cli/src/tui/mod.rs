@@ -61,7 +61,7 @@ use startup::StartupInfo;
 use transcript::{Transcript, TranscriptKind};
 
 use crate::{
-    ModelResolution, ModelSelection, PermissionConfig, PermissionDecision, ReplState,
+    ModelResolution, ModelSelection, PermissionDecision, PermissionStore, ReplState,
     model_selection, run_prompt_with,
 };
 
@@ -93,16 +93,14 @@ struct ApprovalRequest {
 /// Approval policy that surfaces requests as modal dialogs in the TUI.
 struct ChannelApproval {
     tx: mpsc::UnboundedSender<WorkerMessage>,
-    permissions: tokio::sync::Mutex<PermissionConfig>,
+    permissions: PermissionStore,
 }
 
 #[async_trait]
 impl ApprovalPolicy for ChannelApproval {
-    async fn approve(&self, tool: &str, input: &Value, safety: SafetyLevel) -> bool {
-        let decision = {
-            let permissions = self.permissions.lock().await;
-            permissions.for_tool(tool, input)
-        };
+    async fn approve(&self, tool: &str, input: &Value, permission: tool::ToolPermission) -> bool {
+        let safety = permission.safety;
+        let decision = self.permissions.decision(permission.capability);
         match decision {
             PermissionDecision::Allow => return true,
             PermissionDecision::Deny => return false,
@@ -123,11 +121,7 @@ impl ApprovalPolicy for ChannelApproval {
             ApprovalChoice::AllowOnce => true,
             ApprovalChoice::Deny => false,
             ApprovalChoice::AllowSession => {
-                let capability = PermissionConfig::capability_for(tool, input).to_owned();
-                self.permissions
-                    .lock()
-                    .await
-                    .set(capability, PermissionDecision::Allow);
+                self.permissions.allow_session(permission.capability);
                 true
             }
         }
@@ -294,7 +288,9 @@ pub(super) async fn run_tui(
     mcp_config: Option<PathBuf>,
     allow_dangerous: bool,
     codex_auth: Option<PathBuf>,
+    execution_budget: runtime_core::ExecutionBudget,
 ) -> Result<()> {
+    let startup_timer = tool::telemetry::Timer::new("startup.tui");
     // Title the terminal tab/window "ax" so Windows Terminal labels this tab
     // (mirrors how pi titles its tab, e.g. "π - hzl"). Printed before raw mode
     // so the OSC escape is processed by the shell.
@@ -321,6 +317,7 @@ pub(super) async fn run_tui(
     )?;
 
     let mut state: Option<ReplState> = Some(ReplState::new(data_dir, skills_dir, mcp_config)?);
+    state.as_mut().expect("initialized state").execution_budget = execution_budget;
     // Resolution steps 4-6: a single configured provider was already selected
     // automatically. Several providers open the `/model` picker and none opens
     // the login flow before any user input.
@@ -350,6 +347,7 @@ pub(super) async fn run_tui(
     let mut active_turn: Option<ActiveTurn> = None;
     let mut force_redraw = true;
 
+    drop(startup_timer);
     'outer: loop {
         let (scroll_width, scroll_height) = crossterm::terminal::size()?;
         let visible_rows = live_height
@@ -823,7 +821,7 @@ fn start_turn(
     } else {
         Arc::new(ChannelApproval {
             tx: tx.clone(),
-            permissions: tokio::sync::Mutex::new(owned_state.permissions.clone()),
+            permissions: owned_state.permissions.clone(),
         })
     };
     let prompt = prompt.to_owned();
@@ -1116,5 +1114,31 @@ mod tests {
         assert!(pane.slash().is_open());
         terminal.draw(|frame| render(frame, &app, &pane)).unwrap();
         assert!(pane.popup_height() > 0);
+    }
+    #[tokio::test]
+    async fn runtime_permission_handles_see_ui_edits_and_use_metadata() {
+        let permissions = PermissionStore::default();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let approval = ChannelApproval {
+            tx,
+            permissions: permissions.clone(),
+        };
+        permissions.set("process", PermissionDecision::Allow);
+        permissions.set("mcp", PermissionDecision::Deny);
+        let metadata = tool::ToolPermission {
+            capability: tool::Capability::Mcp,
+            safety: SafetyLevel::Safe,
+        };
+        assert!(
+            !approval
+                .approve("name-with-no-prefix", &serde_json::json!({}), metadata)
+                .await
+        );
+        permissions.set("mcp", PermissionDecision::Allow);
+        assert!(
+            approval
+                .approve("name-with-no-prefix", &serde_json::json!({}), metadata)
+                .await
+        );
     }
 }

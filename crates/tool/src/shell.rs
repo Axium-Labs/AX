@@ -36,6 +36,10 @@ impl Tool for ShellTool {
         })
     }
 
+    fn capability(&self, _input: &Value) -> crate::Capability {
+        crate::Capability::Shell
+    }
+
     fn safety(&self, _input: &Value) -> SafetyLevel {
         SafetyLevel::RequiresApproval
     }
@@ -63,6 +67,7 @@ impl Tool for ShellTool {
         };
 
         let output = command
+            .kill_on_drop(true)
             .stdin(Stdio::null())
             .output()
             .await

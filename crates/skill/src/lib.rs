@@ -183,14 +183,15 @@ impl SkillCatalog {
 
     /// Selects the highest-scoring available skill without loading instructions.
     #[must_use]
-    pub fn route<'a>(
+    pub fn route_candidates<'a>(
         &self,
         input: &str,
         available_tools: impl IntoIterator<Item = &'a str>,
-    ) -> Option<SkillMatch> {
+    ) -> Vec<SkillMatch> {
         let input = input.to_lowercase();
         let available = available_tools.into_iter().collect::<HashSet<_>>();
-        self.skills
+        let mut candidates = self
+            .skills
             .values()
             .filter(|skill| {
                 skill
@@ -208,16 +209,38 @@ impl SkillCatalog {
                         !keyword.trim().is_empty() && input.contains(&keyword.to_lowercase())
                     })
                     .count();
+                let score = score * 3
+                    + usize::from(input.contains(&skill.metadata.name.to_lowercase())) * 5
+                    + skill
+                        .metadata
+                        .description
+                        .split_whitespace()
+                        .filter(|term| term.len() >= 4 && input.contains(&term.to_lowercase()))
+                        .count();
                 (score > 0).then(|| SkillMatch {
                     name: skill.metadata.name.clone(),
                     score,
                 })
             })
-            .max_by(|left, right| {
-                left.score
-                    .cmp(&right.score)
-                    .then_with(|| right.name.cmp(&left.name))
-            })
+            .collect::<Vec<_>>();
+        candidates.sort_by(|left, right| {
+            right
+                .score
+                .cmp(&left.score)
+                .then_with(|| left.name.cmp(&right.name))
+        });
+        candidates
+    }
+
+    #[must_use]
+    pub fn route<'a>(
+        &self,
+        input: &str,
+        available_tools: impl IntoIterator<Item = &'a str>,
+    ) -> Option<SkillMatch> {
+        self.route_candidates(input, available_tools)
+            .into_iter()
+            .next()
     }
 
     /// Loads `instructions.md` for one already-indexed skill.
@@ -328,7 +351,7 @@ mod tests {
             .route("compile this Rust project", ["shell", "filesystem"])
             .expect("coding skill should match");
         assert_eq!(matched.name, "coding");
-        assert_eq!(matched.score, 2);
+        assert_eq!(matched.score, 6);
         assert_eq!(
             catalog
                 .load(&matched.name)
@@ -336,5 +359,15 @@ mod tests {
                 .instructions,
             "Keep changes small."
         );
+    }
+    #[test]
+    fn returns_multiple_candidates_without_loading_instruction_files() {
+        let temp = TempSkills::new();
+        for name in ["coding", "testing"] {
+            temp.add(name,&format!("name = \"{name}\"\ndescription = \"Rust workflow\"\ntrigger_keywords = [\"rust\"]\nrequired_tools = [\"shell\"]"),None);
+        }
+        let catalog = SkillCatalog::index(&temp.root).unwrap();
+        assert_eq!(catalog.route_candidates("rust", ["shell"]).len(), 2);
+        assert!(catalog.route_candidates("rust", ["filesystem"]).is_empty());
     }
 }

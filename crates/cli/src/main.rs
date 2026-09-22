@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, HashSet},
+    collections::HashSet,
     fs,
     io::Write,
     num::NonZeroUsize,
@@ -21,12 +21,12 @@ use skill::SkillCatalog;
 use tool::{FilesystemTool, ShellTool, ToolRegistry};
 
 mod config;
+mod memory_context;
 mod model_selection;
 mod tui;
 use model_selection::ModelResolution;
 use tui::run_tui;
 
-const SESSION_CONTEXT_LIMIT: u32 = 200;
 const SKILL_CONTEXT_PREFIX: &str = "[ax-skill:";
 
 #[derive(Parser)]
@@ -55,6 +55,14 @@ struct Cli {
     mcp_config: Option<PathBuf>,
     #[arg(long, global = true)]
     allow_dangerous: bool,
+    #[arg(long, global = true, default_value = "64")]
+    max_steps: NonZeroUsize,
+    #[arg(long, global = true, default_value = "128")]
+    max_tool_calls: NonZeroUsize,
+    #[arg(long, global = true, default_value = "600")]
+    turn_timeout_secs: NonZeroUsize,
+    #[arg(long, global = true, default_value = "120")]
+    tool_timeout_secs: NonZeroUsize,
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -94,78 +102,7 @@ struct ModelSelection {
     supports_tools: bool,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum PermissionDecision {
-    Allow,
-    Ask,
-    Deny,
-}
-
-impl std::fmt::Display for PermissionDecision {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(match self {
-            Self::Allow => "Allow",
-            Self::Ask => "Ask",
-            Self::Deny => "Deny",
-        })
-    }
-}
-
-#[derive(Clone, Debug)]
-struct PermissionConfig {
-    policies: BTreeMap<String, PermissionDecision>,
-}
-
-impl Default for PermissionConfig {
-    fn default() -> Self {
-        Self {
-            policies: [
-                ("shell", PermissionDecision::Ask),
-                ("filesystem-write", PermissionDecision::Ask),
-                ("filesystem-read", PermissionDecision::Allow),
-                ("network", PermissionDecision::Allow),
-                ("mcp", PermissionDecision::Ask),
-                ("process", PermissionDecision::Ask),
-            ]
-            .into_iter()
-            .map(|(key, value)| (key.to_owned(), value))
-            .collect(),
-        }
-    }
-}
-
-impl PermissionConfig {
-    fn get(&self, capability: &str) -> PermissionDecision {
-        self.policies
-            .get(capability)
-            .copied()
-            .unwrap_or(PermissionDecision::Ask)
-    }
-    fn set(&mut self, capability: impl Into<String>, decision: PermissionDecision) {
-        self.policies.insert(capability.into(), decision);
-    }
-    fn capability_for(tool: &str, input: &serde_json::Value) -> &'static str {
-        if tool == "shell" {
-            "shell"
-        } else if tool == "filesystem"
-            && input
-                .get("operation")
-                .and_then(serde_json::Value::as_str)
-                .is_some_and(|op| matches!(op, "write" | "delete" | "move" | "copy"))
-        {
-            "filesystem-write"
-        } else if tool == "filesystem" {
-            "filesystem-read"
-        } else if tool.contains("::") {
-            "mcp"
-        } else {
-            "process"
-        }
-    }
-    fn for_tool(&self, tool: &str, input: &serde_json::Value) -> PermissionDecision {
-        self.get(Self::capability_for(tool, input))
-    }
-}
+use tool::{PermissionDecision, PermissionStore};
 
 impl ModelSelection {
     const fn context_capacity(&self) -> usize {
@@ -184,6 +121,9 @@ struct ReplState {
     skills_dir: PathBuf,
     mcp_config: PathBuf,
     store: Option<MemoryStore>,
+    global_store: Option<MemoryStore>,
+    memory_scopes_migrated: bool,
+    project_id: String,
     skill_catalog: Option<SkillCatalog>,
     mcp_manager: Option<Arc<tokio::sync::Mutex<McpManager>>>,
     mcp_tools: Vec<McpToolProxy>,
@@ -191,12 +131,15 @@ struct ReplState {
     current_session: Option<Session>,
     loaded_messages: Vec<Message>,
     runtime: Option<AgentKernel>,
-    permissions: PermissionConfig,
+    permissions: PermissionStore,
+    execution_budget: runtime_core::ExecutionBudget,
 }
 
 impl ReplState {
     fn new(data_dir: PathBuf, skills_dir: PathBuf, mcp_config: Option<PathBuf>) -> Result<Self> {
         migrate_legacy_project_auth(&data_dir)?;
+        fs::create_dir_all(&data_dir)?;
+        let project_id = fs::canonicalize(&data_dir)?.to_string_lossy().into_owned();
         let database = database_path(&data_dir);
         let mcp_config = mcp_config.unwrap_or_else(|| data_dir.join("mcp.toml"));
         let store = if database.exists() {
@@ -211,6 +154,9 @@ impl ReplState {
             skills_dir,
             mcp_config,
             store,
+            global_store: None,
+            memory_scopes_migrated: false,
+            project_id,
             skill_catalog: None,
             mcp_manager: None,
             mcp_tools: Vec::new(),
@@ -218,7 +164,8 @@ impl ReplState {
             current_session: None,
             loaded_messages: Vec::new(),
             runtime: None,
-            permissions: PermissionConfig::default(),
+            permissions: PermissionStore::default(),
+            execution_budget: runtime_core::ExecutionBudget::default(),
         })
     }
 
@@ -242,6 +189,7 @@ impl ReplState {
 
     fn create_session(&mut self, title: &str) -> Result<()> {
         let session = self.store()?.create_session(title)?;
+        self.permissions.reset_session();
         self.current_session = Some(session);
         self.loaded_messages.clear();
         self.active_skills.clear();
@@ -256,36 +204,25 @@ impl ReplState {
         Ok(())
     }
 
-    fn open_session(&mut self, id: &str) -> Result<bool> {
+    fn open_session(&mut self, id: &str, context_budget: usize) -> Result<bool> {
         let session = self.store()?.session(id)?;
         let Some(session) = session else {
             return Ok(false);
         };
-        let mut stored = self
-            .store()?
-            .load_messages(id, None, SESSION_CONTEXT_LIMIT)?;
-        let recent_ids = stored
-            .iter()
-            .map(|message| message.id)
-            .collect::<HashSet<_>>();
-        stored.extend(
-            self.store()?
-                .load_agent_state_messages(id)?
-                .into_iter()
-                .filter(|message| !recent_ids.contains(&message.id)),
-        );
-        stored.sort_by_key(|message| message.id);
+        let stored = self.store()?.load_context_messages(id)?;
         let summary = self.store()?.session_summary(id)?;
         self.loaded_messages = summary
             .map(|summary| Message::system(format!("[memory-summary]\n{summary}")))
             .into_iter()
             .chain(stored.iter().map(restore_message))
             .collect();
+        self.loaded_messages = runtime_core::select_context(&self.loaded_messages, context_budget);
         self.active_skills = self
             .loaded_messages
             .iter()
             .filter_map(active_skill_name)
             .collect();
+        self.permissions.reset_session();
         self.current_session = Some(session);
         self.runtime = None;
         Ok(true)
@@ -376,33 +313,38 @@ impl ReplState {
             .ok_or_else(|| anyhow!("skill catalog was not initialized"))
     }
 
-    fn route_skill(&mut self, prompt: &str) -> Result<Option<Message>> {
-        let available_tools = tools(&self.mcp_tools)
+    fn route_skills(&mut self, prompt: &str) -> Result<Vec<Message>> {
+        let mut available_tools = tools(&self.mcp_tools)
             .names()
             .into_iter()
             .map(str::to_owned)
             .collect::<Vec<_>>();
-        let matched = self
+        available_tools.push("mcp".to_owned());
+        let candidates = self
             .skills()?
-            .route(prompt, available_tools.iter().map(String::as_str));
-        let Some(matched) = matched else {
-            return Ok(None);
-        };
-        if self.active_skills.contains(&matched.name) {
-            return Ok(None);
-        }
-        let loaded = self.skills()?.load(&matched.name)?;
-        self.active_skills.insert(matched.name.clone());
-        eprintln!("[skill:{}] loaded", matched.name);
-        Ok(Some(Message {
-            role: Role::System,
-            content: format!(
+            .route_candidates(prompt, available_tools.iter().map(String::as_str));
+        let mut messages = Vec::new();
+        let mut remaining_chars = 12_000;
+        for matched in candidates {
+            if self.active_skills.contains(&matched.name) {
+                continue;
+            }
+            let loaded = self.skills()?.load(&matched.name)?;
+            let size = loaded.instructions.chars().count();
+            if size > remaining_chars {
+                continue;
+            }
+            remaining_chars -= size;
+            self.active_skills.insert(matched.name.clone());
+            messages.push(Message::system(format!(
                 "{SKILL_CONTEXT_PREFIX}{}]\n{}",
                 loaded.metadata.name, loaded.instructions
-            ),
-            tool_call_id: None,
-            tool_calls: Vec::new(),
-        }))
+            )));
+            if messages.len() == 3 {
+                break;
+            }
+        }
+        Ok(messages)
     }
 
     fn mcp(&mut self) -> Result<Arc<tokio::sync::Mutex<McpManager>>> {
@@ -424,6 +366,7 @@ impl ReplState {
     }
 
     fn reset_new_session(&mut self) {
+        self.permissions.reset_session();
         self.current_session = None;
         self.loaded_messages.clear();
         self.active_skills.clear();
@@ -473,6 +416,8 @@ fn tools(mcp_tools: &[McpToolProxy]) -> ToolRegistry {
     let mut registry = ToolRegistry::new();
     registry.register(ShellTool);
     registry.register(FilesystemTool);
+    registry.register(tool::PatchTool);
+    registry.register(tool::SearchTool);
     for tool in mcp_tools {
         registry.register(tool.clone());
     }
@@ -597,7 +542,15 @@ fn render_event(event: AgentEvent) {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    let startup_timer = tool::telemetry::Timer::new("startup.resolve");
     let cli = Cli::parse();
+    let budget = runtime_core::ExecutionBudget {
+        max_steps: cli.max_steps.get(),
+        max_tool_calls: cli.max_tool_calls.get(),
+        turn_timeout_secs: cli.turn_timeout_secs.get() as u64,
+        tool_timeout_secs: cli.tool_timeout_secs.get() as u64,
+    };
+    drop(startup_timer);
     let auth_path = ax_auth_path();
     let approval: Arc<dyn ApprovalPolicy> = if cli.allow_dangerous {
         Arc::new(AllowAll)
@@ -609,6 +562,7 @@ async fn main() -> Result<()> {
         Some(Command::Run { ref prompt }) => {
             let selection = model_selection::require_resolved(&cli)?;
             let mut state = ReplState::new(cli.data_dir, cli.skills_dir, cli.mcp_config)?;
+            state.execution_budget = budget;
             run_prompt(&mut state, &selection, approval, prompt).await?;
         }
         Some(Command::Agents {
@@ -616,7 +570,8 @@ async fn main() -> Result<()> {
             concurrency,
         }) => {
             let selection = model_selection::require_resolved(&cli)?;
-            let template = kernel(&selection, approval, Vec::new(), &[], &auth_path)?;
+            let template = kernel(&selection, approval, Vec::new(), &[], &auth_path)?
+                .with_execution_budget(budget);
             let tasks = prompts
                 .iter()
                 .enumerate()
@@ -645,6 +600,7 @@ async fn main() -> Result<()> {
                 cli.mcp_config,
                 cli.allow_dangerous,
                 cli.codex_auth.clone(),
+                budget,
             )
             .await?;
         }
@@ -681,18 +637,19 @@ where
             &ax_auth_path(),
         )?;
         state.ensure_session(prompt)?;
-        state.runtime = Some(runtime);
+        state.runtime = Some(
+            runtime
+                .with_tool(mcp::McpGateway::new(state.mcp()?))
+                .with_execution_budget(state.execution_budget),
+        );
     } else {
         state.ensure_session(prompt)?;
     }
-    if let Some(skill_message) = state.route_skill(prompt)? {
-        state.persist_messages(std::slice::from_ref(&skill_message))?;
-        state
-            .runtime
-            .as_mut()
-            .ok_or_else(|| anyhow!("agent runtime was not initialized"))?
-            .push_context(skill_message);
-    }
+    state
+        .runtime
+        .as_mut()
+        .expect("runtime initialized")
+        .set_context("[retrieved-memory]", None);
     let compression = state
         .runtime
         .as_mut()
@@ -701,13 +658,29 @@ where
         .await?;
     if let Some(compression) = compression {
         let session_id = state.current_session_id()?.to_owned();
-        state.store()?.replace_old_messages_with_summary(
+        state.store()?.save_context_summary(
             &session_id,
             u32::try_from(compression.retained_messages).unwrap_or(u32::MAX),
             &compression.summary,
             compression.removed_messages,
         )?;
     }
+    let context_timer = tool::telemetry::Timer::new("context.prepare");
+    let memory_context = state.memory_context(prompt)?;
+    state
+        .runtime
+        .as_mut()
+        .expect("runtime initialized")
+        .set_context("[retrieved-memory]", memory_context);
+    for skill_message in state.route_skills(prompt)? {
+        state.persist_messages(std::slice::from_ref(&skill_message))?;
+        state
+            .runtime
+            .as_mut()
+            .ok_or_else(|| anyhow!("agent runtime was not initialized"))?
+            .push_context(skill_message);
+    }
+    drop(context_timer);
     let runtime = state
         .runtime
         .as_mut()

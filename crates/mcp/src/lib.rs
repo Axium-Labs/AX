@@ -43,3 +43,6 @@ pub enum McpError {
     #[error("MCP response is invalid: {0}")]
     InvalidResponse(String),
 }
+
+mod gateway;
+pub use gateway::McpGateway;

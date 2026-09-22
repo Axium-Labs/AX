@@ -38,6 +38,14 @@ impl Tool for FilesystemTool {
         })
     }
 
+    fn capability(&self, input: &Value) -> crate::Capability {
+        if input.get("operation").and_then(Value::as_str) == Some("write") {
+            crate::Capability::FilesystemWrite
+        } else {
+            crate::Capability::FilesystemRead
+        }
+    }
+
     fn safety(&self, input: &Value) -> SafetyLevel {
         if input.get("operation").and_then(Value::as_str) == Some("write") {
             SafetyLevel::RequiresApproval

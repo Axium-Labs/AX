@@ -1,9 +1,16 @@
 # Copy this file to .ax/mcp.toml, or pass --mcp-config <path>.
+#
+# `description` and `capabilities` are shown to the model through the
+# always-on MCP capability catalog *without* connecting to the server, so
+# the model can discover what a sleeping/disabled server offers before
+# spending a real connection on `list_tools`/`call`.
 
 [servers.local-files]
 transport = "stdio"
 command = "your-mcp-server"
 args = ["--stdio"]
+description = "Local filesystem indexer and search"
+capabilities = ["search", "read"]
 protocol_version = "2026-07-28"
 request_timeout_secs = 30
 
@@ -11,10 +18,13 @@ request_timeout_secs = 30
 transport = "http"
 url = "https://example.com/mcp"
 headers = { Authorization = "Bearer replace-me" }
+description = "Project issue tracker"
+capabilities = ["issues", "tasks"]
 enabled = false
 
 [servers.custom-websocket]
 transport = "websocket"
 url = "wss://example.com/mcp"
+description = "Realtime collaboration events"
+capabilities = ["events"]
 enabled = false
-

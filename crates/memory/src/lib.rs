@@ -3,6 +3,9 @@
 //! Opening the store and running its small migrations are explicit operations;
 //! merely linking this crate performs no filesystem or database work.
 
+mod scoped;
+pub use scoped::{MemoryRecord, MemoryScope, extract_user_memories, retrieve};
+
 use std::path::Path;
 
 use rusqlite::{Connection, OptionalExtension, params};
@@ -203,6 +206,20 @@ impl MemoryStore {
              );
              PRAGMA user_version = 2;",
         )?;
+        let has_watermark: bool = connection.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('session_summaries') WHERE name = 'through_message_id'", [], |row| row.get::<_, i64>(0)
+        )? > 0;
+        if !has_watermark {
+            connection.execute("ALTER TABLE session_summaries ADD COLUMN through_message_id INTEGER NOT NULL DEFAULT 0", [])?;
+        }
+        connection.execute_batch(
+            "CREATE TABLE IF NOT EXISTS scoped_memories (
+            scope TEXT NOT NULL CHECK(scope IN ('global','project','session')), owner TEXT NOT NULL,
+            key TEXT NOT NULL, value TEXT NOT NULL, source TEXT NOT NULL,
+            updated_at INTEGER NOT NULL DEFAULT (unixepoch()), PRIMARY KEY(scope, owner, key));
+            CREATE TABLE IF NOT EXISTS memory_migrations (category TEXT PRIMARY KEY, migrated_at INTEGER NOT NULL DEFAULT (unixepoch()));
+            PRAGMA user_version = 4;",
+        )?;
         Ok(Self { connection })
     }
 
@@ -281,10 +298,14 @@ impl MemoryStore {
     ///
     /// Returns an error when the deletion fails.
     pub fn delete_session(&self, id: &str) -> Result<bool, MemoryError> {
-        Ok(self
-            .connection
-            .execute("DELETE FROM sessions WHERE id = ?1", [id])?
-            == 1)
+        let transaction = self.connection.unchecked_transaction()?;
+        transaction.execute(
+            "DELETE FROM scoped_memories WHERE scope='session' AND owner=?1",
+            [id],
+        )?;
+        let deleted = transaction.execute("DELETE FROM sessions WHERE id=?1", [id])? == 1;
+        transaction.commit()?;
+        Ok(deleted)
     }
 
     /// Appends one message and marks its session as recently updated.
@@ -385,12 +406,12 @@ impl MemoryStore {
             .map_err(MemoryError::from)
     }
 
-    /// Replaces all but the newest `keep_latest` messages with one session summary.
+    /// Saves a context summary and coverage watermark without deleting any history.
     ///
     /// # Errors
     ///
     /// Returns an error when the compaction transaction fails.
-    pub fn replace_old_messages_with_summary(
+    pub fn save_context_summary(
         &mut self,
         session_id: &str,
         keep_latest: u32,
@@ -398,30 +419,71 @@ impl MemoryStore {
         compressed_message_count: usize,
     ) -> Result<(), MemoryError> {
         let transaction = self.connection.transaction()?;
-        transaction.execute(
-            "DELETE FROM messages
-             WHERE session_id = ?1
-               AND kind != 'agent_state'
-               AND id NOT IN (
-                   SELECT id FROM messages
-                   WHERE session_id = ?1
-                   ORDER BY id DESC
-                   LIMIT ?2
-               )",
+        let through: i64 = transaction.query_row(
+            "SELECT COALESCE(MAX(id), 0) FROM messages WHERE session_id = ?1 AND id NOT IN
+             (SELECT id FROM messages WHERE session_id = ?1 ORDER BY id DESC LIMIT ?2)",
             params![session_id, keep_latest],
+            |row| row.get(0),
         )?;
         transaction.execute(
-            "INSERT INTO session_summaries
-                 (session_id, content, compressed_message_count, updated_at)
-             VALUES (?1, ?2, ?3, unixepoch())
-             ON CONFLICT(session_id) DO UPDATE SET
-                 content = excluded.content,
-                 compressed_message_count = excluded.compressed_message_count,
-                 updated_at = excluded.updated_at",
-            params![session_id, summary, compressed_message_count],
+            "INSERT INTO session_summaries (session_id, content, compressed_message_count, updated_at, through_message_id)
+             VALUES (?1, ?2, ?3, unixepoch(), ?4)
+             ON CONFLICT(session_id) DO UPDATE SET content = excluded.content,
+             compressed_message_count = excluded.compressed_message_count, updated_at = excluded.updated_at,
+             through_message_id = MAX(session_summaries.through_message_id, excluded.through_message_id)",
+            params![session_id, summary, compressed_message_count, through],
         )?;
         transaction.commit()?;
         Ok(())
+    }
+
+    ///
+    /// # Errors
+    /// Returns an error if the database cannot be queried or updated.
+    pub fn legacy_scope_migrated(&self, category: &str) -> Result<bool, MemoryError> {
+        Ok(self
+            .connection
+            .query_row(
+                "SELECT 1 FROM memory_migrations WHERE category=?1",
+                [category],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()?
+            .is_some())
+    }
+    ///
+    /// # Errors
+    /// Returns an error if the database cannot be queried or updated.
+    pub fn mark_legacy_scope_migrated(&self, category: &str) -> Result<(), MemoryError> {
+        self.connection.execute(
+            "INSERT OR IGNORE INTO memory_migrations(category) VALUES (?1)",
+            [category],
+        )?;
+        Ok(())
+    }
+
+    /// Load uncompacted context plus persistent agent state. UI history uses `load_messages`.
+    ///
+    /// # Errors
+    /// Returns an error if the database cannot be queried or updated.
+    pub fn load_context_messages(
+        &self,
+        session_id: &str,
+    ) -> Result<Vec<StoredMessage>, MemoryError> {
+        let all = self.load_messages(session_id, None, u32::MAX)?;
+        let through: i64 = self
+            .connection
+            .query_row(
+                "SELECT through_message_id FROM session_summaries WHERE session_id = ?1",
+                [session_id],
+                |row| row.get(0),
+            )
+            .optional()?
+            .unwrap_or(0);
+        Ok(all
+            .into_iter()
+            .filter(|message| message.id > through || message.kind == MessageKind::AgentState)
+            .collect())
     }
 
     fn message(&self, id: i64) -> Result<Option<StoredMessage>, MemoryError> {
@@ -620,7 +682,7 @@ mod tests {
         );
 
         store
-            .replace_old_messages_with_summary(&session.id, 1, "summary", 1)
+            .save_context_summary(&session.id, 1, "summary", 1)
             .expect("session should compact");
         assert_eq!(
             store
@@ -645,6 +707,12 @@ mod tests {
                 .id,
             state.id
         );
+
+        assert_eq!(
+            store.load_messages(&session.id, None, 100).unwrap().len(),
+            3
+        );
+        assert_eq!(store.load_context_messages(&session.id).unwrap().len(), 2);
 
         assert!(
             store
@@ -683,6 +751,57 @@ mod tests {
                 .recall("language")
                 .expect("memory query should work")
                 .is_none()
+        );
+    }
+    #[test]
+    fn repeated_compaction_and_reopen_preserve_complete_history() {
+        let path = std::env::temp_dir().join(format!("ax-history-test-{}.sqlite3", Uuid::new_v4()));
+        let mut store = MemoryStore::open(&path).unwrap();
+        let session = store.create_session("history").unwrap();
+        for index in 0..20 {
+            store
+                .append_message(
+                    &session.id,
+                    NewMessage::text(MessageRole::User, format!("original {index}")),
+                )
+                .unwrap();
+        }
+        store
+            .save_context_summary(&session.id, 4, "first summary", 16)
+            .unwrap();
+        store
+            .save_context_summary(&session.id, 2, "second summary", 18)
+            .unwrap();
+        drop(store);
+        let store = MemoryStore::open(&path).unwrap();
+        let history = store.load_messages(&session.id, None, 100).unwrap();
+        assert_eq!(history.len(), 20);
+        assert_eq!(history[0].content, "original 0");
+        assert_eq!(store.load_context_messages(&session.id).unwrap().len(), 2);
+        assert_eq!(
+            store.session_summary(&session.id).unwrap().as_deref(),
+            Some("second summary")
+        );
+        drop(store);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn migration_from_old_summary_schema_keeps_rows() {
+        let store = MemoryStore::open_in_memory().unwrap();
+        let session = store.create_session("legacy").unwrap();
+        store.connection.execute("INSERT INTO session_summaries(session_id,content,compressed_message_count) VALUES (?1,'old summary',1)",[&session.id]).unwrap();
+        store.connection.execute_batch("ALTER TABLE session_summaries DROP COLUMN through_message_id; PRAGMA user_version = 2;").unwrap();
+        let migrated = MemoryStore::initialize(store.connection).unwrap();
+        assert_eq!(
+            migrated.session_summary(&session.id).unwrap().as_deref(),
+            Some("old summary")
+        );
+        assert!(
+            migrated
+                .load_context_messages(&session.id)
+                .unwrap()
+                .is_empty()
         );
     }
 }

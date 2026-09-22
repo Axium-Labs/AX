@@ -79,6 +79,10 @@ impl Tool for McpToolProxy {
         self.input_schema.clone()
     }
 
+    fn capability(&self, _input: &Value) -> tool::Capability {
+        tool::Capability::Mcp
+    }
+
     fn safety(&self, _input: &Value) -> SafetyLevel {
         if self.read_only {
             SafetyLevel::Safe

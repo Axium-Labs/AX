@@ -1,7 +1,14 @@
 //! Tool contracts, registry, and lightweight built-in tools.
 
 mod filesystem;
+mod patch;
+mod search;
+pub use patch::PatchTool;
+pub use search::SearchTool;
+mod permission;
 mod shell;
+pub mod telemetry;
+pub use permission::{Capability, PermissionDecision, PermissionStore, ToolPermission};
 
 use std::{collections::HashMap, sync::Arc};
 
@@ -30,12 +37,26 @@ pub enum ToolError {
     PermissionDenied(String),
 }
 
+impl From<std::io::Error> for ToolError {
+    fn from(error: std::io::Error) -> Self {
+        Self::Execution(error.to_string())
+    }
+}
+
 #[async_trait]
 pub trait Tool: Send + Sync {
     fn name(&self) -> &str;
     fn description(&self) -> &str;
     fn input_schema(&self) -> Value;
     fn safety(&self, input: &Value) -> SafetyLevel;
+    /// Permission category determined from structured operation input, never tool names.
+    fn capability(&self, input: &Value) -> Capability;
+    fn permission(&self, input: &Value) -> ToolPermission {
+        ToolPermission {
+            capability: self.capability(input),
+            safety: self.safety(input),
+        }
+    }
     async fn execute(&self, input: Value) -> Result<String, ToolError>;
 }
 

@@ -157,9 +157,7 @@ pub(crate) fn detect_configured_providers(codex_auth: Option<&PathBuf>) -> Vec<S
             push_unique(&mut configured, spec.id);
         }
     }
-    if codex_auth.is_some()
-        && OpenAiConfig::from_codex_auth(None, codex_auth.cloned()).is_ok()
-    {
+    if codex_auth.is_some() && OpenAiConfig::from_codex_auth(None, codex_auth.cloned()).is_ok() {
         push_unique(&mut configured, "openai-codex");
     }
     configured
@@ -199,10 +197,7 @@ fn local_catalog_models_in(models_dir: &Path, provider_id: &str) -> Vec<ModelInf
 
 /// A placeholder selection shown in the TUI while the user is being asked to
 /// pick a provider, so the status line and startup card have a model label.
-pub(crate) fn placeholder_for(
-    providers: &[String],
-    codex_auth: Option<PathBuf>,
-) -> ModelSelection {
+pub(crate) fn placeholder_for(providers: &[String], codex_auth: Option<PathBuf>) -> ModelSelection {
     providers
         .first()
         .and_then(|id| selection_for_provider_id(id, None, None, codex_auth).ok())
@@ -275,7 +270,8 @@ fn selection_for_provider_id(
         None => default_model_for(provider_id, &models)?,
     };
     let info = models.iter().find(|model| model.id == model_id);
-    let context_window = info.and_then(|model| (model.context_window > 0).then_some(model.context_window));
+    let context_window =
+        info.and_then(|model| (model.context_window > 0).then_some(model.context_window));
     let endpoint = info
         .and_then(|model| model.endpoint.clone())
         .or_else(|| provider_chat_endpoint(provider_id));
@@ -321,8 +317,12 @@ fn selection_from_bare_model(
         ));
     }
     if configured.len() == 1 {
-        let mut selection =
-            selection_for_provider_id(&configured[0], Some(model.to_owned()), None, cli.codex_auth.clone())?;
+        let mut selection = selection_for_provider_id(
+            &configured[0],
+            Some(model.to_owned()),
+            None,
+            cli.codex_auth.clone(),
+        )?;
         apply_cli_overrides(&mut selection, cli);
         return Ok(Some(selection));
     }
@@ -354,9 +354,11 @@ fn provider_kind_for(provider_id: &str) -> Result<ProviderKind> {
         "deepseek" => Ok(ProviderKind::Deepseek),
         "openai" => Ok(ProviderKind::Openai),
         "openai-codex" | "codex" => Ok(ProviderKind::Codex),
-        id if provider(id).is_some_and(|spec| {
-            spec.protocol == ProviderProtocol::OpenAiCompatible
-        }) => Ok(ProviderKind::Compatible),
+        id if provider(id)
+            .is_some_and(|spec| spec.protocol == ProviderProtocol::OpenAiCompatible) =>
+        {
+            Ok(ProviderKind::Compatible)
+        }
         id => Err(anyhow!(
             "'{id}' has no enabled adapter in this AX build; use the TUI /model picker"
         )),
@@ -400,8 +402,7 @@ fn is_supported_provider(provider_id: &str) -> bool {
         matches!(
             spec.protocol,
             ProviderProtocol::OpenAiCompatible | ProviderProtocol::OpenAiResponses
-        ) && (matches!(spec.id, "openai" | "openai-codex")
-            || provider_base_url(spec.id).is_some())
+        ) && (matches!(spec.id, "openai" | "openai-codex") || provider_base_url(spec.id).is_some())
     })
 }
 
@@ -459,10 +460,7 @@ mod tests {
 
     #[test]
     fn provider_cache_precedes_bundled_catalog() {
-        let root = std::env::temp_dir().join(format!(
-            "ax-model-dir-cache-{}",
-            std::process::id()
-        ));
+        let root = std::env::temp_dir().join(format!("ax-model-dir-cache-{}", std::process::id()));
         fs::create_dir_all(&root).unwrap();
         fs::write(
             root.join("deepseek.json"),
@@ -483,10 +481,8 @@ mod tests {
 
     #[test]
     fn bundled_catalog_backs_unknown_provider() {
-        let root = std::env::temp_dir().join(format!(
-            "ax-model-dir-bundled-{}",
-            std::process::id()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("ax-model-dir-bundled-{}", std::process::id()));
         fs::create_dir_all(&root).unwrap();
         fs::write(
             root.join("pi-catalog.json"),
@@ -528,7 +524,10 @@ mod tests {
             default_model_for("deepseek", &models).unwrap(),
             DEEPSEEK_FALLBACK_MODEL
         );
-        assert_eq!(default_model_for("deepseek", &[]).unwrap(), DEEPSEEK_FALLBACK_MODEL);
+        assert_eq!(
+            default_model_for("deepseek", &[]).unwrap(),
+            DEEPSEEK_FALLBACK_MODEL
+        );
         assert!(default_model_for("groq", &[]).is_err());
     }
 
@@ -551,10 +550,12 @@ mod tests {
             loaded.model_config().unwrap().reasoning_effort.as_deref(),
             Some("high")
         );
-        assert!(AxConfig::load_from(&root.join("missing.toml"))
-            .unwrap()
-            .model_config()
-            .is_none());
+        assert!(
+            AxConfig::load_from(&root.join("missing.toml"))
+                .unwrap()
+                .model_config()
+                .is_none()
+        );
         fs::remove_dir_all(root).unwrap();
     }
 }

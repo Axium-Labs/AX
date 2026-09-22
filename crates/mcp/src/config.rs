@@ -38,6 +38,10 @@ impl McpConfig {
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct ServerConfig {
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub capabilities: Vec<String>,
     #[serde(default = "enabled")]
     pub enabled: bool,
     #[serde(default = "current_protocol")]

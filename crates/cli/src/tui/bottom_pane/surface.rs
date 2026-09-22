@@ -33,6 +33,7 @@ pub struct SurfaceView {
     items: Vec<SurfaceItem>,
     footer: &'static str,
     selected: usize,
+    scroll: u16,
     filter: String,
     action: Option<ModalAction>,
 }
@@ -53,6 +54,7 @@ impl SurfaceView {
             items,
             footer,
             selected: 0,
+            scroll: 0,
             filter: String::new(),
             action: None,
         })
@@ -64,8 +66,9 @@ impl SurfaceView {
             style: SurfaceStyle::InfoPanel,
             intro: lines,
             items: Vec::new(),
-            footer: "Esc back",
+            footer: "↑↓ / PgUp PgDn scroll · Esc back",
             selected: 0,
+            scroll: 0,
             filter: String::new(),
             action: None,
         })
@@ -108,6 +111,19 @@ impl PaneView for SurfaceView {
         }
         match key.code {
             KeyCode::Esc => ViewOutcome::Cancelled,
+            KeyCode::Down | KeyCode::PageDown if self.style == SurfaceStyle::InfoPanel => {
+                self.scroll = self
+                    .scroll
+                    .saturating_add(if key.code == KeyCode::PageDown { 10 } else { 1 })
+                    .min(u16::try_from(self.intro.len().saturating_sub(1)).unwrap_or(u16::MAX));
+                ViewOutcome::Continue
+            }
+            KeyCode::Up | KeyCode::PageUp if self.style == SurfaceStyle::InfoPanel => {
+                self.scroll =
+                    self.scroll
+                        .saturating_sub(if key.code == KeyCode::PageUp { 10 } else { 1 });
+                ViewOutcome::Continue
+            }
             KeyCode::Up if !self.visible().is_empty() => {
                 self.selected = self
                     .selected
@@ -211,6 +227,7 @@ impl PaneView for SurfaceView {
         )));
         lines.push(Line::from(Span::styled(self.footer, theme::dim())));
         Paragraph::new(lines)
+            .scroll((self.scroll, 0))
             .style(Style::default().bg(theme::CANVAS_BG))
             .render(area, buf);
     }
