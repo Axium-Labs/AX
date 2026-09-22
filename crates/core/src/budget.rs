@@ -24,6 +24,10 @@ impl ContextBudget {
     /// Tokens carved out of the usable budget for retrieved long-term memory
     /// facts.
     pub const MEMORY_RESERVE_TOKENS: usize = 200;
+    /// Share of the history budget available to the persisted session
+    /// summary and other restored system state when a session is reopened;
+    /// the remainder is reserved for verbatim recent messages.
+    pub const SESSION_SUMMARY_SHARE_PERCENT: u8 = 50;
 
     #[must_use]
     pub const fn new(context_window: usize, tool_schema_tokens: usize) -> Self {
@@ -51,13 +55,32 @@ impl ContextBudget {
         self.usable().saturating_mul(usize::from(percent.min(100))) / 100
     }
 
-    /// Budget for restoring persisted conversation history when a session is
-    /// (re)opened, after also carving out room for skills and memory.
+    /// Total budget for restoring persisted conversation history when a
+    /// session is (re)opened, after also carving out room for skills and
+    /// memory. Split between [`Self::session_summary_budget`] and
+    /// [`Self::recent_messages_budget`].
     #[must_use]
     pub const fn history_budget(&self) -> usize {
         self.usable()
             .saturating_sub(Self::SKILLS_RESERVE_TOKENS)
             .saturating_sub(Self::MEMORY_RESERVE_TOKENS)
+    }
+
+    /// Budget for the persisted session summary (and other restored system
+    /// state) when a session is reopened, so a large summary cannot silently
+    /// consume the entire history budget and starve recent messages.
+    #[must_use]
+    pub fn session_summary_budget(&self) -> usize {
+        self.history_budget()
+            .saturating_mul(usize::from(Self::SESSION_SUMMARY_SHARE_PERCENT))
+            / 100
+    }
+
+    /// Budget for verbatim recent conversation turns restored alongside the
+    /// session summary.
+    #[must_use]
+    pub const fn recent_messages_budget(&self) -> usize {
+        self.history_budget()
     }
 
     /// Character budget for lazily loaded skill instructions (approximating
@@ -128,5 +151,19 @@ mod tests {
         assert_eq!(budget.usable(), 0);
         assert_eq!(budget.compact_threshold(75), 0);
         assert_eq!(budget.history_budget(), 0);
+        assert_eq!(budget.session_summary_budget(), 0);
+        assert_eq!(budget.recent_messages_budget(), 0);
+    }
+
+    #[test]
+    fn session_summary_gets_only_a_share_of_the_history_budget() {
+        let budget = ContextBudget::new(100_000, 0);
+        assert_eq!(
+            budget.session_summary_budget(),
+            budget.history_budget() * usize::from(ContextBudget::SESSION_SUMMARY_SHARE_PERCENT)
+                / 100
+        );
+        assert!(budget.session_summary_budget() < budget.history_budget());
+        assert_eq!(budget.recent_messages_budget(), budget.history_budget());
     }
 }

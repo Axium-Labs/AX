@@ -682,7 +682,7 @@ fn open_session(
     selection: &ModelSelection,
 ) -> Result<()> {
     let budget = crate::context_budget(selection, &state.mcp_tools);
-    if state.open_session(id, budget.history_budget())? {
+    if state.open_session(id, &budget)? {
         let history = state
             .store()?
             .load_messages(id, None, u32::MAX)?

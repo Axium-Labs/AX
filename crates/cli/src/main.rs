@@ -34,7 +34,7 @@ const SKILL_CONTEXT_PREFIX: &str = "[ax-skill:";
 #[command(
     name = "ax",
     version,
-    about = "Lightweight native agent runtime kernel"
+    about = "A fast, lightweight AI agent for the terminal"
 )]
 struct Cli {
     /// Provider, when chosen explicitly. Otherwise AX resolves the selection
@@ -207,7 +207,7 @@ impl ReplState {
         Ok(())
     }
 
-    fn open_session(&mut self, id: &str, context_budget: usize) -> Result<bool> {
+    fn open_session(&mut self, id: &str, budget: &runtime_core::ContextBudget) -> Result<bool> {
         let session = self.store()?.session(id)?;
         let Some(session) = session else {
             return Ok(false);
@@ -219,7 +219,11 @@ impl ReplState {
             .into_iter()
             .chain(stored.iter().map(restore_message))
             .collect();
-        self.loaded_messages = runtime_core::select_context(&self.loaded_messages, context_budget);
+        self.loaded_messages = runtime_core::select_context(
+            &self.loaded_messages,
+            budget.recent_messages_budget(),
+            budget.session_summary_budget(),
+        );
         self.active_skills = self
             .loaded_messages
             .iter()

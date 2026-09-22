@@ -39,7 +39,7 @@ Provider 同时报告 context window，供 kernel 的压缩策略使用。新增
 - 受 `ExecutionBudget`（最大 model step 数、最大 Tool 调用数、单轮超时、单次 Tool 超时，均可通过 CLI flag 配置）约束的 model → tool → model Agent Loop；预算或超时触发时，会为悬挂的 Tool Call 补上占位结果，保持消息记录合法；
 - `AgentEvent` 流，包括 token delta、Tool 状态和压缩事件；
 - Context 管理：`context::select_context` 按模型 token 预算（而非固定消息条数）挑选恢复到上下文的历史消息，并保证不切断未完成的 Tool 调用轮次；
-- `ContextBudget`（`runtime-core::budget`）：把 context window 拆成真正可用的空间——先减去回复预留（`RESERVED_OUTPUT_TOKENS`）和当前 Tool schema 的估算 token 数，再从剩余空间里为 Skill 说明和检索到的记忆各保留一部分（`SKILLS_RESERVE_TOKENS`/`MEMORY_RESERVE_TOKENS`），才得到压缩阈值和历史恢复预算。所有和上下文空间相关的限制都从这一个结构推导，不再各模块各自硬编码固定字符数或对原始 context window 取固定比例；
+- `ContextBudget`（`runtime-core::budget`）：把 context window 拆成真正可用的空间，每一层都是显式命名的方法/常量：回复预留（`RESERVED_OUTPUT_TOKENS`）和当前 Tool schema 估算 token 数从 context window 中减去得到 `usable()`；再从中为 Skill 说明和检索到的记忆各保留一部分（`SKILLS_RESERVE_TOKENS`/`MEMORY_RESERVE_TOKENS`）得到 `history_budget()`；`history_budget()` 又按 `SESSION_SUMMARY_SHARE_PERCENT` 拆分为 `session_summary_budget()`（恢复 session 时的持久化摘要/系统状态）和 `recent_messages_budget()`（逐字保留的最近对话），防止过大的 summary 独占整个预算而挤掉最近消息；`compact_threshold()` 则直接对 `usable()` 取百分比。所有和上下文空间相关的限制（max output、Tool schema、system/runtime context、memory、skills、session summary、recent messages）都从这一个结构推导，不再各模块各自硬编码固定字符数或对原始 context window 取固定比例；
 - 基于模型容量的摘要压缩：压缩只影响“喂给模型的上下文”，压缩阈值按 `ContextBudget` 计算的可用空间而非原始 context window 取比例；只在 `session_summaries`（每 session 一行）upsert 最新累积摘要并推进覆盖水位线，从不删除 `messages` 表中的历史原文；
 - `AgentSupervisor`，以独立上下文和有界并发运行任务。
 
