@@ -20,8 +20,29 @@ little as possible by design.
 
 ## Quick Start
 
+### Installing and running AX
+
+Mac or Linux:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Axium-Labs/AX/main/scripts/install.sh | sh
+```
+
+Windows:
+
+```powershell
+powershell -ExecutionPolicy Bypass -c "irm https://raw.githubusercontent.com/Axium-Labs/AX/main/scripts/install.ps1 | iex"
+```
+
+Then simply run:
+
 ```text
-ax          # start the terminal UI
+ax
+```
+
+Your first session:
+
+```text
 /login      # sign in with a provider (Codex OAuth or an API key)
 /model      # pick a model
 hello       # just start typing
@@ -32,15 +53,32 @@ remembered for next time.
 
 ## Installation
 
-### Windows (GitHub Releases)
+The installer fetches the latest release from GitHub, verifies the archive
+against the release's `SHA256SUMS`, and installs a single `ax` / `ax.exe`
+binary:
 
-Download the latest `ax.exe` from the
-[Releases](https://github.com/Axium-Labs/AX/releases) page, then run it from
-any terminal:
+- **macOS / Linux** — installs to `~/.local/bin` by default and prints a
+  PATH hint if that directory is not already on your PATH.
+- **Windows** — installs to `%LOCALAPPDATA%\Programs\AX\bin` by default and
+  adds it to your user PATH (only if it is not there already).
+
+Both installers accept two environment variables:
+
+| Variable | Purpose |
+|---|---|
+| `AX_VERSION` | Install a specific release tag instead of latest (e.g. `AX_VERSION=v0.1.0`) |
+| `AX_INSTALL_DIR` | Override the install directory |
+
+```bash
+AX_VERSION=v0.1.0 curl -fsSL https://raw.githubusercontent.com/Axium-Labs/AX/main/scripts/install.sh | sh
+AX_INSTALL_DIR="$HOME/bin" curl -fsSL https://raw.githubusercontent.com/Axium-Labs/AX/main/scripts/install.sh | sh
+```
 
 ```powershell
-.\ax.exe
+$env:AX_VERSION = "v0.1.0"; irm https://raw.githubusercontent.com/Axium-Labs/AX/main/scripts/install.ps1 | iex
 ```
+
+## Development
 
 ### Build from source
 
@@ -75,7 +113,7 @@ To pick a provider explicitly from the command line:
 
 ```bash
 ax --provider deepseek
-ax --provider openai-codex --model gpt-5.6-sol
+ax --provider openai-codex --model <model-id>
 ax run "explain this repo" --provider deepseek
 ```
 

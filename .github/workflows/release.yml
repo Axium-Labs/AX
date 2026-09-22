@@ -1,0 +1,112 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            asset: ax-x86_64-pc-windows-msvc.zip
+          - target: aarch64-pc-windows-msvc
+            os: windows-11-arm
+            asset: ax-aarch64-pc-windows-msvc.zip
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+            asset: ax-x86_64-unknown-linux-musl.tar.gz
+            zigbuild: true
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-latest
+            asset: ax-aarch64-unknown-linux-musl.tar.gz
+            zigbuild: true
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            asset: ax-x86_64-apple-darwin.tar.gz
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            asset: ax-aarch64-apple-darwin.tar.gz
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install zig and cargo-zigbuild (Linux musl)
+        if: matrix.zigbuild == true
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-zigbuild,zig
+
+      - name: Build
+        shell: bash
+        env:
+          # Keep macOS binaries usable on older systems.
+          MACOSX_DEPLOYMENT_TARGET: "11.0"
+        run: |
+          set -euo pipefail
+          if [ "${{ matrix.zigbuild }}" = "true" ]; then
+            cargo zigbuild --release --target "${{ matrix.target }}"
+          else
+            cargo build --release --target "${{ matrix.target }}"
+          fi
+
+      - name: Package asset
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "target/${{ matrix.target }}/release"
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            tar -a -c -f "$RUNNER_TEMP/${{ matrix.asset }}" ax.exe
+          else
+            tar -czf "$RUNNER_TEMP/${{ matrix.asset }}" ax
+          fi
+
+      - name: Upload asset
+        uses: actions/upload-artifact@v4
+        with:
+          name: ax-release-assets
+          path: "${{ runner.temp }}/${{ matrix.asset }}"
+          if-no-files-found: error
+
+  release:
+    name: Publish release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download assets
+        uses: actions/download-artifact@v4
+        with:
+          pattern: ax-release-assets
+          path: assets
+          merge-multiple: true
+
+      - name: Generate SHA256SUMS
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd assets
+          sha256sum ax-* > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            assets/ax-*
+            assets/SHA256SUMS
+          generate_release_notes: true
