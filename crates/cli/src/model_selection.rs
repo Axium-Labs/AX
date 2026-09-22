@@ -18,15 +18,15 @@ use std::{fs, path::Path, path::PathBuf};
 
 use anyhow::{Result, anyhow};
 use model::{
-    AuthStorage, DEEPSEEK_FALLBACK_MODEL, ModelInfo, OPENAI_FALLBACK_MODEL, OpenAiConfig,
-    PROVIDERS, ProviderProtocol, ReasoningEffort, provider, provider_base_url,
-    provider_chat_endpoint,
+    DEEPSEEK_FALLBACK_MODEL, ModelInfo, OPENAI_FALLBACK_MODEL, ProviderProtocol, ReasoningEffort,
+    provider, provider_chat_endpoint,
 };
 use serde::Deserialize;
 
 use crate::{
     Cli, ModelSelection, ProviderKind,
     config::{AxConfig, ModelConfig, ax_home},
+    providers::is_supported_provider,
 };
 
 /// Outcome of [`resolve_model_selection`]. Interactive callers decide how to
@@ -138,29 +138,11 @@ pub(crate) fn persist_model_selection(selection: &ModelSelection) -> Result<()> 
     config.save()
 }
 
-/// Providers with usable credentials, discovered purely locally: AX auth
-/// storage, conventional environment variables, and an explicit legacy Codex
-/// auth path. No network request is ever made here.
+/// Providers with usable credentials. Delegates to [`crate::providers`], the
+/// single shared definition of "configured" also used by the TUI catalog
+/// refresh, so CLI startup and `/model` never disagree.
 pub(crate) fn detect_configured_providers(codex_auth: Option<&PathBuf>) -> Vec<String> {
-    let auth = AuthStorage::new(crate::ax_auth_path());
-    let mut configured = Vec::new();
-    for id in auth.provider_ids().unwrap_or_default() {
-        if is_supported_provider(&id) {
-            push_unique(&mut configured, &id);
-        }
-    }
-    for spec in PROVIDERS {
-        if let Some(environment) = spec.environment
-            && std::env::var(environment).is_ok_and(|value| !value.is_empty())
-            && is_supported_provider(spec.id)
-        {
-            push_unique(&mut configured, spec.id);
-        }
-    }
-    if codex_auth.is_some() && OpenAiConfig::from_codex_auth(None, codex_auth.cloned()).is_ok() {
-        push_unique(&mut configured, "openai-codex");
-    }
-    configured
+    crate::providers::configured_providers(codex_auth)
 }
 
 /// Local model catalog for a provider: the per-provider refresh cache
@@ -397,21 +379,6 @@ fn is_configured(provider_id: &str, codex_auth: Option<&PathBuf>) -> bool {
         .any(|id| id == provider_id)
 }
 
-fn is_supported_provider(provider_id: &str) -> bool {
-    provider(provider_id).is_some_and(|spec| {
-        matches!(
-            spec.protocol,
-            ProviderProtocol::OpenAiCompatible | ProviderProtocol::OpenAiResponses
-        ) && (matches!(spec.id, "openai" | "openai-codex") || provider_base_url(spec.id).is_some())
-    })
-}
-
-fn push_unique(configured: &mut Vec<String>, provider_id: &str) {
-    if !configured.iter().any(|id| id == provider_id) {
-        configured.push(provider_id.to_owned());
-    }
-}
-
 fn apply_cli_overrides(selection: &mut ModelSelection, cli: &Cli) {
     if let Some(window) = cli.context_window {
         selection.context_window = Some(window.get());
@@ -446,17 +413,6 @@ mod tests {
     use std::fs;
 
     use super::*;
-
-    #[test]
-    fn supported_provider_filter_matches_builtin_adapters() {
-        assert!(is_supported_provider("deepseek"));
-        assert!(is_supported_provider("openai"));
-        assert!(is_supported_provider("openai-codex"));
-        assert!(is_supported_provider("groq"));
-        assert!(!is_supported_provider("anthropic"));
-        assert!(!is_supported_provider("amazon-bedrock"));
-        assert!(!is_supported_provider("does-not-exist"));
-    }
 
     #[test]
     fn provider_cache_precedes_bundled_catalog() {

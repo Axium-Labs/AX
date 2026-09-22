@@ -1,7 +1,7 @@
 # AX installer for Windows — one-line install from GitHub Releases.
 #
-# Usage:
-#   powershell -ExecutionPolicy Bypass -c "irm https://raw.githubusercontent.com/Axium-Labs/AX/main/scripts/install.ps1 | iex"
+# Usage (PowerShell 5.1 compatible; plain `irm ... | iex` can fail on 5.1):
+#   powershell -ExecutionPolicy Bypass -c "iex ((iwr 'https://raw.githubusercontent.com/Axium-Labs/AX/main/scripts/install.ps1' -UseBasicParsing).Content)"
 #
 # Environment:
 #   AX_VERSION       release tag to install (default: latest, e.g. v0.1.0)

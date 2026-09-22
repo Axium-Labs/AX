@@ -75,7 +75,11 @@ impl ReplState {
         Ok(self.store()?.scoped_memories(scope, &owner)?)
     }
 
-    pub(crate) fn memory_context(&mut self, prompt: &str) -> Result<Option<Message>> {
+    pub(crate) fn memory_context(
+        &mut self,
+        prompt: &str,
+        chars_budget: usize,
+    ) -> Result<Option<Message>> {
         self.migrate_memory_scopes()?;
         for (scope, key, value) in memory::extract_user_memories(prompt) {
             let owner = match scope {
@@ -107,7 +111,7 @@ impl ReplState {
                 records.insert(memory.key.clone(), memory);
             }
         }
-        let records = memory::retrieve(records.into_values().collect(), prompt, 800);
+        let records = memory::retrieve(records.into_values().collect(), prompt, chars_budget);
         if records.is_empty() {
             return Ok(None);
         }
@@ -140,12 +144,12 @@ mod tests {
     #[test]
     fn extracted_memories_are_retrieved_with_scope_precedence() {
         let mut state = state();
-        let message=state.memory_context("global: remember preference.language=English\n记住 preference.language=中文\nsession: remember preference.language=日本語").unwrap().unwrap();
+        let message=state.memory_context("global: remember preference.language=English\n记住 preference.language=中文\nsession: remember preference.language=日本語", 800).unwrap().unwrap();
         assert!(message.content.contains("日本語"));
         assert!(!message.content.contains("English"));
         state.reset_new_session();
         state.ensure_session("next").unwrap();
-        let message = state.memory_context("hello").unwrap().unwrap();
+        let message = state.memory_context("hello", 800).unwrap().unwrap();
         assert!(message.content.contains("中文"));
         assert!(!message.content.contains("日本語"));
         let project = state.memory_records(MemoryScope::Project).unwrap();
@@ -157,10 +161,13 @@ mod tests {
     #[test]
     fn natural_preference_is_extracted_and_secret_candidates_are_ignored() {
         let mut state = state();
-        let message = state.memory_context("我偏好中文回答").unwrap().unwrap();
+        let message = state
+            .memory_context("我偏好中文回答", 800)
+            .unwrap()
+            .unwrap();
         assert!(message.content.contains("我偏好中文回答"));
         state
-            .memory_context("remember api_key=secret-value")
+            .memory_context("remember api_key=secret-value", 800)
             .unwrap();
         assert_eq!(state.memory_records(MemoryScope::Project).unwrap().len(), 1);
         let directory = state.data_dir.clone();

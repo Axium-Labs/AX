@@ -7,7 +7,7 @@ A fast, lightweight AI agent for the terminal, built in Rust.
 
 AX is a small, native terminal agent. It starts fast, streams responses, and
 keeps sessions, memory, credentials and model config on your machine — no
-service to sign up for, no telemetry.
+service to sign up for, no remote telemetry.
 
 - **Rust native** — one binary, no runtime, no Node, no Docker.
 - **Fast startup** — providers, skills, MCP servers and memory load on demand.

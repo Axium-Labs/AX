@@ -110,32 +110,12 @@ fn spawn_refresh(
     });
 }
 
-/// Providers AX considers configured for the picker. This mirrors pi's
-/// `configuredProviders`: credentials explicitly stored by AX. Environment
-/// variables and another application's default auth file do not silently add
-/// providers to `/model`.
+/// Providers AX considers configured for the picker. Delegates to
+/// [`crate::providers`], the single shared definition of "configured" also
+/// used by CLI startup resolution, so `/model` and the auto-selected
+/// provider at launch never disagree.
 pub(crate) fn configured_providers(_data_dir: &Path, codex_auth: Option<&PathBuf>) -> Vec<String> {
-    let auth = AuthStorage::new(crate::ax_auth_path());
-    let stored = auth.provider_ids().unwrap_or_default();
-    let mut configured = stored
-        .into_iter()
-        .filter(|provider_id| {
-            model::provider(provider_id).is_some_and(|provider| {
-                matches!(
-                    provider.protocol,
-                    ProviderProtocol::OpenAiCompatible | ProviderProtocol::OpenAiResponses
-                ) && (matches!(provider.id, "openai" | "openai-codex")
-                    || model::provider_base_url(provider.id).is_some())
-            })
-        })
-        .collect::<Vec<_>>();
-    if codex_auth.is_some()
-        && OpenAiConfig::from_codex_auth(None, codex_auth.cloned()).is_ok()
-        && !configured.iter().any(|provider| provider == "openai-codex")
-    {
-        configured.push("openai-codex".to_owned());
-    }
-    configured
+    crate::providers::configured_providers(codex_auth)
 }
 
 fn codex_provider(

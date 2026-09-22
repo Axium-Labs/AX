@@ -191,7 +191,31 @@ fn set_private_permissions(path: &Path) -> Result<(), ModelError> {
     Ok(())
 }
 
-#[cfg(not(unix))]
+/// Restricts the credential file to the current user, mirroring Unix's
+/// `0600`. Windows has no direct equivalent of a mode bit, so this shells out
+/// to `icacls` (present on every supported Windows version) to strip
+/// inherited ACEs and grant full control solely to the current user.
+/// Best-effort: failing to tighten the ACL never fails credential storage,
+/// since the file already lives under the user's own profile directory.
+#[cfg(windows)]
+#[allow(clippy::unnecessary_wraps)]
+fn set_private_permissions(path: &Path) -> Result<(), ModelError> {
+    let Some(user) = std::env::var("USERNAME")
+        .ok()
+        .filter(|name| !name.is_empty())
+    else {
+        return Ok(());
+    };
+    let _ = std::process::Command::new("icacls")
+        .arg(path)
+        .arg("/inheritance:r")
+        .arg("/grant:r")
+        .arg(format!("{user}:F"))
+        .output();
+    Ok(())
+}
+
+#[cfg(not(any(unix, windows)))]
 #[allow(clippy::unnecessary_wraps)]
 fn set_private_permissions(_path: &Path) -> Result<(), ModelError> {
     Ok(())
@@ -213,6 +237,31 @@ mod tests {
                 .as_deref(),
             Some("stored-secret")
         );
+        fs::remove_file(path).ok();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_credential_file_denies_broad_default_groups() {
+        let path = std::env::temp_dir().join(format!("ax-auth-acl-{}.json", std::process::id()));
+        let storage = AuthStorage::new(&path);
+        storage.store_api_key("deepseek", "stored-secret").unwrap();
+
+        let output = std::process::Command::new("icacls")
+            .arg(&path)
+            .output()
+            .expect("icacls should be available on Windows");
+        let listing = String::from_utf8_lossy(&output.stdout).to_lowercase();
+        assert!(
+            !listing.contains("everyone") && !listing.contains("builtin\\users"),
+            "expected inherited broad groups to be stripped, got: {listing}"
+        );
+        let user = std::env::var("USERNAME").unwrap().to_lowercase();
+        assert!(
+            listing.contains(&user),
+            "expected the current user to retain access, got: {listing}"
+        );
+
         fs::remove_file(path).ok();
     }
 }

@@ -24,6 +24,8 @@ cli ───────────────┬──> runtime-core ──>
 
 Provider 同时报告 context window，供 kernel 的压缩策略使用。新增本地模型只需实现 trait，不需要修改 Agent Loop。
 
+凭据持久化在 `~/.ax/auth.json`：Unix 上写入后设为 `0600`；Windows 没有 mode bit，改为调用 `icacls` 移除继承的 ACE 并仅授予当前用户完全控制（尽力而为，工具不可用时不影响凭据保存本身）。
+
 ### `tool`
 
 定义 `Tool`、`ToolRegistry`、JSON Schema、`SafetyLevel`，并提供 `shell`、`filesystem`、结构化的 `patch`（多段编辑，任意一段失败则整体不写入）与 `search`（行号限定的文本检索），减少对 shell 的滥用。
@@ -37,7 +39,8 @@ Provider 同时报告 context window，供 kernel 的压缩策略使用。新增
 - 受 `ExecutionBudget`（最大 model step 数、最大 Tool 调用数、单轮超时、单次 Tool 超时，均可通过 CLI flag 配置）约束的 model → tool → model Agent Loop；预算或超时触发时，会为悬挂的 Tool Call 补上占位结果，保持消息记录合法；
 - `AgentEvent` 流，包括 token delta、Tool 状态和压缩事件；
 - Context 管理：`context::select_context` 按模型 token 预算（而非固定消息条数）挑选恢复到上下文的历史消息，并保证不切断未完成的 Tool 调用轮次；
-- 基于模型容量的摘要压缩：压缩只影响“喂给模型的上下文”，只在 `session_summaries` 追加新摘要和覆盖位置，从不删除 `messages` 表中的历史原文；
+- `ContextBudget`（`runtime-core::budget`）：把 context window 拆成真正可用的空间——先减去回复预留（`RESERVED_OUTPUT_TOKENS`）和当前 Tool schema 的估算 token 数，再从剩余空间里为 Skill 说明和检索到的记忆各保留一部分（`SKILLS_RESERVE_TOKENS`/`MEMORY_RESERVE_TOKENS`），才得到压缩阈值和历史恢复预算。所有和上下文空间相关的限制都从这一个结构推导，不再各模块各自硬编码固定字符数或对原始 context window 取固定比例；
+- 基于模型容量的摘要压缩：压缩只影响“喂给模型的上下文”，压缩阈值按 `ContextBudget` 计算的可用空间而非原始 context window 取比例；只在 `session_summaries`（每 session 一行）upsert 最新累积摘要并推进覆盖水位线，从不删除 `messages` 表中的历史原文；
 - `AgentSupervisor`，以独立上下文和有界并发运行任务。
 
 核心没有固定 system prompt。只有执行上下文压缩时使用目标明确、无人格的总结指令。
@@ -58,15 +61,17 @@ Provider 同时报告 context window，供 kernel 的压缩策略使用。新增
 
 - `sessions`：标题、创建/更新时间和消息计数；
 - `messages`：普通消息、Tool/MCP 调用和 Agent 状态（历史原文永不因压缩删除）；
-- `session_summaries`：按 `(compressed_message_count, content)` 追加的压缩摘要，恢复时叠加使用；
+- `session_summaries`：每个 session 一行，按 `session_id` upsert；每次压缩都用新的累积摘要整体覆盖 `content`（新摘要已在生成时融入了旧摘要，因此仍自包含），并用 `MAX()` 推进 `through_message_id` 水位线；恢复时只读取这一行当前摘要加上水位线之后的消息，不会叠加多份历史摘要；
 - `long_term_memory`：旧版按 key/category 保存的偏好、项目和决策（保留兼容读取）；
-- `scoped_memories`（`memory::scoped`）：显式划分 Global / Project / Session 三种存储边界，各自有独立 owner（Global 无 owner，Project 为项目路径，Session 为 session id），互不覆盖、互不泄漏。
+- `scoped_memories`（`memory::scoped`）：显式划分 Global / Project / Session 三种存储边界，各自有独立 owner（Global 无 owner，Project 为 `discover_project_root` 解析出的稳定项目根目录，Session 为 session id），互不覆盖、互不泄漏。Project owner 与 `--data-dir` 无关：`discover_project_root`（`cli::main`）从当前工作目录往上查找，优先取包含 `.git` 的目录，其次取包含常见项目标志文件（`Cargo.toml`/`package.json` 等）的目录，搜索不越过用户主目录边界，都找不到则回退到当前目录本身；`--data-dir` 只决定数据存储位置，不再参与项目身份计算。
 
 CLI 侧（`cli::memory_context`）实现 extract → retrieve → inject 闭环：从用户输入中保守提取显式记忆声明（`remember key=value`、“记住”、`我偏好...` 等自然语句前缀，排除疑似密钥/密码的内容），按 Global → Project → Session 的优先级写入对应作用域；每轮请求前按相关性和字符预算检索命中的记忆并注入模型上下文，因此长期记忆不需要用户手动重复。旧版 `long_term_memory` 数据只做一次性、幂等的作用域迁移。读取采用 session scope 和稳定分页；不会启动时加载全部历史，也没有向量数据库、Embedding 或 RAG。
 
 ### `cli`
 
 唯一 composition root。负责 clap 参数、provider 选择、SQLite/Skill/MCP 懒初始化、REPL、ratatui TUI、session 命令和权限交互。其他 crate 不依赖终端界面。
+
+`cli::providers` 是“哪些 provider 已配置”的唯一定义（AX 自己的 `auth.json`、约定环境变量、显式传入的旧版 Codex auth 路径），CLI 启动解析（`model_selection`）和 TUI 的 `/model` 目录刷新（`tui::catalog_refresh`）都委托给它，不再各自实现一份容易漂移的判断逻辑（之前的问题：只设环境变量时，CLI 启动会自动选中该 provider，但 `/model` 却显示它未配置）。
 
 ## 冷启动路径
 

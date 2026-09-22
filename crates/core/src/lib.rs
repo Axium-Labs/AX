@@ -2,7 +2,7 @@
 
 mod budget;
 mod context;
-pub use budget::ExecutionBudget;
+pub use budget::{ContextBudget, ExecutionBudget};
 pub use context::select_context;
 
 use std::{collections::VecDeque, sync::Arc};
@@ -234,11 +234,11 @@ impl AgentKernel {
     {
         let _timer = tool::telemetry::Timer::new("context.compress");
         let estimated_tokens_before = self.estimated_context_tokens();
-        let threshold = self
-            .provider
-            .context_window()
-            .saturating_mul(usize::from(self.compression.threshold_percent.min(100)))
-            / 100;
+        let budget = ContextBudget::new(
+            self.provider.context_window(),
+            estimate_tool_schema_tokens(&self.tools),
+        );
+        let threshold = budget.compact_threshold(self.compression.threshold_percent);
         let retain = self.compression.retain_recent_messages;
         if (!force && estimated_tokens_before < threshold) || self.messages.len() <= retain + 1 {
             return Ok(None);
@@ -473,6 +473,21 @@ impl AgentKernel {
 
         Err(AgentError::StepLimit(self.budget.max_steps))
     }
+}
+
+/// Estimated token cost of the JSON tool schemas sent with every model
+/// request, so context budgeting accounts for it instead of assuming
+/// tool schemas are free.
+#[must_use]
+pub fn estimate_tool_schema_tokens(tools: &ToolRegistry) -> usize {
+    tools
+        .iter()
+        .map(|tool| {
+            estimate_text_tokens(tool.name())
+                + estimate_text_tokens(tool.description())
+                + estimate_text_tokens(&tool.input_schema().to_string())
+        })
+        .sum()
 }
 
 #[must_use]

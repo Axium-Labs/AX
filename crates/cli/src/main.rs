@@ -23,6 +23,7 @@ use tool::{FilesystemTool, ShellTool, ToolRegistry};
 mod config;
 mod memory_context;
 mod model_selection;
+mod providers;
 mod tui;
 use model_selection::ModelResolution;
 use tui::run_tui;
@@ -139,7 +140,9 @@ impl ReplState {
     fn new(data_dir: PathBuf, skills_dir: PathBuf, mcp_config: Option<PathBuf>) -> Result<Self> {
         migrate_legacy_project_auth(&data_dir)?;
         fs::create_dir_all(&data_dir)?;
-        let project_id = fs::canonicalize(&data_dir)?.to_string_lossy().into_owned();
+        let project_id = discover_project_root(&std::env::current_dir()?)
+            .to_string_lossy()
+            .into_owned();
         let database = database_path(&data_dir);
         let mcp_config = mcp_config.unwrap_or_else(|| data_dir.join("mcp.toml"));
         let store = if database.exists() {
@@ -313,7 +316,7 @@ impl ReplState {
             .ok_or_else(|| anyhow!("skill catalog was not initialized"))
     }
 
-    fn route_skills(&mut self, prompt: &str) -> Result<Vec<Message>> {
+    fn route_skills(&mut self, prompt: &str, chars_budget: usize) -> Result<Vec<Message>> {
         let mut available_tools = tools(&self.mcp_tools)
             .names()
             .into_iter()
@@ -324,7 +327,7 @@ impl ReplState {
             .skills()?
             .route_candidates(prompt, available_tools.iter().map(String::as_str));
         let mut messages = Vec::new();
-        let mut remaining_chars = 12_000;
+        let mut remaining_chars = chars_budget;
         for matched in candidates {
             if self.active_skills.contains(&matched.name) {
                 continue;
@@ -378,6 +381,55 @@ fn database_path(data_dir: &Path) -> PathBuf {
     data_dir.join("memory.sqlite3")
 }
 
+/// Recognized project markers, checked when no enclosing Git repository is
+/// found. Intentionally small: this only needs to distinguish "a project
+/// lives here" from an arbitrary directory, not identify the ecosystem.
+const PROJECT_MARKERS: &[&str] = &[
+    "Cargo.toml",
+    "package.json",
+    "pyproject.toml",
+    "go.mod",
+    "pom.xml",
+    "Gemfile",
+    "composer.json",
+];
+
+/// Locates the stable project identity used for Project-scope memory,
+/// independent of `--data-dir` (which only controls where AX stores state).
+/// Prefers the enclosing Git repository, then a recognized project marker
+/// file, and falls back to `start` itself so every invocation still resolves
+/// to a concrete, stable path.
+///
+/// The search stops before the user's home directory so a dotfiles repo or a
+/// stray marker file directly under `~` never turns the entire home
+/// directory into one giant "project".
+fn discover_project_root(start: &Path) -> PathBuf {
+    let start = fs::canonicalize(start).unwrap_or_else(|_| start.to_path_buf());
+    let boundary = home_directory();
+    let candidates = start
+        .ancestors()
+        .take_while(|dir| boundary.as_deref() != Some(*dir))
+        .collect::<Vec<_>>();
+    if let Some(root) = candidates.iter().find(|dir| dir.join(".git").exists()) {
+        return (*root).to_path_buf();
+    }
+    if let Some(root) = candidates.iter().find(|dir| {
+        PROJECT_MARKERS
+            .iter()
+            .any(|marker| dir.join(marker).exists())
+    }) {
+        return (*root).to_path_buf();
+    }
+    start
+}
+
+fn home_directory() -> Option<PathBuf> {
+    std::env::var_os("USERPROFILE")
+        .or_else(|| std::env::var_os("HOME"))
+        .map(PathBuf::from)
+        .and_then(|home| fs::canonicalize(home).ok())
+}
+
 /// Global AX credential store, following pi's `~/.pi/agent/auth.json`
 /// separation from project/session state.
 fn ax_auth_path() -> PathBuf {
@@ -422,6 +474,18 @@ fn tools(mcp_tools: &[McpToolProxy]) -> ToolRegistry {
         registry.register(tool.clone());
     }
     registry
+}
+
+/// Single source of the context budget available for one turn: reserves room
+/// for the reply and the tool schemas that will actually be sent, so history
+/// restore, skill instructions, and retrieved memory all share one real
+/// accounting of what fits instead of each guessing its own fixed limit.
+fn context_budget(
+    selection: &ModelSelection,
+    mcp_tools: &[McpToolProxy],
+) -> runtime_core::ContextBudget {
+    let tool_schema_tokens = runtime_core::estimate_tool_schema_tokens(&tools(mcp_tools));
+    runtime_core::ContextBudget::new(selection.context_capacity(), tool_schema_tokens)
 }
 
 fn kernel(
@@ -666,13 +730,14 @@ where
         )?;
     }
     let context_timer = tool::telemetry::Timer::new("context.prepare");
-    let memory_context = state.memory_context(prompt)?;
+    let budget = context_budget(selection, &state.mcp_tools);
+    let memory_context = state.memory_context(prompt, budget.memory_budget_chars())?;
     state
         .runtime
         .as_mut()
         .expect("runtime initialized")
         .set_context("[retrieved-memory]", memory_context);
-    for skill_message in state.route_skills(prompt)? {
+    for skill_message in state.route_skills(prompt, budget.skills_budget_chars())? {
         state.persist_messages(std::slice::from_ref(&skill_message))?;
         state
             .runtime
@@ -758,5 +823,67 @@ fn title_from_prompt(prompt: &str) -> String {
         "Untitled session".to_owned()
     } else {
         title
+    }
+}
+
+#[cfg(test)]
+mod project_root_tests {
+    use super::discover_project_root;
+    use std::fs;
+
+    fn temp_dir(name: &str) -> std::path::PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "ax-project-root-{name}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    #[test]
+    fn prefers_the_enclosing_git_repository_over_a_marker_file() {
+        let root = temp_dir("git");
+        fs::create_dir_all(root.join(".git")).unwrap();
+        fs::write(root.join("Cargo.toml"), "").unwrap();
+        let nested = root.join("crates").join("a");
+        fs::create_dir_all(&nested).unwrap();
+
+        assert_eq!(
+            discover_project_root(&nested),
+            fs::canonicalize(&root).unwrap()
+        );
+
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn falls_back_to_a_marker_file_without_git() {
+        let root = temp_dir("marker");
+        fs::write(root.join("package.json"), "{}").unwrap();
+        let nested = root.join("src");
+        fs::create_dir_all(&nested).unwrap();
+
+        assert_eq!(
+            discover_project_root(&nested),
+            fs::canonicalize(&root).unwrap()
+        );
+
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn falls_back_to_the_starting_directory_when_nothing_is_found() {
+        let root = temp_dir("bare");
+
+        assert_eq!(
+            discover_project_root(&root),
+            fs::canonicalize(&root).unwrap()
+        );
+
+        fs::remove_dir_all(&root).unwrap();
     }
 }
