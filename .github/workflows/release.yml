@@ -79,7 +79,7 @@ jobs:
       - name: Upload asset
         uses: actions/upload-artifact@v4
         with:
-          name: ax-release-assets
+          name: ax-release-${{ matrix.target }}
           path: "${{ runner.temp }}/${{ matrix.asset }}"
           if-no-files-found: error
 
@@ -91,7 +91,7 @@ jobs:
       - name: Download assets
         uses: actions/download-artifact@v4
         with:
-          pattern: ax-release-assets
+          pattern: ax-release-*
           path: assets
           merge-multiple: true
 
