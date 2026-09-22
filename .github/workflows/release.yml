@@ -46,11 +46,17 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
-      - name: Install zig and cargo-zigbuild (Linux musl)
+      - name: Install zig (Linux musl)
         if: matrix.zigbuild == true
-        uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-zigbuild,zig
+        uses: goto-bus-stop/setup-zig@v2
+
+      - name: Install cargo-zigbuild (Linux musl)
+        if: matrix.zigbuild == true
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fsSL https://github.com/rust-cross/cargo-zigbuild/releases/latest/download/cargo-zigbuild-installer.sh | sh
+          cargo-zigbuild --version
 
       - name: Build
         shell: bash
@@ -65,16 +71,19 @@ jobs:
             cargo build --release --target "${{ matrix.target }}"
           fi
 
-      - name: Package asset
+      - name: Package asset (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Compress-Archive -Path "target/${{ matrix.target }}/release/ax.exe" -DestinationPath "$env:RUNNER_TEMP/${{ matrix.asset }}" -Force
+
+      - name: Package asset (Unix)
+        if: runner.os != 'Windows'
         shell: bash
         run: |
           set -euo pipefail
           cd "target/${{ matrix.target }}/release"
-          if [ "${{ runner.os }}" = "Windows" ]; then
-            tar -a -c -f "$RUNNER_TEMP/${{ matrix.asset }}" ax.exe
-          else
-            tar -czf "$RUNNER_TEMP/${{ matrix.asset }}" ax
-          fi
+          tar -czf "$RUNNER_TEMP/${{ matrix.asset }}" ax
 
       - name: Upload asset
         uses: actions/upload-artifact@v4
