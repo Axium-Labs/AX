@@ -31,7 +31,7 @@ curl -fsSL https://raw.githubusercontent.com/Axium-Labs/AX/main/scripts/install.
 Windows:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -c "irm https://raw.githubusercontent.com/Axium-Labs/AX/main/scripts/install.ps1 | iex"
+powershell -ExecutionPolicy Bypass -c "iex ((iwr 'https://raw.githubusercontent.com/Axium-Labs/AX/main/scripts/install.ps1' -UseBasicParsing).Content)"
 ```
 
 Then simply run:
@@ -75,7 +75,7 @@ AX_INSTALL_DIR="$HOME/bin" curl -fsSL https://raw.githubusercontent.com/Axium-La
 ```
 
 ```powershell
-$env:AX_VERSION = "v0.1.0"; irm https://raw.githubusercontent.com/Axium-Labs/AX/main/scripts/install.ps1 | iex
+powershell -ExecutionPolicy Bypass -c "$env:AX_VERSION='v0.1.0'; iex ((iwr 'https://raw.githubusercontent.com/Axium-Labs/AX/main/scripts/install.ps1' -UseBasicParsing).Content)"
 ```
 
 ## Development

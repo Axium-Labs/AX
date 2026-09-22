@@ -17,7 +17,7 @@ $repo = "Axium-Labs/AX"
 $baseUrl = "https://github.com/$repo/releases"
 
 # --- detect architecture ------------------------------------------------------
-$arch = switch ([System.Runtime.InteropServices.RuntimeInformation]::ProcessArchitecture) {
+$arch = switch ([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture) {
     "X64" { "x86_64" }
     "Arm64" { "aarch64" }
     default { throw "AX: unsupported architecture: $($_)" }
