@@ -78,6 +78,29 @@ AX_INSTALL_DIR="$HOME/bin" curl -fsSL https://raw.githubusercontent.com/Axium-La
 powershell -ExecutionPolicy Bypass -c "$env:AX_VERSION='v0.1.0'; iex ((iwr 'https://raw.githubusercontent.com/Axium-Labs/AX/main/scripts/install.ps1' -UseBasicParsing).Content)"
 ```
 
+### Uninstall
+
+Removing AX is just deleting the binary (and, on Windows, the PATH entry the
+installer added). AX keeps its data separately in `~/.ax`, which you can delete
+too if you want a clean slate.
+
+**macOS / Linux**
+
+```bash
+rm -f ~/.local/bin/ax        # or wherever AX_INSTALL_DIR pointed
+rm -rf ~/.ax                 # config, sessions, memory, model catalog (optional)
+```
+
+**Windows**
+
+```powershell
+Remove-Item -Force "$env:LOCALAPPDATA\Programs\AX\bin\ax.exe"
+# remove the installer's PATH entry (optional but tidy)
+$p = [Environment]::GetEnvironmentVariable('Path', 'User')
+[Environment]::SetEnvironmentVariable('Path', ($p -split ';' | Where-Object { $_ -notlike '*Programs\AX\bin*' }) -join ';', 'User')
+Remove-Item -Recurse -Force "$env:LOCALAPPDATA\Programs\AX"   # leftover dir (optional)
+```
+
 ## Development
 
 ### Build from source
