@@ -21,9 +21,11 @@ clap.workspace = true
 crossterm.workspace = true
 futures-util.workspace = true
 ratatui.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 skill = { path = "../skill" }
 tokio.workspace = true
+toml.workspace = true
 unicode-width = "0.2"
 unicode-segmentation = "1"
 pulldown-cmark = "0.12"

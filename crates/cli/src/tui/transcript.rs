@@ -469,7 +469,7 @@ mod tests {
                 frame.render_widget(
                     Paragraph::new(lines).wrap(Wrap { trim: false }),
                     frame.area(),
-                )
+                );
             })
             .unwrap();
         let buffer = terminal.backend().buffer();

@@ -60,7 +60,10 @@ use bottom_pane::{ApprovalDialog, BottomPane, SlashKeyOutcome, ViewOutcome};
 use startup::StartupInfo;
 use transcript::{Transcript, TranscriptKind};
 
-use crate::{ModelSelection, PermissionConfig, PermissionDecision, ReplState, run_prompt_with};
+use crate::{
+    ModelResolution, ModelSelection, PermissionConfig, PermissionDecision, ReplState,
+    model_selection, run_prompt_with,
+};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 const ACTIVE_POLL: Duration = Duration::from_millis(80);
@@ -285,11 +288,12 @@ impl Drop for TerminalGuard {
 
 #[allow(clippy::too_many_lines)]
 pub(super) async fn run_tui(
-    mut selection: ModelSelection,
+    resolution: ModelResolution,
     data_dir: PathBuf,
     skills_dir: PathBuf,
     mcp_config: Option<PathBuf>,
     allow_dangerous: bool,
+    codex_auth: Option<PathBuf>,
 ) -> Result<()> {
     // Title the terminal tab/window "ax" so Windows Terminal labels this tab
     // (mirrors how pi titles its tab, e.g. "π - hzl"). Printed before raw mode
@@ -317,10 +321,29 @@ pub(super) async fn run_tui(
     )?;
 
     let mut state: Option<ReplState> = Some(ReplState::new(data_dir, skills_dir, mcp_config)?);
+    // Resolution steps 4-6: a single configured provider was already selected
+    // automatically. Several providers open the `/model` picker and none opens
+    // the login flow before any user input.
+    let mut selection = match &resolution {
+        ModelResolution::Resolved(selection) => selection.clone(),
+        ModelResolution::Multiple(providers) => {
+            model_selection::placeholder_for(providers, codex_auth)
+        }
+        ModelResolution::None => model_selection::unconfigured_selection(),
+    };
     let mut app = App::new(&selection);
     let mut pane = BottomPane::new(selection.model.clone());
     app.sync_metadata(state.as_ref().expect("state initialized"), &selection);
     app.sync_status_line(&mut pane);
+    match &resolution {
+        ModelResolution::Multiple(providers) => {
+            commands::open_auto_model_picker(providers, &mut pane);
+        }
+        ModelResolution::None => {
+            commands::open_provider_login(&mut pane);
+        }
+        ModelResolution::Resolved(_) => {}
+    }
 
     let (worker_tx, mut worker_rx) = mpsc::unbounded_channel::<WorkerMessage>();
     let (login_tx, mut login_rx) = mpsc::unbounded_channel::<commands::LoginUpdate>();

@@ -12,15 +12,18 @@ use clap::{Parser, Subcommand, ValueEnum};
 use mcp::{McpConfig, McpManager, McpToolProxy};
 use memory::{MemoryStore, MessageKind, MessageRole, NewMessage, Session, StoredMessage};
 use model::{
-    AuthStorage, DEEPSEEK_FALLBACK_MODEL, DeepSeekConfig, DeepSeekProvider, Message, ModelProvider,
-    OPENAI_FALLBACK_MODEL, OpenAiConfig, OpenAiProvider, ReasoningEffort, Role,
+    AuthStorage, DeepSeekConfig, DeepSeekProvider, Message, ModelProvider, OpenAiConfig,
+    OpenAiProvider, ReasoningEffort, Role,
 };
 use runtime_core::{AgentEvent, AgentKernel, AllowAll, ApprovalPolicy, DenyDangerous};
 use runtime_core::{AgentSupervisor, AgentTask};
 use skill::SkillCatalog;
 use tool::{FilesystemTool, ShellTool, ToolRegistry};
 
+mod config;
+mod model_selection;
 mod tui;
+use model_selection::ModelResolution;
 use tui::run_tui;
 
 const SESSION_CONTEXT_LIMIT: u32 = 200;
@@ -33,8 +36,10 @@ const SKILL_CONTEXT_PREFIX: &str = "[ax-skill:";
     about = "Lightweight native agent runtime kernel"
 )]
 struct Cli {
-    #[arg(long, value_enum, default_value = "deepseek", global = true)]
-    provider: ProviderKind,
+    /// Provider, when chosen explicitly. Otherwise AX resolves the selection
+    /// from the persisted config, then local credential detection.
+    #[arg(long, global = true)]
+    provider: Option<ProviderKind>,
     #[arg(long, global = true)]
     model: Option<String>,
     #[arg(long, global = true)]
@@ -163,31 +168,6 @@ impl PermissionConfig {
 }
 
 impl ModelSelection {
-    fn from_cli(cli: &Cli) -> Self {
-        let model = cli.model.clone().unwrap_or_else(|| match cli.provider {
-            ProviderKind::Deepseek => DEEPSEEK_FALLBACK_MODEL.to_owned(),
-            ProviderKind::Openai | ProviderKind::Codex | ProviderKind::Compatible => {
-                OPENAI_FALLBACK_MODEL.to_owned()
-            }
-        });
-        Self {
-            provider: cli.provider,
-            provider_id: match cli.provider {
-                ProviderKind::Deepseek => "deepseek",
-                ProviderKind::Openai => "openai",
-                ProviderKind::Codex => "openai-codex",
-                ProviderKind::Compatible => "compatible",
-            }
-            .to_owned(),
-            endpoint: None,
-            model,
-            codex_auth: cli.codex_auth.clone(),
-            context_window: cli.context_window.map(NonZeroUsize::get),
-            reasoning_effort: None,
-            supports_tools: true,
-        }
-    }
-
     const fn context_capacity(&self) -> usize {
         match self.context_window {
             Some(capacity) => capacity,
@@ -458,23 +438,13 @@ fn database_path(data_dir: &Path) -> PathBuf {
 /// Global AX credential store, following pi's `~/.pi/agent/auth.json`
 /// separation from project/session state.
 fn ax_auth_path() -> PathBuf {
-    if let Some(root) = std::env::var_os("AX_HOME") {
-        return PathBuf::from(root).join("auth.json");
-    }
-    std::env::var_os("USERPROFILE")
-        .or_else(|| std::env::var_os("HOME"))
-        .map_or_else(|| PathBuf::from("."), PathBuf::from)
-        .join(".ax")
-        .join("auth.json")
+    config::ax_home().join("auth.json")
 }
 
 /// Global model catalogs, matching pi's single user-level model store rather
 /// than duplicating provider discovery results in every project.
 fn ax_models_dir() -> PathBuf {
-    ax_auth_path()
-        .parent()
-        .unwrap_or_else(|| Path::new("."))
-        .join("models")
+    config::ax_home().join("models")
 }
 
 /// Older AX builds stored provider credentials inside the current project's
@@ -628,7 +598,6 @@ fn render_event(event: AgentEvent) {
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
-    let selection = ModelSelection::from_cli(&cli);
     let auth_path = ax_auth_path();
     let approval: Arc<dyn ApprovalPolicy> = if cli.allow_dangerous {
         Arc::new(AllowAll)
@@ -637,21 +606,23 @@ async fn main() -> Result<()> {
     };
 
     match cli.command {
-        Some(Command::Run { prompt }) => {
+        Some(Command::Run { ref prompt }) => {
+            let selection = model_selection::require_resolved(&cli)?;
             let mut state = ReplState::new(cli.data_dir, cli.skills_dir, cli.mcp_config)?;
-            run_prompt(&mut state, &selection, approval, &prompt).await?;
+            run_prompt(&mut state, &selection, approval, prompt).await?;
         }
         Some(Command::Agents {
-            prompts,
+            ref prompts,
             concurrency,
         }) => {
+            let selection = model_selection::require_resolved(&cli)?;
             let template = kernel(&selection, approval, Vec::new(), &[], &auth_path)?;
             let tasks = prompts
-                .into_iter()
+                .iter()
                 .enumerate()
                 .map(|(index, prompt)| AgentTask {
                     id: format!("agent-{:04}", index + 1),
-                    prompt,
+                    prompt: prompt.clone(),
                     context: Vec::new(),
                 })
                 .collect();
@@ -666,12 +637,14 @@ async fn main() -> Result<()> {
             }
         }
         Some(Command::Tui) | None => {
+            let resolution = model_selection::resolve_model_selection(&cli)?;
             run_tui(
-                selection,
+                resolution,
                 cli.data_dir,
                 cli.skills_dir,
                 cli.mcp_config,
                 cli.allow_dangerous,
+                cli.codex_auth.clone(),
             )
             .await?;
         }

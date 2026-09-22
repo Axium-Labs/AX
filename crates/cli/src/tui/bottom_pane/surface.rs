@@ -264,7 +264,7 @@ mod tests {
         let text = buffer
             .content
             .iter()
-            .map(|cell| cell.symbol())
+            .map(ratatui::buffer::Cell::symbol)
             .collect::<String>();
         assert!(text.contains("connected"));
         assert!(!text.contains("Alpha"));

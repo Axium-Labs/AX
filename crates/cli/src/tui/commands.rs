@@ -280,6 +280,19 @@ fn sort_models(models: &mut Vec<ModelInfo>) {
     models.dedup_by(|a, b| a.provider == b.provider && a.id == b.id);
 }
 
+/// Opens the model picker over the locally cached catalogs of the given
+/// providers, used when model resolution found several configured providers.
+/// This is purely local — the full `/model` flow can refresh later.
+pub(super) fn open_auto_model_picker(providers: &[String], pane: &mut BottomPane) {
+    let mut models = providers
+        .iter()
+        .flat_map(|provider| crate::model_selection::local_catalog_models(provider))
+        .collect::<Vec<_>>();
+    sort_models(&mut models);
+    let (view, _, _) = ModelPicker::open_refreshable(models, "", "", "");
+    pane.push_view(view);
+}
+
 /// Exact model reference match, following pi's `findExactModelReferenceMatch`:
 /// canonical `provider/id`, then split `provider`/`id`, then a bare id that is
 /// unique across providers.
@@ -496,7 +509,7 @@ fn item(id: &str, label: &str, value: &str) -> SurfaceItem {
     }
 }
 
-fn open_provider_login(pane: &mut BottomPane) {
+pub(super) fn open_provider_login(pane: &mut BottomPane) {
     pane.push_view(SurfaceView::manager(
         "Select authentication method:",
         "login-auth-type",
@@ -622,6 +635,13 @@ fn apply_model_info(
             selection.supports_tools
         ),
     );
+    // Remember the successful switch so the next launch resumes it.
+    if let Err(error) = crate::model_selection::persist_model_selection(selection) {
+        app.push(
+            TranscriptKind::Error,
+            format!("Could not persist model selection: {error:#}"),
+        );
+    }
 }
 
 pub(super) fn open_session_picker(
