@@ -1,0 +1,20 @@
+# Copy this file to .ax/mcp.toml, or pass --mcp-config <path>.
+
+[servers.local-files]
+transport = "stdio"
+command = "your-mcp-server"
+args = ["--stdio"]
+protocol_version = "2026-07-28"
+request_timeout_secs = 30
+
+[servers.remote]
+transport = "http"
+url = "https://example.com/mcp"
+headers = { Authorization = "Bearer replace-me" }
+enabled = false
+
+[servers.custom-websocket]
+transport = "websocket"
+url = "wss://example.com/mcp"
+enabled = false
+

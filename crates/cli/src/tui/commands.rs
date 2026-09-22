@@ -1,0 +1,956 @@
+//! Unified slash-command registry and the four AX presentation families.
+#![allow(clippy::doc_markdown)]
+
+use anyhow::Result;
+use model::{
+    AuthStorage, ModelInfo, OAuthCredential, PROVIDERS, ProviderAuthKind, ReasoningEffort,
+};
+use tokio::sync::mpsc;
+
+/// Progress updates from the background, self-contained Codex device-code
+/// login, delivered back to the TUI so it never blocks while the user
+/// authorizes in a browser.
+pub enum LoginUpdate {
+    /// Show the verification link + one-time code to the user.
+    Prompt(String),
+    /// Tokens were persisted to AX's provider-scoped `~/.ax/auth.json`.
+    Success,
+    /// Login failed (network, auth server, or file write).
+    Failed(String),
+}
+
+use super::bottom_pane::{
+    ModalAction,
+    model_picker::{ModelPicker, ReasoningPicker},
+    secret_input::SecretInput,
+    session_picker::SessionPicker,
+    surface::{SurfaceItem, SurfaceView},
+};
+use super::catalog_refresh;
+use super::{App, BottomPane, TranscriptKind};
+use crate::{ModelSelection, PermissionDecision, ProviderKind, ReplState, tools};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SlashPresentation {
+    Picker,
+    Manager,
+    InfoPanel,
+    DirectAction,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct SlashCommandDef {
+    pub name: &'static str,
+    pub description: &'static str,
+    pub presentation: SlashPresentation,
+    /// Optional usage hint shown next to the command, mirroring pi's
+    /// `argumentHint` (e.g. `/model <provider/model>`).
+    pub argument_hint: Option<&'static str>,
+}
+const fn cmd(
+    name: &'static str,
+    description: &'static str,
+    presentation: SlashPresentation,
+    argument_hint: Option<&'static str>,
+) -> SlashCommandDef {
+    SlashCommandDef {
+        name,
+        description,
+        presentation,
+        argument_hint,
+    }
+}
+
+pub static SLASH_COMMANDS: &[SlashCommandDef] = &[
+    cmd(
+        "/login",
+        "connect a model provider",
+        SlashPresentation::Picker,
+        Some("<provider>"),
+    ),
+    cmd(
+        "/logout",
+        "remove provider credentials",
+        SlashPresentation::Picker,
+        None,
+    ),
+    cmd(
+        "/model",
+        "switch model and reasoning mode",
+        SlashPresentation::Picker,
+        Some("<provider/model>"),
+    ),
+    cmd(
+        "/resume",
+        "resume a previous session",
+        SlashPresentation::Picker,
+        None,
+    ),
+    cmd(
+        "/new",
+        "start a new session",
+        SlashPresentation::DirectAction,
+        None,
+    ),
+    cmd(
+        "/memory",
+        "view and manage memory",
+        SlashPresentation::Manager,
+        None,
+    ),
+    cmd(
+        "/compact",
+        "compact current context",
+        SlashPresentation::DirectAction,
+        None,
+    ),
+    cmd(
+        "/skills",
+        "view and manage skills",
+        SlashPresentation::Manager,
+        None,
+    ),
+    cmd(
+        "/tools",
+        "view available tools",
+        SlashPresentation::InfoPanel,
+        None,
+    ),
+    cmd(
+        "/mcp",
+        "manage MCP servers",
+        SlashPresentation::Manager,
+        None,
+    ),
+    cmd(
+        "/permissions",
+        "configure tool permissions",
+        SlashPresentation::Manager,
+        None,
+    ),
+    cmd(
+        "/status",
+        "show runtime status",
+        SlashPresentation::InfoPanel,
+        None,
+    ),
+    cmd("/exit", "exit AX", SlashPresentation::DirectAction, None),
+];
+
+pub fn filter_commands(token: &str) -> Vec<&'static SlashCommandDef> {
+    let token = token.trim().to_ascii_lowercase();
+    SLASH_COMMANDS
+        .iter()
+        .filter(|c| token.is_empty() || c.name.trim_start_matches('/').contains(&token))
+        .collect()
+}
+
+pub(super) async fn execute_slash(
+    command: &str,
+    state: &mut ReplState,
+    selection: &mut ModelSelection,
+    app: &mut App,
+    pane: &mut BottomPane,
+) -> Result<bool> {
+    match command.trim() {
+        "/exit" | "/quit" => return Ok(false),
+        "/login" => open_provider_login(pane),
+        "/logout" => open_provider_logout(state, app, pane)?,
+        "/model" => open_model_picker(state, selection, app, pane, None),
+        "/resume" => open_session_picker(state, app, pane)?,
+        "/new" => {
+            state.reset_new_session();
+            app.reset_for_session("New Session", selection);
+            app.push(TranscriptKind::Status, "Started new session");
+        }
+        "/memory" => pane.push_view(memory_root()),
+        "/compact" => {
+            let before = state.runtime.as_ref().map_or(
+                estimate_loaded(state),
+                runtime_core::AgentKernel::estimated_context_tokens,
+            );
+            app.push(TranscriptKind::Status, format!("Compact current context\nCurrent context  {before} / {}\n• Summarizing conversation…", selection.context_capacity()));
+            let result = if let Some(runtime) = state.runtime.as_mut() {
+                runtime.compact_now(|_| {}).await?
+            } else {
+                None
+            };
+            if let Some(compression) = result {
+                let after = state
+                    .runtime
+                    .as_ref()
+                    .map_or(0, runtime_core::AgentKernel::estimated_context_tokens);
+                if let Some(session) = state.current_session.as_ref() {
+                    let session_id = session.id.clone();
+                    state.store()?.replace_old_messages_with_summary(
+                        &session_id,
+                        u32::try_from(compression.retained_messages).unwrap_or(u32::MAX),
+                        &compression.summary,
+                        compression.removed_messages,
+                    )?;
+                }
+                app.push(TranscriptKind::Status, format!("✓ Context compacted\nBefore       {before}\nAfter        {after}\nReduced      {}", before.saturating_sub(after)));
+            } else {
+                app.push(
+                    TranscriptKind::Info,
+                    "Nothing to compact yet; AX keeps recent messages verbatim.",
+                );
+            }
+        }
+        "/skills" => open_skills(state, pane)?,
+        "/tools" => open_tools(state, pane),
+        "/mcp" => open_mcp(state, pane).await?,
+        "/permissions" => pane.push_view(permissions(&state.permissions)),
+        "/status" => pane.push_view(status_panel(state, selection, app)),
+        other => {
+            if let Some(term) = other.strip_prefix("/model ") {
+                open_model_picker(state, selection, app, pane, Some(term.trim()));
+            } else {
+                app.push(TranscriptKind::Error, format!("Unknown command: {other}"));
+            }
+        }
+    }
+    Ok(true)
+}
+
+#[allow(clippy::too_many_lines)]
+fn open_model_picker(
+    state: &mut ReplState,
+    selection: &mut ModelSelection,
+    app: &mut App,
+    pane: &mut BottomPane,
+    search: Option<&str>,
+) {
+    // Only models from configured providers are offered (pi: `available =
+    // all.filter(configuredProviders.has(provider))`). A provider counts as
+    // configured after resolving AX storage or an explicitly requested legacy
+    // credential path. Ambient environment variables do not populate it.
+    let codex_auth = selection.codex_auth.clone();
+    let mut models = catalog_refresh::cached_snapshot(&state.data_dir, codex_auth.as_ref());
+    sort_models(&mut models);
+
+    // `/model <term>`: try an exact match from the snapshot before opening the
+    // selector (pi's handleModelCommand → findExactModelReferenceMatch).
+    if let Some(term) = search {
+        let term = term.trim();
+        if !term.is_empty()
+            && let Some(model) = find_exact_model(&models, term)
+        {
+            apply_model_info(selection, state, app, model, None);
+            return;
+        }
+    }
+
+    let (view, refresh_target, notice) = ModelPicker::open_refreshable(
+        models,
+        &selection.provider_id,
+        &selection.model,
+        search.unwrap_or(""),
+    );
+    pane.push_view(view);
+
+    // Share one in-flight refresh across concurrent callers (pi's
+    // ModelCatalogRefreshCoordinator); replace the snapshot as a whole and
+    // surface the refresh outcome in the picker (pi's refresh status).
+    let data_dir = state.data_dir.clone();
+    tokio::spawn(async move {
+        let refresh = catalog_refresh::refresh_catalogs(data_dir, codex_auth).await;
+        let message = if refresh.failed.is_empty() {
+            "Model catalogs refreshed.".to_owned()
+        } else {
+            format!(
+                "Could not refresh {}; showing cached models.",
+                refresh.failed.join(", ")
+            )
+        };
+        *notice
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(message);
+        if !refresh.models.is_empty() {
+            (*refresh_target
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner))
+            .clone_from(&refresh.models);
+        }
+    });
+}
+
+fn sort_models(models: &mut Vec<ModelInfo>) {
+    models.sort_by(|a, b| a.provider.cmp(&b.provider).then(a.id.cmp(&b.id)));
+    models.dedup_by(|a, b| a.provider == b.provider && a.id == b.id);
+}
+
+/// Exact model reference match, following pi's `findExactModelReferenceMatch`:
+/// canonical `provider/id`, then split `provider`/`id`, then a bare id that is
+/// unique across providers.
+fn find_exact_model(models: &[ModelInfo], term: &str) -> Option<ModelInfo> {
+    let trimmed = term.trim();
+    let lower = trimmed.to_ascii_lowercase();
+    let canonical = models
+        .iter()
+        .filter(|m| format!("{}/{}", m.provider, m.id).to_ascii_lowercase() == lower)
+        .collect::<Vec<_>>();
+    if canonical.len() == 1 {
+        return Some(canonical[0].clone());
+    }
+    if let Some(slash) = trimmed.find('/') {
+        let provider = &trimmed[..slash];
+        let id = &trimmed[slash + 1..];
+        if !provider.is_empty() && !id.is_empty() {
+            let matched = models
+                .iter()
+                .filter(|m| {
+                    m.provider.eq_ignore_ascii_case(provider) && m.id.eq_ignore_ascii_case(id)
+                })
+                .collect::<Vec<_>>();
+            if matched.len() == 1 {
+                return Some(matched[0].clone());
+            }
+        }
+    }
+    let by_id = models
+        .iter()
+        .filter(|m| m.id.eq_ignore_ascii_case(&lower))
+        .collect::<Vec<_>>();
+    (by_id.len() == 1).then(|| by_id[0].clone())
+}
+
+fn estimate_loaded(state: &ReplState) -> usize {
+    state
+        .loaded_messages
+        .iter()
+        .map(|m| m.content.chars().count().div_ceil(4) + 4)
+        .sum()
+}
+
+fn memory_root() -> Box<dyn super::bottom_pane::PaneView> {
+    SurfaceView::manager(
+        "Memory",
+        "memory",
+        Vec::new(),
+        vec![
+            item("session", "Session Memory", "current context only"),
+            item("project", "Project Memory", "shared in this project"),
+            item("global", "Global Memory", "shared across AX"),
+        ],
+        "↑↓ navigate · Enter open · Esc back",
+    )
+}
+
+fn open_skills(state: &mut ReplState, pane: &mut BottomPane) -> Result<()> {
+    let available = tools(&state.mcp_tools)
+        .names()
+        .into_iter()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    let items = state
+        .skills()?
+        .statuses(available.iter().map(String::as_str))
+        .into_iter()
+        .map(|s| {
+            let value = if s.available() {
+                "enabled".into()
+            } else {
+                "disabled".into()
+            };
+            SurfaceItem {
+                id: s.metadata.name.clone(),
+                label: s.metadata.name,
+                value,
+            }
+        })
+        .collect();
+    pane.push_view(SurfaceView::manager(
+        "Skills",
+        "skills",
+        vec![
+            "Type to search".into(),
+            "Filter: [All] Enabled Disabled · Scope: [All] Global Project".into(),
+        ],
+        items,
+        "Enter details · Space enable/disable · Esc back",
+    ));
+    Ok(())
+}
+
+fn open_tools(state: &ReplState, pane: &mut BottomPane) {
+    let items = tools(&state.mcp_tools)
+        .names()
+        .into_iter()
+        .map(|name| item(name, name, "available"))
+        .collect();
+    pane.push_view(SurfaceView::manager(
+        "Tools",
+        "tools",
+        vec!["Source: [All] Built-in MCP · Status: [All] Available Disabled".into()],
+        items,
+        "Enter details · Esc back",
+    ));
+}
+
+async fn open_mcp(state: &mut ReplState, pane: &mut BottomPane) -> Result<()> {
+    let items = mcp_items(state).await?;
+    pane.push_view(SurfaceView::manager(
+        "MCP Servers",
+        "mcp",
+        vec![
+            "Lazy loading: sleeping servers connect only when used".into(),
+            "Status: [All] Connected Sleeping Disabled Error".into(),
+        ],
+        items,
+        "Enter details · C connect · X disconnect · R restart · Esc back",
+    ));
+    Ok(())
+}
+
+async fn mcp_items(state: &mut ReplState) -> Result<Vec<SurfaceItem>> {
+    let statuses = state.mcp()?.lock().await.statuses();
+    Ok(statuses
+        .into_iter()
+        .map(|s| SurfaceItem {
+            id: s.name.clone(),
+            label: s.name,
+            value: if !s.enabled {
+                "× disabled".into()
+            } else if s.connected {
+                "● connected".into()
+            } else {
+                "○ sleeping".into()
+            },
+        })
+        .collect())
+}
+
+fn permission_items(config: &crate::PermissionConfig) -> Vec<SurfaceItem> {
+    vec![
+        item("shell", "Shell", &config.get("shell").to_string()),
+        item(
+            "filesystem-write",
+            "Filesystem Write",
+            &config.get("filesystem-write").to_string(),
+        ),
+        item(
+            "filesystem-read",
+            "Filesystem Read",
+            &config.get("filesystem-read").to_string(),
+        ),
+        item("network", "Network", &config.get("network").to_string()),
+        item("mcp", "MCP", &config.get("mcp").to_string()),
+        item(
+            "process",
+            "Process Launch",
+            &config.get("process").to_string(),
+        ),
+    ]
+}
+
+fn permissions(config: &crate::PermissionConfig) -> Box<dyn super::bottom_pane::PaneView> {
+    SurfaceView::manager(
+        "Permissions",
+        "permissions",
+        vec!["                         Policy".into()],
+        permission_items(config),
+        "Enter change · Esc back",
+    )
+}
+
+fn status_panel(
+    state: &mut ReplState,
+    selection: &ModelSelection,
+    app: &App,
+) -> Box<dyn super::bottom_pane::PaneView> {
+    let messages = state
+        .current_session
+        .as_ref()
+        .map_or(0, |s| s.message_count);
+    let lines = vec![
+        "Runtime".into(),
+        format!("Version           {}", env!("CARGO_PKG_VERSION")),
+        "Mode              Agent".into(),
+        String::new(),
+        "Model".into(),
+        format!("Provider          {:?}", selection.provider),
+        format!("Model             {}", selection.model),
+        format!("Context Window    {}", selection.context_capacity()),
+        format!("Tool support      {}", selection.supports_tools),
+        String::new(),
+        "Session".into(),
+        format!("Title             {}", app.session),
+        format!("Messages          {messages}"),
+        String::new(),
+        "Context".into(),
+        format!("Usage             {}%", app.context_percent),
+        "Compact At        75%".into(),
+        String::new(),
+        "Environment".into(),
+        format!("Directory         {}", app.directory),
+    ];
+    SurfaceView::info("AX Status", lines)
+}
+
+fn item(id: &str, label: &str, value: &str) -> SurfaceItem {
+    SurfaceItem {
+        id: id.into(),
+        label: label.into(),
+        value: value.into(),
+    }
+}
+
+fn open_provider_login(pane: &mut BottomPane) {
+    pane.push_view(SurfaceView::manager(
+        "Select authentication method:",
+        "login-auth-type",
+        Vec::new(),
+        vec![
+            item("oauth", "Sign in with an account", "OAuth / subscription"),
+            item("api_key", "Sign in with an API key", "provider key"),
+        ],
+        "Enter select · Esc back",
+    ));
+}
+
+fn open_login_provider_list(pane: &mut BottomPane, auth_type: &str) -> Result<()> {
+    let auth = AuthStorage::new(crate::ax_auth_path());
+    let stored = auth.provider_ids()?;
+    let items = PROVIDERS
+        .iter()
+        .filter(|provider| match auth_type {
+            "api_key" => provider.auth == ProviderAuthKind::ApiKey,
+            "oauth" => {
+                provider.auth != ProviderAuthKind::ApiKey
+                    || model::provider_supports_oauth(provider.id)
+            }
+            _ => true,
+        })
+        .map(|provider| {
+            let configured = stored.iter().any(|id| id == provider.id);
+            let value = if configured {
+                "connected"
+            } else {
+                match provider.auth {
+                    ProviderAuthKind::ApiKey => "API key",
+                    ProviderAuthKind::CodexOAuth => "Codex OAuth",
+                    ProviderAuthKind::ExternalOAuth => "OAuth",
+                    ProviderAuthKind::Ambient => "ambient credentials",
+                }
+            };
+            item(provider.id, provider.name, value)
+        })
+        .collect();
+    pane.push_view(SurfaceView::manager(
+        if auth_type == "api_key" {
+            "Sign in with an API key"
+        } else {
+            "Sign in with an account"
+        },
+        format!("login-provider:{auth_type}"),
+        vec!["Type to search · provider credentials are loaded lazily".into()],
+        items,
+        "Enter connect · Esc back",
+    ));
+    Ok(())
+}
+
+fn open_provider_logout(_state: &ReplState, app: &mut App, pane: &mut BottomPane) -> Result<()> {
+    let auth = AuthStorage::new(crate::ax_auth_path());
+    let items = auth
+        .provider_ids()?
+        .into_iter()
+        .map(|id| {
+            let name = model::provider(&id).map_or(id.as_str(), |provider| provider.name);
+            item(&id, name, "AX credential")
+        })
+        .collect::<Vec<_>>();
+    if items.is_empty() {
+        app.push(
+            TranscriptKind::Info,
+            "No stored credentials to remove. Environment variables are unchanged.",
+        );
+        return Ok(());
+    }
+    pane.push_view(SurfaceView::manager(
+        "Log out of a provider",
+        "logout-provider",
+        vec!["Environment variables are never modified by AX.".into()],
+        items,
+        "Enter logout · Esc back",
+    ));
+    Ok(())
+}
+
+fn apply_model_info(
+    selection: &mut ModelSelection,
+    state: &mut ReplState,
+    app: &mut App,
+    model: ModelInfo,
+    effort: Option<ReasoningEffort>,
+) {
+    let provider =
+        match model.provider.as_str() {
+            "deepseek" => ProviderKind::Deepseek,
+            "openai" => ProviderKind::Openai,
+            "codex" | "openai-codex" => ProviderKind::Codex,
+            provider
+                if model::provider(provider).is_some_and(|spec| {
+                    spec.protocol == model::ProviderProtocol::OpenAiCompatible
+                }) =>
+            {
+                ProviderKind::Compatible
+            }
+            provider => {
+                app.push(TranscriptKind::Info, format!(
+                "{provider} is discoverable, but its native protocol adapter is not enabled yet"
+            ));
+                return;
+            }
+        };
+    selection.provider = provider;
+    selection.provider_id.clone_from(&model.provider);
+    selection.endpoint.clone_from(&model.endpoint);
+    selection.model = model.id;
+    selection.context_window = Some(model.context_window);
+    selection.reasoning_effort = effort.or(model.default_reasoning_effort);
+    selection.supports_tools = model.supports_tools;
+    state.invalidate_runtime();
+    app.model.clone_from(&selection.model);
+    app.push(
+        TranscriptKind::Status,
+        format!(
+            "Model changed to {} · context {} · tools {}",
+            selection.model,
+            selection.context_capacity(),
+            selection.supports_tools
+        ),
+    );
+}
+
+pub(super) fn open_session_picker(
+    state: &mut ReplState,
+    app: &mut App,
+    pane: &mut BottomPane,
+) -> Result<()> {
+    let sessions = state.store()?.list_sessions(50, 0)?;
+    if sessions.is_empty() {
+        app.push(TranscriptKind::Info, "No previous sessions");
+    } else {
+        pane.push_view(SessionPicker::open(sessions));
+    }
+    Ok(())
+}
+
+fn open_session(
+    id: &str,
+    state: &mut ReplState,
+    app: &mut App,
+    selection: &ModelSelection,
+) -> Result<()> {
+    if state.open_session(id)? {
+        super::restore_transcript(app, &state.loaded_messages, selection);
+        app.push(TranscriptKind::Status, "Session resumed");
+    } else {
+        app.push(TranscriptKind::Error, format!("Session not found: {id}"));
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_lines)]
+pub(super) async fn apply_modal_action(
+    action: ModalAction,
+    state: &mut ReplState,
+    selection: &mut ModelSelection,
+    app: &mut App,
+    pane: &mut BottomPane,
+    login_tx: &mpsc::UnboundedSender<LoginUpdate>,
+) -> Result<()> {
+    match action {
+        ModalAction::ModelSelected(model) if model.reasoning_efforts.is_empty() => {
+            apply_model_info(selection, state, app, model, None);
+        }
+        ModalAction::ModelSelected(model) => pane.push_view(ReasoningPicker::open(model)),
+        ModalAction::ReasoningSelected { model, effort } => {
+            pane.pop_view();
+            apply_model_info(selection, state, app, model, Some(effort));
+        }
+        ModalAction::ApiKeyConfigured { provider, key } => {
+            AuthStorage::new(crate::ax_auth_path()).store_api_key(&provider, key)?;
+            pane.clear_views();
+            state.invalidate_runtime();
+            app.push(
+                TranscriptKind::Status,
+                format!("Saved API key for {provider} · discovering available models"),
+            );
+            let refresh_data_dir = state.data_dir.clone();
+            let refresh_codex_auth = selection.codex_auth.clone();
+            tokio::spawn(async move {
+                catalog_refresh::refresh_catalogs(refresh_data_dir, refresh_codex_auth).await;
+            });
+        }
+        ModalAction::SessionOpen(id) => open_session(&id, state, app, selection)?,
+        ModalAction::SessionNew => {
+            state.reset_new_session();
+            app.reset_for_session("New Session", selection);
+        }
+        ModalAction::SessionDelete(id) => {
+            state.delete_session(&id)?;
+            app.push(TranscriptKind::Status, format!("Deleted session {id}"));
+        }
+        ModalAction::SurfaceSelected { surface, id } => {
+            if surface == "login-auth-type" {
+                open_login_provider_list(pane, &id)?;
+            } else if let Some(capability) = surface.strip_prefix("permission-choice:") {
+                let decision = match id.as_str() {
+                    "allow" => PermissionDecision::Allow,
+                    "deny" => PermissionDecision::Deny,
+                    _ => PermissionDecision::Ask,
+                };
+                state.permissions.set(capability, decision);
+                pane.refresh_surface("permissions", &permission_items(&state.permissions));
+                app.push(
+                    TranscriptKind::Status,
+                    format!("Permission updated: {capability} = {decision}"),
+                );
+            } else if surface == "mcp-action" {
+                let (operation, server) = id.split_once(':').unwrap_or(("", id.as_str()));
+                let manager = state.mcp()?;
+                if matches!(operation, "x" | "r") {
+                    manager.lock().await.disconnect(server);
+                    state.mcp_tools.retain(|tool| tool.server() != server);
+                }
+                // Disconnect also changes the tools exposed to the runtime.
+                state.invalidate_runtime();
+                if matches!(operation, "c" | "r") {
+                    let proxies = mcp::discover_tool_proxies(manager, server).await?;
+                    state.mcp_tools.retain(|tool| tool.server() != server);
+                    state.mcp_tools.extend(proxies);
+                    state.invalidate_runtime();
+                }
+                pane.refresh_surface("mcp", &mcp_items(state).await?);
+                app.push(
+                    TranscriptKind::Status,
+                    format!(
+                        "MCP {server}: {}",
+                        match operation {
+                            "x" => "sleeping",
+                            "r" => "restarted",
+                            _ => "connected",
+                        }
+                    ),
+                );
+            } else if let Some(auth_type) = surface.strip_prefix("login-provider:") {
+                let Some(provider) = model::provider(&id) else {
+                    app.push(TranscriptKind::Error, format!("Unknown provider: {id}"));
+                    return Ok(());
+                };
+                if auth_type == "api_key" {
+                    pane.push_view(SecretInput::open(id));
+                } else {
+                    match provider.auth {
+                        ProviderAuthKind::CodexOAuth => {
+                            pane.clear_views();
+                            start_codex_login(app, login_tx, crate::ax_auth_path());
+                        }
+                        ProviderAuthKind::ApiKey if model::provider_supports_oauth(provider.id) => {
+                            pane.clear_views();
+                            app.push(
+                            TranscriptKind::Info,
+                            format!(
+                                "{} account login is registered. Its provider-owned OAuth flow is not enabled in this AX build; API-key login remains available.",
+                                provider.name
+                            ),
+                        );
+                        }
+                        ProviderAuthKind::ApiKey => pane.push_view(SecretInput::open(id)),
+                        ProviderAuthKind::ExternalOAuth => {
+                            pane.clear_views();
+                            app.push(
+                            TranscriptKind::Info,
+                            format!(
+                                "{} uses its own OAuth flow. Configure its CLI/token, then reopen /model.",
+                                provider.name
+                            ),
+                        );
+                        }
+                        ProviderAuthKind::Ambient => {
+                            pane.clear_views();
+                            app.push(
+                            TranscriptKind::Info,
+                            format!(
+                                "{} uses ambient credentials from its platform CLI or environment.",
+                                provider.name
+                            ),
+                        );
+                        }
+                    }
+                }
+            } else if surface == "logout-provider" {
+                if id == "openai-codex" {
+                    AuthStorage::new(crate::ax_auth_path()).remove("openai-codex")?;
+                    state.invalidate_runtime();
+                    app.push(
+                        TranscriptKind::Status,
+                        "OpenAI Codex credentials removed from AX auth storage",
+                    );
+                } else {
+                    let removed = AuthStorage::new(crate::ax_auth_path()).remove(&id)?;
+                    state.invalidate_runtime();
+                    app.push(
+                        if removed {
+                            TranscriptKind::Status
+                        } else {
+                            TranscriptKind::Info
+                        },
+                        if removed {
+                            format!("Logged out of {id}")
+                        } else {
+                            format!("No AX credential stored for {id}; environment was unchanged")
+                        },
+                    );
+                }
+                pane.clear_views();
+            } else {
+                open_surface_detail(&surface, &id, state, selection, pane)?;
+            }
+        }
+        ModalAction::Approval(_) => {}
+    }
+    Ok(())
+}
+
+/// Start AX's self-contained Codex `device-code` login (ported from OpenAI's
+/// open-source `codex-rs/login`, MIT). Runs on a background task so the TUI
+/// stays responsive while the user authorizes in a browser; progress is
+/// reported back through `login_tx` and rendered into the transcript.
+fn start_codex_login(
+    app: &mut App,
+    login_tx: &mpsc::UnboundedSender<LoginUpdate>,
+    auth_path: std::path::PathBuf,
+) {
+    let tx = login_tx.clone();
+    tokio::spawn(async move {
+        let report = |update: LoginUpdate| {
+            let _ = tx.send(update);
+        };
+        let auth = match model::begin().await {
+            Ok(auth) => auth,
+            Err(error) => {
+                report(LoginUpdate::Failed(error.to_string()));
+                return;
+            }
+        };
+        report(LoginUpdate::Prompt(auth.prompt()));
+        match auth.poll_and_exchange().await {
+            Ok(tokens) => match AuthStorage::new(auth_path).store_oauth(
+                "openai-codex",
+                OAuthCredential {
+                    access: tokens.access_token,
+                    refresh: tokens.refresh_token,
+                    expires: tokens.expires_at,
+                    account_id: tokens.account_id,
+                },
+            ) {
+                Ok(()) => report(LoginUpdate::Success),
+                Err(error) => report(LoginUpdate::Failed(error.to_string())),
+            },
+            Err(error) => report(LoginUpdate::Failed(error.to_string())),
+        }
+    });
+    app.push(
+        TranscriptKind::Status,
+        "Starting Codex device-code login — the verification link will appear in the transcript",
+    );
+}
+
+fn open_surface_detail(
+    surface: &str,
+    id: &str,
+    state: &mut ReplState,
+    selection: &ModelSelection,
+    pane: &mut BottomPane,
+) -> Result<()> {
+    let view = match surface {
+        "memory" if id == "session" => SurfaceView::manager(
+            "Session Memory",
+            "session-memory",
+            vec![
+                format!(
+                    "Context       {} / {}",
+                    estimate_loaded(state),
+                    selection.context_capacity()
+                ),
+                "Threshold     75%".into(),
+                "Compression   Auto".into(),
+                String::new(),
+                "Actions".into(),
+            ],
+            vec![
+                item("summary", "View summary", ""),
+                item("messages", "View stored messages", ""),
+                item("compact", "Compact now", ""),
+                item("clear", "Clear session memory", ""),
+            ],
+            "Esc back",
+        ),
+        "memory" => {
+            let category = if id == "project" { "project" } else { "global" };
+            let memories = state
+                .store()?
+                .list_long_term(Some(category), 100)?
+                .into_iter()
+                .map(|m| item(&m.key, &m.key, &m.value))
+                .collect();
+            SurfaceView::manager(
+                if id == "project" {
+                    "Project Memory"
+                } else {
+                    "Global Memory"
+                },
+                "memory-items",
+                vec!["Type to search".into()],
+                memories,
+                "A add · E edit · D delete · Enter details · Esc back",
+            )
+        }
+        "skills" => SurfaceView::info(
+            "Skill details",
+            vec![
+                format!("Skill             {id}"),
+                format!("Source            {}/{}", state.skills_dir.display(), id),
+                "Status            Enabled".into(),
+                "Instructions load lazily only when the skill is selected for a task.".into(),
+            ],
+        ),
+        "tools" => SurfaceView::info(
+            "Tool details",
+            vec![
+                format!("Tool              {id}"),
+                "Status            Available".into(),
+                "Permission        Ask when operation is unsafe".into(),
+            ],
+        ),
+        "mcp" => SurfaceView::info(
+            "MCP server",
+            vec![
+                format!("Server            {id}"),
+                "Status            Sleeping/connected on demand".into(),
+                "Lazy loading      Enabled".into(),
+            ],
+        ),
+        "permissions" => SurfaceView::manager(
+            "Permission policy",
+            format!("permission-choice:{id}"),
+            vec![
+                format!("Capability        {id}"),
+                format!("Current policy    {}", state.permissions.get(id)),
+            ],
+            vec![
+                item("allow", "Allow", "execute without confirmation"),
+                item("ask", "Ask", "require confirmation"),
+                item("deny", "Deny", "never allow"),
+            ],
+            "Enter confirm · Esc back",
+        ),
+        _ => SurfaceView::info("Details", vec![id.to_owned()]),
+    };
+    pane.push_view(view);
+    Ok(())
+}

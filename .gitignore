@@ -1,0 +1,7 @@
+/target/
+/.ax/
+/.ax-smoke-*/
+.env
+*.db
+*.db-shm
+*.db-wal
