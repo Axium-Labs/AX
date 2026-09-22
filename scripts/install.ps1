@@ -56,15 +56,25 @@ try {
 
     Write-Host "AX: downloading $assetUrl"
     Invoke-WebRequest -Uri $assetUrl -OutFile $zipPath -UseBasicParsing
-    $sums = (Invoke-WebRequest -Uri $sumsUrl -UseBasicParsing).Content
 
-    $expected = @($sums -split "`r?`n" |
-        Where-Object { $_ -match "\s$([regex]::Escape($asset))\s*$" } |
-        ForEach-Object { ($_ -split "\s+")[0] } |
+    # Download SHA256SUMS to disk and read it as text. In Windows PowerShell 5.1,
+    # (Invoke-WebRequest ...).Content is a byte[] for non-text content types,
+    # which makes line splitting fail; Get-Content -Raw always yields a string.
+    $sumsPath = Join-Path $tmpDir "SHA256SUMS"
+    Write-Host "AX: downloading $sumsUrl"
+    Invoke-WebRequest -Uri $sumsUrl -OutFile $sumsPath -UseBasicParsing
+    $sumsText = Get-Content -Path $sumsPath -Raw
+
+    $expected = @($sumsText -split "`r?`n" |
+        Where-Object { $_ -match "[ \t]+$([regex]::Escape($asset))[ \t]*$" } |
+        ForEach-Object { ($_ -split "[ \t]+")[0] } |
         Select-Object -First 1)
 
     if (-not $expected) {
-        throw "AX: $asset is missing from SHA256SUMS"
+        $known = @($sumsText -split "`r?`n" |
+            Where-Object { $_ -match "[ \t]+[^ \t]+[ \t]*$" } |
+            ForEach-Object { ($_ -split "[ \t]+")[-1].Trim("`r") }) -join ", "
+        throw "AX: $asset is missing from SHA256SUMS (SHA256SUMS contains: $known)"
     }
 
     $actual = (Get-FileHash -Path $zipPath -Algorithm SHA256).Hash.ToLowerInvariant()
