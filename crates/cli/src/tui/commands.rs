@@ -1,6 +1,10 @@
 //! Unified slash-command registry and the four AX presentation families.
 #![allow(clippy::doc_markdown)]
 
+mod catalogs;
+mod memories;
+use catalogs::{mcp_items, open_mcp, open_skills, open_tools, skill_items};
+
 use anyhow::Result;
 use model::{
     AuthStorage, ModelInfo, OAuthCredential, PROVIDERS, ProviderAuthKind, ReasoningEffort,
@@ -28,7 +32,7 @@ use super::bottom_pane::{
 };
 use super::catalog_refresh;
 use super::{App, BottomPane, TranscriptKind};
-use crate::{ModelSelection, PermissionDecision, ProviderKind, ReplState, tools};
+use crate::{ModelSelection, PermissionDecision, ProviderKind, ReplState};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SlashPresentation {
@@ -153,7 +157,7 @@ pub(super) async fn execute_slash(
     pane: &mut BottomPane,
 ) -> Result<bool> {
     match command.trim() {
-        "/exit" | "/quit" => return Ok(false),
+        "/exit" => return Ok(false),
         "/login" => open_provider_login(pane),
         "/logout" => open_provider_logout(state, app, pane)?,
         "/model" => open_model_picker(state, selection, app, pane, None),
@@ -183,12 +187,19 @@ pub(super) async fn execute_slash(
                     .map_or(0, runtime_core::AgentKernel::estimated_context_tokens);
                 if let Some(session) = state.current_session.as_ref() {
                     let session_id = session.id.clone();
-                    state.store()?.save_context_summary(
-                        &session_id,
-                        u32::try_from(compression.retained_messages).unwrap_or(u32::MAX),
-                        &compression.summary,
-                        compression.removed_messages,
+                    let effective = serde_json::to_string(
+                        state.runtime.as_ref().expect("runtime exists").messages(),
                     )?;
+                    state.store()?.save_effective_context(
+                        &session_id,
+                        &compression.summary,
+                        &effective,
+                    )?;
+                    state
+                        .runtime
+                        .as_mut()
+                        .expect("runtime exists")
+                        .take_compression_dirty();
                 }
                 app.push(TranscriptKind::Status, format!("✓ Context compacted\nBefore       {before}\nAfter        {after}\nReduced      {}", before.saturating_sub(after)));
             } else {
@@ -345,91 +356,6 @@ fn memory_root() -> Box<dyn super::bottom_pane::PaneView> {
         ],
         "↑↓ navigate · Enter open · Esc back",
     )
-}
-
-fn open_skills(state: &mut ReplState, pane: &mut BottomPane) -> Result<()> {
-    let available = tools(&state.mcp_tools)
-        .names()
-        .into_iter()
-        .map(str::to_owned)
-        .collect::<Vec<_>>();
-    let items = state
-        .skills()?
-        .statuses(available.iter().map(String::as_str))
-        .into_iter()
-        .map(|s| {
-            let value = if s.available() {
-                "enabled".into()
-            } else {
-                "disabled".into()
-            };
-            SurfaceItem {
-                id: s.metadata.name.clone(),
-                label: s.metadata.name,
-                value,
-            }
-        })
-        .collect();
-    pane.push_view(SurfaceView::manager(
-        "Skills",
-        "skills",
-        vec![
-            "Type to search".into(),
-            "Filter: [All] Enabled Disabled · Scope: [All] Global Project".into(),
-        ],
-        items,
-        "Enter details · Space enable/disable · Esc back",
-    ));
-    Ok(())
-}
-
-fn open_tools(state: &ReplState, pane: &mut BottomPane) {
-    let mut items: Vec<SurfaceItem> = tools(&state.mcp_tools)
-        .names()
-        .into_iter()
-        .map(|name| item(name, name, "available"))
-        .collect();
-    items.push(item("mcp", "mcp", "capability catalog / lazy gateway"));
-    pane.push_view(SurfaceView::manager(
-        "Tools",
-        "tools",
-        vec!["Source: [All] Built-in MCP · Status: [All] Available Disabled".into()],
-        items,
-        "Enter details · Esc back",
-    ));
-}
-
-async fn open_mcp(state: &mut ReplState, pane: &mut BottomPane) -> Result<()> {
-    let items = mcp_items(state).await?;
-    pane.push_view(SurfaceView::manager(
-        "MCP Servers",
-        "mcp",
-        vec![
-            "Lazy loading: sleeping servers connect only when used".into(),
-            "Status: [All] Connected Sleeping Disabled Error".into(),
-        ],
-        items,
-        "Enter details · C connect · X disconnect · R restart · Esc back",
-    ));
-    Ok(())
-}
-
-async fn mcp_items(state: &mut ReplState) -> Result<Vec<SurfaceItem>> {
-    let statuses = state.mcp()?.lock().await.statuses();
-    Ok(statuses
-        .into_iter()
-        .map(|s| SurfaceItem {
-            id: s.name.clone(),
-            label: s.name,
-            value: if !s.enabled {
-                "× disabled".into()
-            } else if s.connected {
-                "● connected".into()
-            } else {
-                "○ sleeping".into()
-            },
-        })
-        .collect())
 }
 
 fn permission_items(config: &crate::PermissionStore) -> Vec<SurfaceItem> {
@@ -681,12 +607,17 @@ fn open_session(
     if state.open_session(id, &budget)? {
         let history = state
             .store()?
-            .load_messages(id, None, u32::MAX)?
+            .load_messages(id, None, crate::session_restore::HISTORY_PAGE_SIZE)?
             .iter()
             .map(crate::restore_message)
             .collect::<Vec<_>>();
         super::restore_transcript(app, &history, selection);
         app.push(TranscriptKind::Status, "Session resumed");
+        if state.current_session.as_ref().is_some_and(|session| {
+            session.message_count > u64::from(crate::session_restore::HISTORY_PAGE_SIZE)
+        }) {
+            app.push(TranscriptKind::Info, "Recent transcript loaded. Open /memory → Session → View stored messages for full history.");
+        }
     } else {
         app.push(TranscriptKind::Error, format!("Session not found: {id}"));
     }
@@ -703,6 +634,14 @@ pub(super) async fn apply_modal_action(
     login_tx: &mpsc::UnboundedSender<LoginUpdate>,
 ) -> Result<()> {
     match action {
+        ModalAction::MemoryEdited {
+            scope,
+            key,
+            expected,
+            value,
+        } => {
+            memories::edit(state, &scope, &key, &expected, &value, pane, app)?;
+        }
         ModalAction::ModelSelected(model) if model.reasoning_efforts.is_empty() => {
             apply_model_info(selection, state, app, model, None);
         }
@@ -735,20 +674,19 @@ pub(super) async fn apply_modal_action(
             app.push(TranscriptKind::Status, format!("Deleted session {id}"));
         }
         ModalAction::SurfaceSelected { surface, id } => {
-            if surface == "session-memory" {
+            if let Some(name) = surface.strip_prefix("memory-items:") {
+                memories::open_record(state, name, &id, pane)?;
+            } else if let Some(reference) = surface.strip_prefix("memory-record:") {
+                memories::action(state, reference, &id, pane, app)?;
+            } else if surface == "memory" && id != "session" {
+                memories::open_list(state, &id, pane)?;
+            } else if surface == "session-memory" {
                 match id.as_str() {
                     "compact" => {
                         execute_slash("/compact", state, selection, app, pane).await?;
                     }
                     "facts" => {
-                        let facts = state.memory_records(memory::MemoryScope::Session)?;
-                        pane.push_view(SurfaceView::info(
-                            "Session facts",
-                            facts
-                                .into_iter()
-                                .map(|fact| format!("{} = {}", fact.key, fact.value))
-                                .collect(),
-                        ));
+                        memories::open_list(state, "session", pane)?;
                     }
                     "summary" => {
                         let summary = match state.current_session.clone() {
@@ -817,6 +755,11 @@ pub(super) async fn apply_modal_action(
                     TranscriptKind::Status,
                     format!("Permission updated: {capability} = {decision}"),
                 );
+            } else if surface == "skill-toggle" {
+                state.toggle_skill(&id)?;
+                pane.refresh_surface("skills", &skill_items(state)?);
+            } else if matches!(surface.as_str(), "skills" | "tools" | "mcp") {
+                catalogs::open_detail(&surface, &id, state, pane).await?;
             } else if surface == "mcp-action" {
                 let (operation, server) = id.split_once(':').unwrap_or(("", id.as_str()));
                 let manager = state.mcp()?;
@@ -827,7 +770,14 @@ pub(super) async fn apply_modal_action(
                 // Disconnect also changes the tools exposed to the runtime.
                 state.invalidate_runtime();
                 if matches!(operation, "c" | "r") {
-                    let proxies = mcp::discover_tool_proxies(manager, server).await?;
+                    let proxies = match mcp::discover_tool_proxies(manager, server).await {
+                        Ok(proxies) => proxies,
+                        Err(error) => {
+                            pane.refresh_surface("mcp", &mcp_items(state).await?);
+                            app.push(TranscriptKind::Error, format!("MCP {server}: {error}"));
+                            return Ok(());
+                        }
+                    };
                     state.mcp_tools.retain(|tool| tool.server() != server);
                     state.mcp_tools.extend(proxies);
                     state.invalidate_runtime();
@@ -916,7 +866,7 @@ pub(super) async fn apply_modal_action(
                 }
                 pane.clear_views();
             } else {
-                open_surface_detail(&surface, &id, state, selection, pane)?;
+                open_surface_detail(&surface, &id, state, selection, pane);
             }
         }
         ModalAction::Approval(_) => {}
@@ -974,7 +924,7 @@ fn open_surface_detail(
     state: &mut ReplState,
     selection: &ModelSelection,
     pane: &mut BottomPane,
-) -> Result<()> {
+) {
     let view = match surface {
         "memory" if id == "session" => SurfaceView::manager(
             "Session Memory",
@@ -999,54 +949,6 @@ fn open_surface_detail(
             ],
             "Esc back",
         ),
-        "memory" => {
-            let scope = if id == "project" {
-                memory::MemoryScope::Project
-            } else {
-                memory::MemoryScope::Global
-            };
-            let memories = state
-                .memory_records(scope)?
-                .into_iter()
-                .map(|m| item(&m.key, &m.key, &m.value))
-                .collect();
-            SurfaceView::manager(
-                if id == "project" {
-                    "Project Memory"
-                } else {
-                    "Global Memory"
-                },
-                "memory-items",
-                vec!["Type to search".into()],
-                memories,
-                "Remember key=value in chat · Esc back",
-            )
-        }
-        "skills" => SurfaceView::info(
-            "Skill details",
-            vec![
-                format!("Skill             {id}"),
-                format!("Source            {}/{}", state.skills_dir.display(), id),
-                "Status            Enabled".into(),
-                "Instructions load lazily only when the skill is selected for a task.".into(),
-            ],
-        ),
-        "tools" => SurfaceView::info(
-            "Tool details",
-            vec![
-                format!("Tool              {id}"),
-                "Status            Available".into(),
-                "Permission        Ask when operation is unsafe".into(),
-            ],
-        ),
-        "mcp" => SurfaceView::info(
-            "MCP server",
-            vec![
-                format!("Server            {id}"),
-                "Status            Sleeping/connected on demand".into(),
-                "Lazy loading      Enabled".into(),
-            ],
-        ),
         "permissions" => SurfaceView::manager(
             "Permission policy",
             format!("permission-choice:{id}"),
@@ -1064,5 +966,4 @@ fn open_surface_detail(
         _ => SurfaceView::info("Details", vec![id.to_owned()]),
     };
     pane.push_view(view);
-    Ok(())
 }

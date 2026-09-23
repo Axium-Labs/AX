@@ -14,6 +14,10 @@ pub struct ContextBudget {
 }
 
 impl ContextBudget {
+    pub const SOFT_PRESSURE_PERCENT: u8 = 75;
+    pub const HARD_PRESSURE_PERCENT: u8 = 90;
+    pub const SAFE_WATERMARK_PERCENT: u8 = 65;
+    pub const RECENT_RAW_PERCENT: u8 = 40;
     /// Conservative reserve used only when the model catalog does not expose
     /// a maximum output size.
     pub const RESERVED_OUTPUT_TOKENS: usize = 8_000;
@@ -22,7 +26,7 @@ impl ContextBudget {
     pub const SKILLS_RESERVE_TOKENS: usize = 3_000;
     /// Tokens carved out of the usable budget for retrieved long-term memory
     /// facts.
-    pub const MEMORY_RESERVE_TOKENS: usize = 200;
+    pub const MEMORY_RESERVE_TOKENS: usize = 512;
     /// Share of the history budget available to the persisted session
     /// summary and other restored system state when a session is reopened;
     /// the remainder is reserved for verbatim recent messages.
@@ -61,6 +65,21 @@ impl ContextBudget {
         self.history_budget()
             .saturating_mul(usize::from(percent.min(100)))
             / 100
+    }
+
+    #[must_use]
+    pub fn pressure_target(&self) -> usize {
+        self.compact_threshold(Self::SAFE_WATERMARK_PERCENT)
+    }
+
+    #[must_use]
+    pub fn hard_pressure_threshold(&self) -> usize {
+        self.compact_threshold(Self::HARD_PRESSURE_PERCENT)
+    }
+
+    #[must_use]
+    pub fn recent_raw_budget(&self) -> usize {
+        self.compact_threshold(Self::RECENT_RAW_PERCENT)
     }
 
     /// Total budget for restoring persisted conversation history when a

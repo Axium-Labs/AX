@@ -57,15 +57,11 @@ Provider 同时报告 context window，供 kernel 的压缩策略使用。新增
 
 ### `memory`
 
-使用 bundled SQLite 和迁移版本管理，包含：
+SQLite stores raw session messages, effective context snapshots, and scoped facts. Global facts live in the AX home; Project and Session facts live in the selected project database. Project ownership uses a UUID persisted in `.ax/project-id`, independent of the absolute workspace path and `--data-dir`.
 
-- `sessions`：标题、创建/更新时间和消息计数；
-- `messages`：普通消息、Tool/MCP 调用和 Agent 状态（历史原文永不因压缩删除）；
-- `session_summaries`：每个 session 一行，按 `session_id` upsert；每次压缩都用新的累积摘要整体覆盖 `content`（新摘要已在生成时融入了旧摘要，因此仍自包含），并用 `MAX()` 推进 `through_message_id` 水位线；恢复时只读取这一行当前摘要加上水位线之后的消息，不会叠加多份历史摘要；
-- `long_term_memory`：旧版按 key/category 保存的偏好、项目和决策（保留兼容读取）；
-- `scoped_memories`（`memory::scoped`）：显式划分 Global / Project / Session 三种存储边界，各自有独立 owner（Global 无 owner，Project 为 `discover_project_root` 解析出的稳定项目根目录，Session 为 session id），互不覆盖、互不泄漏。Project owner 与 `--data-dir` 无关：`discover_project_root`（`cli::main`）从当前工作目录往上查找，优先取包含 `.git` 的目录，其次取包含常见项目标志文件（`Cargo.toml`/`package.json` 等）的目录，搜索不越过用户主目录边界，都找不到则回退到当前目录本身；`--data-dir` 只决定数据存储位置，不再参与项目身份计算。
+Explicit `remember key=value` declarations default to Session. Natural language intent is handled by the main model through a session-bound `memory` tool; code validates scope ownership, quoted user provenance, credential patterns, and optimistic update preconditions. Retrieval uses lexical relevance, update time, explicit Global inclusion settings, and the shared token budget.
 
-CLI 侧（`cli::memory_context`）实现 extract → retrieve → inject 闭环：从用户输入中保守提取显式记忆声明（`remember key=value`、“记住”、`我偏好...` 等自然语句前缀，排除疑似密钥/密码的内容），按 Global → Project → Session 的优先级写入对应作用域；每轮请求前按相关性和字符预算检索命中的记忆并注入模型上下文，因此长期记忆不需要用户手动重复。旧版 `long_term_memory` 数据只做一次性、幂等的作用域迁移。读取采用 session scope 和稳定分页；不会启动时加载全部历史，也没有向量数据库、Embedding 或 RAG。
+Each complete conversation message is checkpointed before execution advances. Resume queries pages after the snapshot watermark and marks interrupted tool calls without replaying their side effects. Compression snapshots remain session-local; raw messages are retained. See [Memory behavior](memory.md) for migration, UI controls, and current limits.
 
 ### `cli`
 
@@ -99,14 +95,16 @@ open selected session / build provider / index skills / connect one MCP server
 ```text
 user task
   → lazy Skill routing
-  → context threshold check / optional summary
+  → retrieve memory and checkpoint user input
+  → context pressure check / layered compression
   → model streaming request
   → final text ──────────────→ persist and finish
   → tool calls
       → permission check
       → execute built-in or MCP proxy
       → append tool result
-      → next model step
+      → checkpoint result
+      → context pressure check / next model step
 ```
 
 循环受 `ExecutionBudget` 约束（默认最多 64 个 model step、128 次 Tool 调用、600s 单轮超时、120s 单次 Tool 超时，均可用 `--max-steps`/`--max-tool-calls`/`--turn-timeout-secs`/`--tool-timeout-secs` 覆盖），防止失控。预算用尽或超时时会为任何悬挂的 Tool Call 补上中断提示，保持消息记录合法。所有 user、assistant、Tool、MCP 和 Skill 状态消息均写入当前 session。压缩会原样保留 Skill 等 system context与完整历史原文，只用摘要替换送给模型的较旧对话与执行记录。每个 model step 和 Tool 调用都会记录延迟指标，可通过 `/status` 查看。

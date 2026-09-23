@@ -86,6 +86,12 @@ pub struct SkillCatalog {
 }
 
 impl SkillCatalog {
+    /// Returns the indexed source directory without loading instructions.
+    #[must_use]
+    pub fn directory(&self, name: &str) -> Option<&Path> {
+        self.skills.get(name).map(|skill| skill.directory.as_path())
+    }
+
     /// Indexes immediate child directories by reading only their `skill.toml` files.
     /// A missing root is treated as an empty catalog.
     ///
@@ -369,5 +375,28 @@ mod tests {
         let catalog = SkillCatalog::index(&temp.root).unwrap();
         assert_eq!(catalog.route_candidates("rust", ["shell"]).len(), 2);
         assert!(catalog.route_candidates("rust", ["filesystem"]).is_empty());
+    }
+
+    #[test]
+    fn bundled_skills_are_loadable_and_route_to_their_tasks() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../skills");
+        let catalog = SkillCatalog::index(root).expect("bundled skill manifests should index");
+        let available = ["filesystem", "shell", "search"];
+        for (prompt, expected) in [
+            ("review the current diff", "code-review"),
+            ("create skill for release notes", "skill-creator"),
+            ("install skill from a local folder", "skill-installer"),
+        ] {
+            let matched = catalog
+                .route(prompt, available)
+                .expect("bundled skill should route");
+            assert_eq!(matched.name, expected);
+            assert!(!catalog.load(expected).unwrap().instructions.is_empty());
+        }
+        assert!(
+            catalog
+                .route("summarize this paragraph", available)
+                .is_none()
+        );
     }
 }

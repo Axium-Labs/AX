@@ -1,6 +1,6 @@
 //! Shared visual grammar for Manager and Info Panel slash surfaces.
 
-use crossterm::event::{KeyCode, KeyEvent, KeyEventKind};
+use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
@@ -143,8 +143,17 @@ impl PaneView for SurfaceView {
                 });
                 ViewOutcome::Accepted
             }
+            KeyCode::Char(' ') if self.surface == "skills" && !self.visible().is_empty() => {
+                self.action = Some(ModalAction::SurfaceSelected {
+                    surface: "skill-toggle".into(),
+                    id: self.visible()[self.selected].id.clone(),
+                });
+                ViewOutcome::Accepted
+            }
             KeyCode::Char(command @ ('c' | 'C' | 'x' | 'X' | 'r' | 'R'))
-                if self.surface == "mcp" && !self.visible().is_empty() =>
+                if self.surface == "mcp"
+                    && key.modifiers.contains(KeyModifiers::ALT)
+                    && !self.visible().is_empty() =>
             {
                 let server = self.visible()[self.selected].id.clone();
                 self.action = Some(ModalAction::SurfaceSelected {
@@ -246,6 +255,44 @@ impl PaneView for SurfaceView {
 mod tests {
     use super::*;
     use crossterm::event::KeyModifiers;
+
+    #[test]
+    fn skill_space_toggles_and_mcp_search_does_not_trigger_connections() {
+        let rows = vec![SurfaceItem {
+            id: "server".into(),
+            label: "server".into(),
+            value: "enabled".into(),
+        }];
+        let mut skills = SurfaceView::manager("Skills", "skills", vec![], rows.clone(), "");
+        assert_eq!(
+            skills.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE)),
+            ViewOutcome::Accepted
+        );
+        assert_eq!(
+            skills.take_action(),
+            Some(ModalAction::SurfaceSelected {
+                surface: "skill-toggle".into(),
+                id: "server".into()
+            })
+        );
+        let mut mcp = SurfaceView::manager("MCP", "mcp", vec![], rows, "");
+        assert_eq!(
+            mcp.handle_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE)),
+            ViewOutcome::Continue
+        );
+        assert!(mcp.take_action().is_none());
+        assert_eq!(
+            mcp.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::ALT)),
+            ViewOutcome::Accepted
+        );
+        assert_eq!(
+            mcp.take_action(),
+            Some(ModalAction::SurfaceSelected {
+                surface: "mcp-action".into(),
+                id: "c:server".into()
+            })
+        );
+    }
 
     #[test]
     fn refresh_keeps_filter_and_selection_and_handles_disappearing_matches() {

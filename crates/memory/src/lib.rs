@@ -1,14 +1,14 @@
-//! SQLite-backed session, history, and long-term memory.
+//! SQLite metadata and memory with per-session JSONL event history.
 //!
 //! Opening the store and running its small migrations are explicit operations;
 //! merely linking this crate performs no filesystem or database work.
 
 mod scoped;
-pub use scoped::{MemoryRecord, MemoryScope, extract_user_memories, retrieve};
+pub use scoped::{MemoryRecord, MemoryScope, extract_user_memories, retrieve, validate_fact};
 
-use std::path::Path;
+use std::{collections::HashMap, fs::{self, File, OpenOptions}, io::{BufRead, BufReader, Read, Seek, SeekFrom, Write}, path::{Path, PathBuf}};
 
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
@@ -18,6 +18,8 @@ use uuid::Uuid;
 pub enum MemoryError {
     #[error("database error: {0}")]
     Database(#[from] rusqlite::Error),
+    #[error("session event I/O error: {0}")]
+    Io(#[from] std::io::Error),
     #[error("memory metadata is invalid JSON: {0}")]
     Serialization(#[from] serde_json::Error),
     #[error("invalid value in memory database: {0}")]
@@ -120,7 +122,7 @@ impl NewMessage {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct StoredMessage {
     pub id: i64,
     pub session_id: String,
@@ -143,6 +145,8 @@ pub struct LongTermMemory {
 
 pub struct MemoryStore {
     connection: Connection,
+    events_dir: PathBuf,
+    ephemeral_events: bool,
 }
 
 impl MemoryStore {
@@ -152,8 +156,10 @@ impl MemoryStore {
     ///
     /// Returns an error when `SQLite` cannot open or migrate the database.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, MemoryError> {
+        let path = path.as_ref();
         let connection = Connection::open(path)?;
-        Self::initialize(connection)
+        let events_dir = path.parent().unwrap_or_else(|| Path::new(".")).join("sessions");
+        Self::initialize(connection, events_dir, false)
     }
 
     /// Creates an isolated in-memory store, primarily for tests and ephemeral runs.
@@ -162,10 +168,12 @@ impl MemoryStore {
     ///
     /// Returns an error when `SQLite` initialization fails.
     pub fn open_in_memory() -> Result<Self, MemoryError> {
-        Self::initialize(Connection::open_in_memory()?)
+        let events_dir = std::env::temp_dir().join(format!("ax-session-events-{}", Uuid::new_v4()));
+        Self::initialize(Connection::open_in_memory()?, events_dir, true)
     }
 
-    fn initialize(connection: Connection) -> Result<Self, MemoryError> {
+    fn initialize(connection: Connection, events_dir: PathBuf, ephemeral_events: bool) -> Result<Self, MemoryError> {
+        connection.busy_timeout(std::time::Duration::from_secs(5))?;
         connection.execute_batch(
             "PRAGMA foreign_keys = ON;
              PRAGMA journal_mode = WAL;
@@ -212,6 +220,15 @@ impl MemoryStore {
         if !has_watermark {
             connection.execute("ALTER TABLE session_summaries ADD COLUMN through_message_id INTEGER NOT NULL DEFAULT 0", [])?;
         }
+        let has_effective: bool = connection.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('session_summaries') WHERE name = 'effective_context'", [], |row| row.get::<_, i64>(0)
+        )? > 0;
+        if !has_effective {
+            connection.execute(
+                "ALTER TABLE session_summaries ADD COLUMN effective_context TEXT",
+                [],
+            )?;
+        }
         connection.execute_batch(
             "CREATE TABLE IF NOT EXISTS scoped_memories (
             scope TEXT NOT NULL CHECK(scope IN ('global','project','session')), owner TEXT NOT NULL,
@@ -220,7 +237,34 @@ impl MemoryStore {
             CREATE TABLE IF NOT EXISTS memory_migrations (category TEXT PRIMARY KEY, migrated_at INTEGER NOT NULL DEFAULT (unixepoch()));
             PRAGMA user_version = 4;",
         )?;
-        Ok(Self { connection })
+        let has_always: i64 = connection.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('scoped_memories') WHERE name='always_include'",
+            [],
+            |row| row.get(0),
+        )?;
+        if has_always == 0 {
+            connection.execute(
+                "ALTER TABLE scoped_memories ADD COLUMN always_include INTEGER NOT NULL DEFAULT 0",
+                [],
+            )?;
+        }
+        connection.execute_batch("CREATE TABLE IF NOT EXISTS project_memory_migrations(owner TEXT PRIMARY KEY, project_id TEXT NOT NULL); PRAGMA user_version=5;")?;
+        for column in ["event_offset", "event_length"] {
+            let exists: i64 = connection.query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('messages') WHERE name=?1",
+                [column], |row| row.get(0)
+            )?;
+            if exists == 0 {
+                connection.execute(&format!("ALTER TABLE messages ADD COLUMN {column} INTEGER"), [])?;
+            }
+        }
+        connection.execute_batch("CREATE TABLE IF NOT EXISTS agent_states (
+            message_id INTEGER PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE,
+            session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+            content TEXT NOT NULL, metadata TEXT NOT NULL, created_at INTEGER NOT NULL
+        ); CREATE INDEX IF NOT EXISTS idx_agent_states_session ON agent_states(session_id, message_id);
+        PRAGMA user_version=6;")?;
+        Ok(Self { connection, events_dir, ephemeral_events })
     }
 
     /// Creates a new session without loading any previous session history.
@@ -246,6 +290,7 @@ impl MemoryStore {
     ///
     /// Returns an error when the query fails or persisted values are invalid.
     pub fn session(&self, id: &str) -> Result<Option<Session>, MemoryError> {
+        self.sync_session(id)?;
         self.connection
             .query_row(
                 "SELECT s.id, s.title, s.created_at, s.updated_at, COUNT(m.id)
@@ -275,8 +320,9 @@ impl MemoryStore {
              LIMIT ?1 OFFSET ?2",
         )?;
         let rows = statement.query_map(params![limit, offset], map_session)?;
-        rows.collect::<Result<Vec<_>, _>>()
-            .map_err(MemoryError::from)
+        let sessions = rows.collect::<Result<Vec<_>, _>>()?;
+        drop(statement);
+        sessions.into_iter().map(|session: Session| self.session(&session.id)?.ok_or_else(|| MemoryError::InvalidValue("listed session disappeared".into()))).collect()
     }
 
     /// Changes a session title.
@@ -305,6 +351,13 @@ impl MemoryStore {
         )?;
         let deleted = transaction.execute("DELETE FROM sessions WHERE id=?1", [id])? == 1;
         transaction.commit()?;
+        if deleted {
+            match fs::remove_file(self.event_path(id)?) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
         Ok(deleted)
     }
 
@@ -324,22 +377,28 @@ impl MemoryStore {
             content,
             metadata,
         } = message;
-        let metadata = serde_json::to_string(&metadata)?;
-        let transaction = self.connection.transaction()?;
+        let transaction = self.connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        sync_session_locked(&transaction, &self.events_dir, session_id)?;
         transaction.execute(
             "INSERT INTO messages (session_id, role, kind, content, metadata)
              VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![session_id, role.as_str(), kind.as_str(), content, metadata],
+            params![session_id, role.as_str(), kind.as_str(), "", "null"],
         )?;
         let id = transaction.last_insert_rowid();
+        let created_at: i64 = transaction.query_row("SELECT created_at FROM messages WHERE id=?1", [id], |row| row.get(0))?;
+        let stored = StoredMessage { id, session_id: session_id.to_owned(), role, kind, content, metadata, created_at };
+        let (offset, length) = append_event(&self.events_dir, &stored)?;
+        transaction.execute("UPDATE messages SET event_offset=?2,event_length=?3 WHERE id=?1", params![id, offset, length])?;
+        if kind == MessageKind::AgentState {
+            transaction.execute("INSERT INTO agent_states(message_id,session_id,content,metadata,created_at) VALUES (?1,?2,?3,?4,?5)",
+                params![id, session_id, stored.content, serde_json::to_string(&stored.metadata)?, created_at])?;
+        }
         transaction.execute(
             "UPDATE sessions SET updated_at = unixepoch() WHERE id = ?1",
             [session_id],
         )?;
         transaction.commit()?;
-        self.message(id)?.ok_or_else(|| {
-            MemoryError::InvalidValue("newly inserted message was not found".to_owned())
-        })
+        Ok(stored)
     }
 
     /// Loads one page of a session, returning messages in chronological order.
@@ -354,10 +413,11 @@ impl MemoryStore {
         before_id: Option<i64>,
         limit: u32,
     ) -> Result<Vec<StoredMessage>, MemoryError> {
+        self.sync_session(session_id)?;
         let mut statement = self.connection.prepare(
-            "SELECT id, session_id, role, kind, content, metadata, created_at
+            "SELECT id, session_id, role, kind, content, metadata, created_at, event_offset, event_length
              FROM (
-                 SELECT id, session_id, role, kind, content, metadata, created_at
+                 SELECT id, session_id, role, kind, content, metadata, created_at, event_offset, event_length
                  FROM messages
                  WHERE session_id = ?1 AND (?2 IS NULL OR id < ?2)
                  ORDER BY id DESC
@@ -366,7 +426,7 @@ impl MemoryStore {
              ORDER BY id ASC",
         )?;
         let rows = statement.query_map(params![session_id, before_id, limit], map_raw_message)?;
-        rows.map(|row| decode_message(row?)).collect()
+        rows.map(|row| self.decode_indexed(row?)).collect()
     }
 
     /// Loads the small set of persistent system/agent-state messages for a session.
@@ -380,11 +440,11 @@ impl MemoryStore {
         &self,
         session_id: &str,
     ) -> Result<Vec<StoredMessage>, MemoryError> {
+        self.sync_session(session_id)?;
         let mut statement = self.connection.prepare(
-            "SELECT id, session_id, role, kind, content, metadata, created_at
-             FROM messages
-             WHERE session_id = ?1 AND kind = 'agent_state'
-             ORDER BY id ASC",
+            "SELECT a.message_id,a.session_id,m.role,'agent_state',a.content,a.metadata,a.created_at,NULL,NULL
+             FROM agent_states a JOIN messages m ON m.id=a.message_id
+             WHERE a.session_id=?1 ORDER BY a.message_id ASC",
         )?;
         let rows = statement.query_map([session_id], map_raw_message)?;
         rows.map(|row| decode_message(row?)).collect()
@@ -406,6 +466,51 @@ impl MemoryStore {
             .map_err(MemoryError::from)
     }
 
+    /// Restores the exact effective prefix saved at the last compression.
+    ///
+    /// # Errors
+    /// Returns an error if the session row cannot be read.
+    pub fn effective_context(&self, session_id: &str) -> Result<Option<String>, MemoryError> {
+        self.connection
+            .query_row(
+                "SELECT effective_context FROM session_summaries WHERE session_id = ?1",
+                [session_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map(Option::flatten)
+            .map_err(MemoryError::from)
+    }
+
+    /// Saves a session-local effective snapshot at the current raw-message watermark.
+    ///
+    /// # Errors
+    /// Returns an error if the transaction cannot be committed.
+    pub fn save_effective_context(
+        &mut self,
+        session_id: &str,
+        summary: &str,
+        effective_json: &str,
+    ) -> Result<(), MemoryError> {
+        let transaction = self.connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        sync_session_locked(&transaction, &self.events_dir, session_id)?;
+        let through: i64 = transaction.query_row(
+            "SELECT COALESCE(MAX(id), 0) FROM messages WHERE session_id = ?1",
+            [session_id],
+            |row| row.get(0),
+        )?;
+        transaction.execute(
+            "INSERT INTO session_summaries (session_id, content, compressed_message_count, updated_at, through_message_id, effective_context)
+             VALUES (?1, ?2, 0, unixepoch(), ?3, ?4)
+             ON CONFLICT(session_id) DO UPDATE SET content=excluded.content,
+             updated_at=excluded.updated_at, through_message_id=excluded.through_message_id,
+             effective_context=excluded.effective_context",
+            params![session_id, summary, through, effective_json],
+        )?;
+        transaction.commit()?;
+        Ok(())
+    }
+
     /// Saves a context summary and coverage watermark without deleting any history.
     ///
     /// # Errors
@@ -418,7 +523,8 @@ impl MemoryStore {
         summary: &str,
         compressed_message_count: usize,
     ) -> Result<(), MemoryError> {
-        let transaction = self.connection.transaction()?;
+        let transaction = self.connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        sync_session_locked(&transaction, &self.events_dir, session_id)?;
         let through: i64 = transaction.query_row(
             "SELECT COALESCE(MAX(id), 0) FROM messages WHERE session_id = ?1 AND id NOT IN
              (SELECT id FROM messages WHERE session_id = ?1 ORDER BY id DESC LIMIT ?2)",
@@ -430,7 +536,8 @@ impl MemoryStore {
              VALUES (?1, ?2, ?3, unixepoch(), ?4)
              ON CONFLICT(session_id) DO UPDATE SET content = excluded.content,
              compressed_message_count = excluded.compressed_message_count, updated_at = excluded.updated_at,
-             through_message_id = MAX(session_summaries.through_message_id, excluded.through_message_id)",
+             through_message_id = MAX(session_summaries.through_message_id, excluded.through_message_id),
+             effective_context = NULL",
             params![session_id, summary, compressed_message_count, through],
         )?;
         transaction.commit()?;
@@ -470,7 +577,20 @@ impl MemoryStore {
         &self,
         session_id: &str,
     ) -> Result<Vec<StoredMessage>, MemoryError> {
-        let all = self.load_messages(session_id, None, u32::MAX)?;
+        self.load_context_page(session_id, None, u32::MAX)
+    }
+
+    /// Read a bounded, chronological page after the effective-context watermark.
+    ///
+    /// # Errors
+    /// Returns an error if the database cannot be queried or decoded.
+    pub fn load_context_page(
+        &self,
+        session_id: &str,
+        before_id: Option<i64>,
+        limit: u32,
+    ) -> Result<Vec<StoredMessage>, MemoryError> {
+        self.sync_session(session_id)?;
         let through: i64 = self
             .connection
             .query_row(
@@ -480,23 +600,45 @@ impl MemoryStore {
             )
             .optional()?
             .unwrap_or(0);
-        Ok(all
-            .into_iter()
-            .filter(|message| message.id > through || message.kind == MessageKind::AgentState)
-            .collect())
+        let has_snapshot = self.effective_context(session_id)?.is_some();
+        let mut statement = self.connection.prepare(
+            "SELECT id,session_id,role,kind,content,metadata,created_at,event_offset,event_length FROM (
+             SELECT id,session_id,role,kind,content,metadata,created_at,event_offset,event_length FROM messages
+             WHERE session_id=?1 AND (id>?2 OR (kind='agent_state' AND ?3=0))
+             AND (?4 IS NULL OR id<?4) ORDER BY id DESC LIMIT ?5) ORDER BY id ASC",
+        )?;
+        let rows = statement.query_map(
+            params![session_id, through, has_snapshot, before_id, limit],
+            map_raw_message,
+        )?;
+        rows.map(|row| self.decode_indexed(row?)).collect()
     }
 
-    fn message(&self, id: i64) -> Result<Option<StoredMessage>, MemoryError> {
-        let raw = self
-            .connection
-            .query_row(
-                "SELECT id, session_id, role, kind, content, metadata, created_at
-                 FROM messages WHERE id = ?1",
-                [id],
-                map_raw_message,
-            )
-            .optional()?;
-        raw.map(decode_message).transpose()
+    fn event_path(&self, session_id: &str) -> Result<PathBuf, MemoryError> {
+        event_path(&self.events_dir, session_id)
+    }
+
+    fn decode_indexed(&self, raw: RawMessage) -> Result<StoredMessage, MemoryError> {
+        if let (Some(offset), Some(length)) = (raw.7, raw.8) {
+            let mut file = File::open(self.event_path(&raw.1)?)?;
+            file.seek(SeekFrom::Start(offset.try_into().map_err(|_| MemoryError::InvalidValue("negative event offset".into()))?))?;
+            let mut bytes = vec![0; usize::try_from(length).map_err(|_| MemoryError::InvalidValue("invalid event length".into()))?];
+            file.read_exact(&mut bytes)?;
+            let event: StoredMessage = serde_json::from_slice(&bytes)?;
+            if event.id != raw.0 || event.session_id != raw.1 {
+                return Err(MemoryError::InvalidValue("event index does not match JSONL".into()));
+            }
+            Ok(event)
+        } else {
+            decode_message(raw)
+        }
+    }
+
+    fn sync_session(&self, session_id: &str) -> Result<(), MemoryError> {
+        let transaction = Transaction::new_unchecked(&self.connection, TransactionBehavior::Immediate)?;
+        sync_session_locked(&transaction, &self.events_dir, session_id)?;
+        transaction.commit()?;
+        Ok(())
     }
 
     /// Creates or replaces one long-term memory value by its stable key.
@@ -510,6 +652,7 @@ impl MemoryStore {
         value: impl AsRef<str>,
         category: impl AsRef<str>,
     ) -> Result<LongTermMemory, MemoryError> {
+        validate_fact(key.as_ref(), value.as_ref())?;
         let id = Uuid::new_v4().to_string();
         self.connection.execute(
             "INSERT INTO long_term_memory (id, key, value, category)
@@ -577,6 +720,67 @@ impl MemoryStore {
     }
 }
 
+fn sync_session_locked(transaction: &Transaction<'_>, events_dir: &Path, session_id: &str) -> Result<(), MemoryError> {
+    let path = event_path(events_dir, session_id)?;
+    let (legacy_count, indexed_end): (i64, i64) = transaction.query_row(
+            "SELECT COUNT(*) FILTER (WHERE event_offset IS NULL),
+                    COALESCE(MAX(event_offset + event_length), 0)
+             FROM messages WHERE session_id=?1", [session_id], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        let file_size = match fs::metadata(&path) {
+            Ok(meta) => i64::try_from(meta.len()).map_err(|_| MemoryError::InvalidValue("event log too large".into()))?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => 0,
+            Err(error) => return Err(error.into()),
+        };
+        if legacy_count == 0 && file_size == indexed_end { return Ok(()); }
+        if file_size < indexed_end { return Err(MemoryError::InvalidValue(format!("missing JSONL events for session {session_id}"))); }
+        let mut present = HashMap::new();
+        if file_size > 0 {
+            let mut reader = BufReader::new(File::open(&path)?);
+            let mut offset = 0_i64;
+            loop {
+                let mut line = Vec::new();
+                let length = reader.read_until(b'\n', &mut line)?;
+                if length == 0 { break; }
+                if line.last() != Some(&b'\n') { return Err(MemoryError::InvalidValue("incomplete JSONL event".into())); }
+                let event: StoredMessage = serde_json::from_slice(&line)?;
+                if event.session_id != session_id { return Err(MemoryError::InvalidValue("JSONL session mismatch".into())); }
+                if present.insert(event.id, (offset, i64::try_from(length).unwrap_or(i64::MAX))).is_some() {
+                    return Err(MemoryError::InvalidValue("duplicate JSONL event id".into()));
+                }
+                let exists: bool = transaction.query_row("SELECT EXISTS(SELECT 1 FROM messages WHERE id=?1 AND session_id=?2)", params![event.id, session_id], |row| row.get(0))?;
+                if exists {
+                    transaction.execute("UPDATE messages SET content='',metadata='null',event_offset=?2,event_length=?3 WHERE id=?1",
+                        params![event.id, offset, length])?;
+                } else {
+                    transaction.execute("INSERT INTO messages(id,session_id,role,kind,content,metadata,created_at,event_offset,event_length) VALUES (?1,?2,?3,?4,'','null',?5,?6,?7)",
+                        params![event.id, session_id, event.role.as_str(), event.kind.as_str(), event.created_at, offset, length])?;
+                }
+                if event.kind == MessageKind::AgentState {
+                    transaction.execute("INSERT OR IGNORE INTO agent_states(message_id,session_id,content,metadata,created_at) VALUES (?1,?2,?3,?4,?5)",
+                        params![event.id, session_id, event.content, serde_json::to_string(&event.metadata)?, event.created_at])?;
+                }
+                offset += i64::try_from(length).unwrap_or(i64::MAX);
+            }
+        }
+        let legacy = {
+            let mut statement = transaction.prepare("SELECT id,session_id,role,kind,content,metadata,created_at,event_offset,event_length FROM messages WHERE session_id=?1 AND event_offset IS NULL ORDER BY id")?;
+            let rows = statement.query_map([session_id], map_raw_message)?;
+            rows.collect::<Result<Vec<_>, _>>()?
+        };
+        for raw in legacy {
+            if present.contains_key(&raw.0) { continue; }
+            let event = decode_message(raw)?;
+            let (offset, length) = append_event(events_dir, &event)?;
+            transaction.execute("UPDATE messages SET content='',metadata='null',event_offset=?2,event_length=?3 WHERE id=?1", params![event.id, offset, length])?;
+            if event.kind == MessageKind::AgentState {
+                transaction.execute("INSERT OR IGNORE INTO agent_states(message_id,session_id,content,metadata,created_at) VALUES (?1,?2,?3,?4,?5)",
+                    params![event.id, session_id, event.content, serde_json::to_string(&event.metadata)?, event.created_at])?;
+            }
+        }
+        Ok(())
+    }
+
+
 fn normalized_title(title: &str) -> String {
     let title = title.trim();
     if title.is_empty() {
@@ -596,7 +800,7 @@ fn map_session(row: &rusqlite::Row<'_>) -> rusqlite::Result<Session> {
     })
 }
 
-type RawMessage = (i64, String, String, String, String, String, i64);
+type RawMessage = (i64, String, String, String, String, String, i64, Option<i64>, Option<i64>);
 
 fn map_raw_message(row: &rusqlite::Row<'_>) -> rusqlite::Result<RawMessage> {
     Ok((
@@ -607,7 +811,35 @@ fn map_raw_message(row: &rusqlite::Row<'_>) -> rusqlite::Result<RawMessage> {
         row.get(4)?,
         row.get(5)?,
         row.get(6)?,
+        row.get(7)?,
+        row.get(8)?,
     ))
+}
+
+fn event_path(events_dir: &Path, session_id: &str) -> Result<PathBuf, MemoryError> {
+    let id = Uuid::parse_str(session_id).map_err(|_| MemoryError::InvalidValue("invalid session id".into()))?;
+    Ok(events_dir.join(format!("{id}.jsonl")))
+}
+
+fn append_event(events_dir: &Path, event: &StoredMessage) -> Result<(i64, i64), MemoryError> {
+    fs::create_dir_all(events_dir)?;
+    let path = event_path(events_dir, &event.session_id)?;
+    let mut file = OpenOptions::new().create(true).append(true).open(path)?;
+    let offset = i64::try_from(file.metadata()?.len()).map_err(|_| MemoryError::InvalidValue("event log too large".into()))?;
+    let mut line = serde_json::to_vec(event)?;
+    line.push(b'\n');
+    file.write_all(&line)?;
+    file.sync_data()?;
+    let length = i64::try_from(line.len()).map_err(|_| MemoryError::InvalidValue("event too large".into()))?;
+    Ok((offset, length))
+}
+
+impl Drop for MemoryStore {
+    fn drop(&mut self) {
+        if self.ephemeral_events {
+            let _ = fs::remove_dir_all(&self.events_dir);
+        }
+    }
 }
 
 fn decode_message(raw: RawMessage) -> Result<StoredMessage, MemoryError> {
@@ -728,6 +960,47 @@ mod tests {
     }
 
     #[test]
+    fn effective_snapshot_resumes_only_its_session_and_keeps_raw_history() {
+        let mut store = MemoryStore::open_in_memory().unwrap();
+        let first = store.create_session("first").unwrap();
+        let second = store.create_session("second").unwrap();
+        store
+            .append_message(
+                &first.id,
+                NewMessage::text(MessageRole::User, "original user text"),
+            )
+            .unwrap();
+        store
+            .append_message(
+                &first.id,
+                NewMessage::text(MessageRole::Tool, "very long raw test output"),
+            )
+            .unwrap();
+        store
+            .save_effective_context(&first.id, "GOAL: test", "[\"compressed context\"]")
+            .unwrap();
+        assert_eq!(
+            store.effective_context(&first.id).unwrap().as_deref(),
+            Some("[\"compressed context\"]")
+        );
+        assert_eq!(
+            store.session_summary(&first.id).unwrap().as_deref(),
+            Some("GOAL: test")
+        );
+        assert!(store.load_context_messages(&first.id).unwrap().is_empty());
+        assert_eq!(store.load_messages(&first.id, None, 10).unwrap().len(), 2);
+        assert!(store.effective_context(&second.id).unwrap().is_none());
+        assert!(store.session_summary(&second.id).unwrap().is_none());
+        store
+            .append_message(
+                &first.id,
+                NewMessage::text(MessageRole::User, "after resume"),
+            )
+            .unwrap();
+        assert_eq!(store.load_context_messages(&first.id).unwrap().len(), 1);
+    }
+
+    #[test]
     fn long_term_memory_upserts_by_key_and_filters_by_category() {
         let store = MemoryStore::open_in_memory().expect("store should open");
         store
@@ -788,11 +1061,14 @@ mod tests {
 
     #[test]
     fn migration_from_old_summary_schema_keeps_rows() {
-        let store = MemoryStore::open_in_memory().unwrap();
+        let mut store = MemoryStore::open_in_memory().unwrap();
         let session = store.create_session("legacy").unwrap();
         store.connection.execute("INSERT INTO session_summaries(session_id,content,compressed_message_count) VALUES (?1,'old summary',1)",[&session.id]).unwrap();
         store.connection.execute_batch("ALTER TABLE session_summaries DROP COLUMN through_message_id; PRAGMA user_version = 2;").unwrap();
-        let migrated = MemoryStore::initialize(store.connection).unwrap();
+        let connection = std::mem::replace(&mut store.connection, Connection::open_in_memory().unwrap());
+        let events_dir = store.events_dir.clone();
+        store.ephemeral_events = false;
+        let migrated = MemoryStore::initialize(connection, events_dir, true).unwrap();
         assert_eq!(
             migrated.session_summary(&session.id).unwrap().as_deref(),
             Some("old summary")
@@ -803,5 +1079,55 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn raw_events_live_in_jsonl_and_sqlite_keeps_only_the_index() {
+        let root = std::env::temp_dir().join(format!("ax-hybrid-{}", Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("memory.sqlite3");
+        let mut store = MemoryStore::open(&path).unwrap();
+        let session = store.create_session("hybrid").unwrap();
+        let state = store.append_message(&session.id, NewMessage {
+            role: MessageRole::System, kind: MessageKind::AgentState,
+            content: "active skill".into(), metadata: Value::Null,
+        }).unwrap();
+        let event = store.append_message(&session.id, NewMessage::text(MessageRole::User, "raw private text")).unwrap();
+        let indexed: (String, Option<i64>, Option<i64>) = store.connection.query_row(
+            "SELECT content,event_offset,event_length FROM messages WHERE id=?1", [event.id],
+            |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?))).unwrap();
+        assert!(indexed.0.is_empty());
+        assert!(indexed.1.is_some() && indexed.2.is_some());
+        let log = fs::read_to_string(root.join("sessions").join(format!("{}.jsonl", session.id))).unwrap();
+        assert_eq!(log.lines().count(), 2);
+        assert!(log.contains("raw private text"));
+        store.save_effective_context(&session.id, "short", "[]").unwrap();
+        drop(store);
+        let store = MemoryStore::open(&path).unwrap();
+        assert_eq!(store.load_messages(&session.id, None, 10).unwrap()[1].content, "raw private text");
+        assert_eq!(store.load_agent_state_messages(&session.id).unwrap()[0].id, state.id);
+        assert_eq!(store.effective_context(&session.id).unwrap().as_deref(), Some("[]"));
+        drop(store);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn legacy_rows_and_unindexed_jsonl_events_recover_without_loss() {
+        let mut store = MemoryStore::open_in_memory().unwrap();
+        let session = store.create_session("legacy").unwrap();
+        store.connection.execute(
+            "INSERT INTO messages(session_id,role,kind,content,metadata) VALUES (?1,'user','message','legacy body','null')",
+            [&session.id]).unwrap();
+        let history = store.load_messages(&session.id, None, 10).unwrap();
+        assert_eq!(history[0].content, "legacy body");
+        let content: String = store.connection.query_row("SELECT content FROM messages WHERE id=?1", [history[0].id], |row| row.get(0)).unwrap();
+        assert!(content.is_empty());
+        let orphan = StoredMessage { id: history[0].id + 1, session_id: session.id.clone(), role: MessageRole::Tool,
+            kind: MessageKind::Message, content: "after crash".into(), metadata: Value::Null, created_at: 123 };
+        append_event(&store.events_dir, &orphan).unwrap();
+        assert_eq!(store.session(&session.id).unwrap().unwrap().message_count, 2);
+        assert_eq!(store.load_messages(&session.id, None, 10).unwrap()[1].content, "after crash");
+        let next = store.append_message(&session.id, NewMessage::text(MessageRole::User, "next")).unwrap();
+        assert!(next.id > orphan.id);
     }
 }

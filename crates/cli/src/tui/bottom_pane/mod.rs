@@ -9,6 +9,7 @@
 
 pub mod approval_dialog;
 pub mod composer;
+pub mod memory_editor;
 pub mod model_picker;
 pub mod picker;
 pub mod secret_input;

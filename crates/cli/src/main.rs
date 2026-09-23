@@ -22,8 +22,12 @@ use tool::{FilesystemTool, ShellTool, ToolRegistry};
 
 mod config;
 mod memory_context;
+mod memory_tool;
 mod model_selection;
+mod project_identity;
 mod providers;
+mod session_restore;
+mod skill_settings;
 mod tui;
 use model_selection::ModelResolution;
 use tui::run_tui;
@@ -126,6 +130,7 @@ struct ReplState {
     global_store: Option<MemoryStore>,
     memory_scopes_migrated: bool,
     project_id: String,
+    project_local_store: bool,
     skill_catalog: Option<SkillCatalog>,
     mcp_manager: Option<Arc<tokio::sync::Mutex<McpManager>>>,
     mcp_tools: Vec<McpToolProxy>,
@@ -139,11 +144,19 @@ struct ReplState {
 
 impl ReplState {
     fn new(data_dir: PathBuf, skills_dir: PathBuf, mcp_config: Option<PathBuf>) -> Result<Self> {
+        let project_root = discover_project_root(&std::env::current_dir()?);
+        Self::new_in_project(data_dir, skills_dir, mcp_config, &project_root)
+    }
+
+    fn new_in_project(
+        data_dir: PathBuf,
+        skills_dir: PathBuf,
+        mcp_config: Option<PathBuf>,
+        project_root: &Path,
+    ) -> Result<Self> {
         migrate_legacy_project_auth(&data_dir)?;
         fs::create_dir_all(&data_dir)?;
-        let project_id = discover_project_root(&std::env::current_dir()?)
-            .to_string_lossy()
-            .into_owned();
+        let project_id = project_identity::load_or_create(project_root)?;
         let database = database_path(&data_dir);
         let mcp_config = mcp_config.unwrap_or_else(|| data_dir.join("mcp.toml"));
         let store = if database.exists() {
@@ -153,6 +166,14 @@ impl ReplState {
         } else {
             None
         };
+        if let Some(store) = &store {
+            store.migrate_project_owner(
+                &project_id,
+                &project_root.to_string_lossy(),
+                data_dir == project_root.join(".ax"),
+            )?;
+        }
+        let project_local_store = data_dir == project_root.join(".ax");
         Ok(Self {
             data_dir,
             skills_dir,
@@ -161,6 +182,7 @@ impl ReplState {
             global_store: None,
             memory_scopes_migrated: false,
             project_id,
+            project_local_store,
             skill_catalog: None,
             mcp_manager: None,
             mcp_tools: Vec::new(),
@@ -213,13 +235,46 @@ impl ReplState {
         let Some(session) = session else {
             return Ok(false);
         };
-        let stored = self.store()?.load_context_messages(id)?;
+        let disabled_skills = self.disabled_skills()?;
+        let stored = session_restore::recent_history(self.store()?, id, budget.history_budget())?;
         let summary = self.store()?.session_summary(id)?;
-        self.loaded_messages = summary
-            .map(|summary| Message::system(format!("[memory-summary]\n{summary}")))
-            .into_iter()
-            .chain(stored.iter().map(restore_message))
-            .collect();
+        self.loaded_messages = if let Some(snapshot) = self.store()?.effective_context(id)? {
+            serde_json::from_str::<Vec<Message>>(&snapshot)?
+        } else {
+            summary
+                .map(|summary| Message::system(format!("[memory-summary]\n{summary}")))
+                .into_iter()
+                .collect()
+        };
+        let has_snapshot = self.store()?.effective_context(id)?.is_some();
+        if !has_snapshot {
+            let agent_state = self.store()?.load_agent_state_messages(id)?;
+            self.loaded_messages
+                .extend(agent_state.iter().map(restore_message));
+        }
+        self.loaded_messages.extend(
+            stored
+                .iter()
+                .filter(|message| has_snapshot || message.kind != MessageKind::AgentState)
+                .map(restore_message),
+        );
+        let recovered = session_restore::interrupted_results(&self.loaded_messages);
+        // Persist recovery results without replaying tools with unknown side effects.
+        for message in &recovered {
+            self.store()?.append_message(
+                id,
+                NewMessage {
+                    role: MessageRole::Tool,
+                    kind: MessageKind::ToolCall,
+                    content: message.content.clone(),
+                    metadata: serde_json::to_value(message)?,
+                },
+            )?;
+        }
+        self.loaded_messages.extend(recovered);
+        self.loaded_messages.retain(|message| {
+            active_skill_name(message).is_none_or(|name| !disabled_skills.contains(&name))
+        });
         self.loaded_messages = runtime_core::select_context(
             &self.loaded_messages,
             budget.recent_messages_budget(),
@@ -260,6 +315,10 @@ impl ReplState {
     }
 
     fn persist_messages(&mut self, messages: &[Message]) -> Result<()> {
+        self.persist_turn_messages(messages, &mut 0)
+    }
+
+    fn persist_turn_messages(&mut self, messages: &[Message], saved: &mut usize) -> Result<()> {
         let session_id = self.current_session_id()?.to_owned();
         let mcp_call_ids = messages
             .iter()
@@ -267,7 +326,7 @@ impl ReplState {
             .filter(|call| call.function.name.starts_with("mcp__"))
             .map(|call| call.id.as_str())
             .collect::<HashSet<_>>();
-        for message in messages {
+        for message in messages.iter().skip(*saved) {
             let role = memory_role(&message.role);
             let kind = match message.role {
                 Role::System => MessageKind::AgentState,
@@ -302,6 +361,7 @@ impl ReplState {
                     metadata: serde_json::to_value(message)?,
                 },
             )?;
+            *saved += 1;
         }
         Ok(())
     }
@@ -328,13 +388,16 @@ impl ReplState {
             .map(str::to_owned)
             .collect::<Vec<_>>();
         available_tools.push("mcp".to_owned());
+        available_tools.push("memory".to_owned());
+        let disabled_skills = self.disabled_skills()?;
         let candidates = self
             .skills()?
             .route_candidates(prompt, available_tools.iter().map(String::as_str));
         let mut messages = Vec::new();
         let mut remaining_tokens = token_budget;
         for matched in candidates {
-            if self.active_skills.contains(&matched.name) {
+            if disabled_skills.contains(&matched.name) || self.active_skills.contains(&matched.name)
+            {
                 continue;
             }
             let loaded = self.skills()?.load(&matched.name)?;
@@ -417,6 +480,12 @@ fn discover_project_root(start: &Path) -> PathBuf {
         .take_while(|dir| boundary.as_deref() != Some(*dir))
         .collect::<Vec<_>>();
     if let Some(root) = candidates.iter().find(|dir| dir.join(".git").exists()) {
+        return (*root).to_path_buf();
+    }
+    if let Some(root) = candidates
+        .iter()
+        .find(|dir| dir.join(".ax/project.json").is_file() || dir.join(".ax/project-id").is_file())
+    {
         return (*root).to_path_buf();
     }
     if let Some(root) = candidates.iter().find(|dir| {
@@ -622,8 +691,10 @@ fn render_event(event: AgentEvent) {
         AgentEvent::ContextCompressed {
             removed_messages,
             estimated_tokens_before,
+            estimated_tokens_after,
+            ..
         } => eprintln!(
-            "[memory] compressed {removed_messages} messages ({estimated_tokens_before} estimated tokens)"
+            "[memory] compressed {removed_messages} messages ({estimated_tokens_before} -> {estimated_tokens_after} estimated tokens)"
         ),
         AgentEvent::TurnFinished => println!(),
         AgentEvent::TurnStarted | AgentEvent::ThinkingDelta { .. } => {}
@@ -738,6 +809,21 @@ where
     } else {
         state.ensure_session(prompt)?;
     }
+    // Bind memory access to the current session and user request on every turn.
+    let global_root = config::ax_home();
+    fs::create_dir_all(&global_root)?;
+    let memory_tool = memory_tool::MemoryTool {
+        database: database_path(&state.data_dir),
+        global_database: global_root.join("memory.sqlite3"),
+        project: state.project_id.clone(),
+        session: state.current_session_id()?.to_owned(),
+        user_input: prompt.to_owned(),
+    };
+    state
+        .runtime
+        .as_mut()
+        .expect("runtime initialized")
+        .register_tool(memory_tool);
     let budget = state
         .runtime
         .as_ref()
@@ -748,21 +834,6 @@ where
         .as_mut()
         .expect("runtime initialized")
         .set_context("[retrieved-memory]", None);
-    let compression = state
-        .runtime
-        .as_mut()
-        .ok_or_else(|| anyhow!("agent runtime was not initialized"))?
-        .compress_if_needed(&mut emit)
-        .await?;
-    if let Some(compression) = compression {
-        let session_id = state.current_session_id()?.to_owned();
-        state.store()?.save_context_summary(
-            &session_id,
-            u32::try_from(compression.retained_messages).unwrap_or(u32::MAX),
-            &compression.summary,
-            compression.removed_messages,
-        )?;
-    }
     let context_timer = tool::telemetry::Timer::new("context.prepare");
     let memory_context = state.memory_context(prompt, budget.memory_budget_tokens())?;
     state
@@ -779,14 +850,39 @@ where
             .push_context(skill_message);
     }
     drop(context_timer);
-    let runtime = state
-        .runtime
-        .as_mut()
-        .ok_or_else(|| anyhow!("agent runtime was not initialized"))?;
-    let start = runtime.messages().len();
-    let result = runtime.run_turn(prompt, &mut emit).await;
-    let new_messages = runtime.messages()[start..].to_vec();
-    state.persist_messages(&new_messages)?;
+    let mut runtime = state.runtime.take().expect("runtime initialized");
+    let mut saved = 0;
+    let result = runtime
+        .run_turn_checkpointed(prompt, &mut emit, |messages| {
+            state
+                .persist_turn_messages(messages, &mut saved)
+                .map_err(|error| runtime_core::AgentError::Persistence(error.to_string()))
+        })
+        .await;
+    let snapshot = if runtime.take_compression_dirty() {
+        let summary = runtime
+            .messages()
+            .iter()
+            .find(|m| m.content.starts_with("[memory-summary]"))
+            .map_or_else(String::new, |m| {
+                m.content
+                    .trim_start_matches("[memory-summary]\n")
+                    .to_owned()
+            });
+        Some((summary, serde_json::to_string(runtime.messages())))
+    } else {
+        None
+    };
+    state.runtime = Some(runtime);
+    if let Some((summary, effective)) = snapshot {
+        // Never advance the watermark past messages that failed to persist.
+        if !matches!(result, Err(runtime_core::AgentError::Persistence(_))) {
+            let session_id = state.current_session_id()?.to_owned();
+            state
+                .store()?
+                .save_effective_context(&session_id, &summary, &effective?)?;
+        }
+    }
     result.map_err(Into::into)
 }
 

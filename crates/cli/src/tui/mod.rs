@@ -1028,12 +1028,101 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn memory_manager_edits_and_deletes_a_fact_without_changing_other_scopes() {
+        let root = std::env::temp_dir().join(format!("ax-memory-ui-{}", uuid::Uuid::new_v4()));
+        let mut state =
+            ReplState::new_in_project(root.clone(), root.join("skills"), None, &root).unwrap();
+        state.store = Some(memory::MemoryStore::open_in_memory().unwrap());
+        state.global_store = Some(memory::MemoryStore::open_in_memory().unwrap());
+        state.ensure_session("test").unwrap();
+        let record = memory::MemoryRecord {
+            scope: memory::MemoryScope::Project,
+            owner: state.project_id.clone(),
+            key: "response.detail".into(),
+            value: "brief".into(),
+            source: "user/test".into(),
+            updated_at: 0,
+            always_include: false,
+        };
+        state.store().unwrap().remember_scoped(&record).unwrap();
+        let mut selection = selection();
+        let mut app = App::new(&selection);
+        let mut pane = BottomPane::new("test");
+        let (tx, _) = mpsc::unbounded_channel();
+        let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+        commands::execute_slash("/memory", &mut state, &mut selection, &mut app, &mut pane)
+            .await
+            .unwrap();
+        pane.handle_view_key(key(KeyCode::Down));
+        // Project list -> record details -> editor.
+        for _ in 0..3 {
+            let action = pane
+                .handle_view_key(key(KeyCode::Enter))
+                .unwrap()
+                .1
+                .unwrap();
+            commands::apply_modal_action(
+                action,
+                &mut state,
+                &mut selection,
+                &mut app,
+                &mut pane,
+                &tx,
+            )
+            .await
+            .unwrap();
+        }
+        for _ in 0..5 {
+            pane.handle_view_key(key(KeyCode::Backspace));
+        }
+        for c in "detailed".chars() {
+            pane.handle_view_key(key(KeyCode::Char(c)));
+        }
+        let action = pane
+            .handle_view_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::ALT))
+            .unwrap()
+            .1
+            .unwrap();
+        commands::apply_modal_action(action, &mut state, &mut selection, &mut app, &mut pane, &tx)
+            .await
+            .unwrap();
+        let records = state.memory_records(memory::MemoryScope::Project).unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].value, "detailed");
+        assert_eq!(records[0].source, "user/memory-editor");
+        pane.handle_view_key(key(KeyCode::Down));
+        let action = pane
+            .handle_view_key(key(KeyCode::Enter))
+            .unwrap()
+            .1
+            .unwrap();
+        commands::apply_modal_action(action, &mut state, &mut selection, &mut app, &mut pane, &tx)
+            .await
+            .unwrap();
+        assert!(
+            state
+                .memory_records(memory::MemoryScope::Project)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            state
+                .memory_records(memory::MemoryScope::Session)
+                .unwrap()
+                .is_empty()
+        );
+        drop(state);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
     async fn permission_change_refreshes_parent_without_reopening() {
         let mut selection = selection();
         let mut app = App::new(&selection);
         let mut pane = BottomPane::new("deepseek-chat");
         let data = std::env::temp_dir().join(format!("ax-permission-ui-{}", std::process::id()));
-        let mut state = ReplState::new(data.clone(), data.join("skills"), None).unwrap();
+        let mut state =
+            ReplState::new_in_project(data.clone(), data.join("skills"), None, &data).unwrap();
         let (tx, _) = mpsc::unbounded_channel();
         commands::execute_slash(
             "/permissions",

@@ -39,20 +39,26 @@ pub enum AgentEvent {
     ContextCompressed {
         removed_messages: usize,
         estimated_tokens_before: usize,
+        estimated_tokens_after: usize,
+        tokens_freed: usize,
+        compression_ratio: f64,
+        cleanup_tier: &'static str,
+        semantic_called: bool,
+        tool_outputs_reduced: usize,
+        tool_outputs_removed: usize,
+        recent_raw_tokens: usize,
     },
 }
 
 #[derive(Clone, Debug)]
 pub struct CompressionPolicy {
     pub threshold_percent: u8,
-    pub retain_recent_messages: usize,
 }
 
 impl Default for CompressionPolicy {
     fn default() -> Self {
         Self {
-            threshold_percent: 75,
-            retain_recent_messages: 12,
+            threshold_percent: ContextBudget::SOFT_PRESSURE_PERCENT,
         }
     }
 }
@@ -63,6 +69,10 @@ pub struct CompressionResult {
     pub removed_messages: usize,
     pub retained_messages: usize,
     pub estimated_tokens_before: usize,
+    pub estimated_tokens_after: usize,
+    pub tool_outputs_reduced: usize,
+    pub tool_outputs_removed: usize,
+    pub semantic_called: bool,
 }
 
 #[derive(Debug, Error)]
@@ -80,6 +90,8 @@ pub enum AgentError {
     StepLimit(usize),
     #[error("execution budget exhausted: {0}")]
     Budget(String),
+    #[error("history persistence failed: {0}")]
+    Persistence(String),
     #[error("agent worker failed: {0}")]
     WorkerJoin(String),
 }
@@ -114,6 +126,8 @@ pub struct AgentKernel {
     messages: Vec<Message>,
     budget: ExecutionBudget,
     compression: CompressionPolicy,
+    raw_turn_messages: Vec<Message>,
+    compression_dirty: bool,
 }
 
 impl AgentKernel {
@@ -130,6 +144,8 @@ impl AgentKernel {
             messages: Vec::new(),
             budget: ExecutionBudget::default(),
             compression: CompressionPolicy::default(),
+            raw_turn_messages: Vec::new(),
+            compression_dirty: false,
         }
     }
 
@@ -143,6 +159,11 @@ impl AgentKernel {
     pub fn with_tool(mut self, tool: impl tool::Tool + 'static) -> Self {
         self.tools.register(tool);
         self
+    }
+
+    /// Register or replace a tool before the next turn.
+    pub fn register_tool(&mut self, tool: impl tool::Tool + 'static) {
+        self.tools.register(tool);
     }
 
     #[must_use]
@@ -180,6 +201,8 @@ impl AgentKernel {
             messages,
             budget: self.budget,
             compression: self.compression.clone(),
+            raw_turn_messages: Vec::new(),
+            compression_dirty: false,
         }
     }
 
@@ -203,8 +226,18 @@ impl AgentKernel {
         )
     }
 
-    /// Summarizes old context when usage exceeds the configured fraction of
-    /// the active model's context window. Recent messages are retained verbatim.
+    /// Raw messages produced by the last turn, independent of effective-context cleanup.
+    pub fn take_turn_messages(&mut self) -> Vec<Message> {
+        std::mem::take(&mut self.raw_turn_messages)
+    }
+
+    /// A snapshot is needed after compression so cleanup survives session resume.
+    pub fn take_compression_dirty(&mut self) -> bool {
+        std::mem::take(&mut self.compression_dirty)
+    }
+
+    /// Applies the layered compression pipeline when effective context is under
+    /// pressure. Called before every model request in the agent loop.
     ///
     /// # Errors
     ///
@@ -219,8 +252,8 @@ impl AgentKernel {
         self.compress(false, emit).await
     }
 
-    /// Forces a context compaction regardless of the configured threshold.
-    /// Recent messages and persistent system context are still preserved.
+    /// Runs the same pipeline more aggressively on explicit user request.
+    /// Recent messages and persistent system context remain protected.
     ///
     /// # Errors
     ///
@@ -233,6 +266,7 @@ impl AgentKernel {
         self.compress(true, emit).await
     }
 
+    #[allow(clippy::too_many_lines)]
     async fn compress<F>(
         &mut self,
         force: bool,
@@ -242,88 +276,215 @@ impl AgentKernel {
         F: FnMut(AgentEvent) + Send,
     {
         let _timer = tool::telemetry::Timer::new("context.compress");
-        let estimated_tokens_before = self.estimated_context_tokens();
+        let before = self.estimated_context_tokens();
+        let original = self.messages.clone();
         let budget = self.context_budget();
-        let threshold = budget.compact_threshold(self.compression.threshold_percent);
-        let retain = self.compression.retain_recent_messages;
-        if (!force && estimated_tokens_before < threshold) || self.messages.len() <= retain + 1 {
+        if !force && before < budget.compact_threshold(self.compression.threshold_percent) {
             return Ok(None);
         }
-        let proposed = self.messages.len().saturating_sub(retain);
-        let split = (0..=proposed)
-            .rev()
-            .find(|&index| self.messages[index].role == model::Role::User)
-            .unwrap_or(0);
-        if split == 0 {
+        let target = if force {
+            budget.pressure_target() / 2
+        } else {
+            budget.pressure_target()
+        };
+        let need_to_free = before.saturating_sub(target);
+        if need_to_free == 0 && !force {
             return Ok(None);
         }
-        let old_messages = &self.messages[..split];
-        let persistent_context = old_messages
-            .iter()
-            .filter(|message| {
-                message.role == model::Role::System
-                    && !message.content.starts_with("[memory-summary]")
-            })
-            .cloned()
+        let recent_start = recent_raw_start(&self.messages, budget.recent_raw_budget());
+        let recent_raw_tokens = estimate_tokens(&self.messages[recent_start..]);
+        let mut reduced = 0;
+        let mut tier = "cleanup";
+
+        // Largest old, reproducible outputs first. Never mutate the raw turn log.
+        let mut candidates = (0..recent_start)
+            .filter(|&i| self.messages[i].role == model::Role::Tool)
             .collect::<Vec<_>>();
-        let transcript = old_messages
-            .iter()
-            .filter(|message| {
-                message.role != model::Role::System
-                    || message.content.starts_with("[memory-summary]")
-            })
-            .map(|message| {
-                format!(
-                    "{:?}: {}{}",
-                    message.role,
-                    message.content,
-                    if message.tool_calls.is_empty() {
-                        String::new()
+        candidates.sort_by_key(|&i| {
+            std::cmp::Reverse(estimate_tokens(std::slice::from_ref(&self.messages[i])))
+        });
+        for i in candidates {
+            if self.estimated_context_tokens() <= target && !force {
+                break;
+            }
+            let old = self.messages[i].content.clone();
+            if let Some(short) = compact_tool_output(&old) {
+                self.messages[i].content = short;
+                reduced += 1;
+            }
+        }
+
+        // Repeated reads and repeated failures: keep the latest occurrence.
+        if self.estimated_context_tokens() > target || force {
+            tier = "deduplicate";
+            let mut seen = std::collections::HashSet::new();
+            let call_keys = self
+                .messages
+                .iter()
+                .flat_map(|m| &m.tool_calls)
+                .map(|call| {
+                    (
+                        call.id.clone(),
+                        format!("{}:{}", call.function.name, call.function.arguments),
+                    )
+                })
+                .collect::<std::collections::HashMap<_, _>>();
+            for i in (0..self.messages.len()).rev() {
+                if self.messages[i].role != model::Role::Tool {
+                    continue;
+                }
+                let content = self.messages[i].content.clone();
+                let key = self.messages[i]
+                    .tool_call_id
+                    .as_ref()
+                    .and_then(|id| call_keys.get(id))
+                    .cloned()
+                    .unwrap_or(content.clone());
+                if !seen.insert(key) && i < recent_start && estimate_text_tokens(&content) > 6 {
+                    self.messages[i].content = "[duplicate tool output]".into();
+                    reduced += 1;
+                }
+            }
+        }
+
+        let mut semantic_called = false;
+        let mut removed_messages = 0;
+        let mut tool_outputs_removed = 0;
+        if self.estimated_context_tokens() > target || (force && reduced == 0) {
+            // Only complete older turns are eligible. Existing summaries stay verbatim.
+            let split = (recent_start..self.messages.len())
+                .find(|&i| self.messages[i].role == model::Role::User)
+                .unwrap_or(0);
+            let old = &self.messages[..split];
+            let transcript = old
+                .iter()
+                .filter(|m| m.role != model::Role::System)
+                .map(|m| {
+                    format!(
+                        "{:?}: {}{}",
+                        m.role,
+                        m.content,
+                        if m.tool_calls.is_empty() {
+                            String::new()
+                        } else {
+                            format!("\nTool calls: {:?}", m.tool_calls)
+                        }
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n\n");
+            if !transcript.is_empty() {
+                tool_outputs_removed = old.iter().filter(|m| m.role == model::Role::Tool).count();
+                let mut compression_messages = vec![Message::system(
+                    "Compress the older conversation into the smallest state sufficient to continue the task correctly. Preserve information that may affect future decisions, such as important user constraints, decisions, unresolved problems, relevant failures, current progress, and necessary facts. Decide semantically what matters. Do not invent information or repeat information already preserved by an earlier summary. Return only JSON: {\"state\":[{\"type\":\"other\",\"content\":\"...\",\"importance\":0.8}]}. Choose each entry's type as appropriate, for example constraint, decision, goal, fact, progress, failure, error, next_action, or other. Include only entries that matter; no type is required. Importance must be between 0 and 1.",
+                )];
+                if let Some(previous) = old
+                    .iter()
+                    .find(|m| m.content.starts_with("[memory-summary]"))
+                {
+                    compression_messages.push(Message::system(format!("Already preserved session state, for reference only. Do not rewrite it:\n{}", previous.content)));
+                }
+                compression_messages.push(Message::user(transcript));
+                let response = self
+                    .provider
+                    .complete(ModelRequest {
+                        messages: compression_messages,
+                        tools: Vec::new(),
+                    })
+                    .await
+                    .map_err(|error| {
+                        self.messages.clone_from(&original);
+                        AgentError::Model(error)
+                    })?;
+                if response.content.trim().is_empty() {
+                    self.messages = original;
+                    return Err(AgentError::Model(ModelError::InvalidResponse(
+                        "context summarizer returned empty text".into(),
+                    )));
+                }
+                let Some(new_state) = parse_semantic_state(&response.content) else {
+                    self.messages = original;
+                    return Ok(None);
+                };
+                semantic_called = true;
+                tier = "semantic";
+                let mut retained = self.messages.split_off(split);
+                let mut persistent = self
+                    .messages
+                    .drain(..)
+                    .filter(|m| m.role == model::Role::System)
+                    .collect::<Vec<_>>();
+                removed_messages = split.saturating_sub(persistent.len());
+                let mut state = persistent
+                    .iter()
+                    .find(|m| m.content.starts_with("[memory-summary]"))
+                    .map_or_else(Vec::new, |m| parse_saved_summary(&m.content));
+                for entry in new_state {
+                    if let Some(existing) = state
+                        .iter_mut()
+                        .find(|saved| saved.content.eq_ignore_ascii_case(&entry.content))
+                    {
+                        if entry.importance > existing.importance {
+                            *existing = entry;
+                        }
                     } else {
-                        format!("\nTool calls: {:?}", message.tool_calls)
+                        state.push(entry);
                     }
-                )
-            })
-            .collect::<Vec<_>>()
-            .join("\n\n");
-        if transcript.is_empty() {
+                }
+                let Some(summary) = fit_summary(&state, budget.session_summary_budget()) else {
+                    self.messages = original;
+                    return Ok(None);
+                };
+                persistent.retain(|m| !m.content.starts_with("[memory-summary]"));
+                persistent.insert(0, Message::system(summary));
+                persistent.append(&mut retained);
+                self.messages = persistent;
+            }
+        }
+        let after = self.estimated_context_tokens();
+        if after >= before {
+            self.messages = original;
             return Ok(None);
         }
-        let response = self
-            .provider
-            .complete(ModelRequest {
-                messages: vec![
-                    Message::system(
-                        "Summarize prior agent-runtime context compactly. Preserve user goals, completed work, key code changes, tool outcomes, constraints, unresolved tasks, and important decisions. Do not invent facts.",
-                    ),
-                    Message::user(transcript),
-                ],
-                tools: Vec::new(),
-            })
-            .await?;
-        if response.content.trim().is_empty() {
-            return Err(AgentError::Model(ModelError::InvalidResponse(
-                "context summarizer returned empty text".to_owned(),
-            )));
-        }
-        let summary = response.content.trim().to_owned();
-        let removed_messages = old_messages.len().saturating_sub(persistent_context.len());
-        let retained = self.messages.split_off(split);
-        let retained_messages = retained.len();
-        self.messages = Vec::with_capacity(retained.len() + persistent_context.len() + 1);
-        self.messages
-            .push(Message::system(format!("[memory-summary]\n{summary}")));
-        self.messages.extend(persistent_context);
-        self.messages.extend(retained);
+        let summary = self
+            .messages
+            .iter()
+            .find(|m| m.content.starts_with("[memory-summary]"))
+            .map_or_else(String::new, |m| {
+                m.content
+                    .trim_start_matches("[memory-summary]\n")
+                    .to_owned()
+            });
+        self.compression_dirty = true;
+        let ratio_milli = u32::try_from(after.saturating_mul(1000) / before.max(1)).unwrap_or(1000);
+        let compression_ratio = f64::from(ratio_milli) / 1000.0;
+        eprintln!(
+            "[context.compress] tokens_before={before} tokens_after={after} tokens_freed={} compression_ratio={:.3} cleanup_tier={tier} semantic_called={semantic_called} tool_outputs_reduced={reduced} tool_outputs_removed={tool_outputs_removed} recent_raw_tokens={recent_raw_tokens} need_to_free={need_to_free} hard_pressure={}",
+            before - after,
+            compression_ratio,
+            before >= budget.hard_pressure_threshold()
+        );
         emit(AgentEvent::ContextCompressed {
             removed_messages,
-            estimated_tokens_before,
+            estimated_tokens_before: before,
+            estimated_tokens_after: after,
+            tokens_freed: before - after,
+            compression_ratio,
+            cleanup_tier: tier,
+            semantic_called,
+            tool_outputs_reduced: reduced,
+            tool_outputs_removed,
+            recent_raw_tokens,
         });
         Ok(Some(CompressionResult {
             summary,
             removed_messages,
-            retained_messages,
-            estimated_tokens_before,
+            retained_messages: self.messages.len(),
+            estimated_tokens_before: before,
+            estimated_tokens_after: after,
+            tool_outputs_reduced: reduced,
+            tool_outputs_removed,
+            semantic_called,
         }))
     }
 
@@ -346,10 +507,28 @@ impl AgentKernel {
     where
         F: FnMut(AgentEvent) + Send,
     {
+        self.run_turn_checkpointed(input, emit, |_| Ok(())).await
+    }
+
+    /// Persist each complete message before advancing model or tool execution.
+    ///
+    /// # Errors
+    /// Returns runtime or checkpoint failures. Already saved messages are not replayed.
+    pub async fn run_turn_checkpointed<F, H>(
+        &mut self,
+        input: impl Into<String>,
+        emit: F,
+        mut checkpoint: H,
+    ) -> Result<String, AgentError>
+    where
+        F: FnMut(AgentEvent) + Send,
+        H: FnMut(&[Message]) -> Result<(), AgentError> + Send,
+    {
         let timeout = std::time::Duration::from_secs(self.budget.turn_timeout_secs.max(1));
-        let result = tokio::time::timeout(timeout, self.run_turn_inner(input, emit))
-            .await
-            .unwrap_or_else(|_| Err(AgentError::Budget("turn timeout".into())));
+        let result =
+            tokio::time::timeout(timeout, self.run_turn_inner(input, emit, &mut checkpoint))
+                .await
+                .unwrap_or_else(|_| Err(AgentError::Budget("turn timeout".into())));
         if result.is_err() {
             // Persist a valid tool-call transcript even if a deadline interrupts execution.
             let answered = self
@@ -365,26 +544,36 @@ impl AgentKernel {
                 .map(|call| call.id.clone())
                 .collect::<Vec<_>>();
             for id in pending {
-                self.messages.push(Message::tool(
+                let interrupted = Message::tool(
                     id,
                     "Execution interrupted before a tool result was available.",
-                ));
+                );
+                self.messages.push(interrupted.clone());
+                self.raw_turn_messages.push(interrupted);
             }
         }
+        checkpoint(&self.raw_turn_messages)?;
         result
     }
 
-    async fn run_turn_inner<F>(
+    #[allow(clippy::too_many_lines)]
+    async fn run_turn_inner<F, H>(
         &mut self,
         input: impl Into<String>,
         emit: F,
+        checkpoint: &mut H,
     ) -> Result<String, AgentError>
     where
         F: FnMut(AgentEvent) + Send,
+        H: FnMut(&[Message]) -> Result<(), AgentError> + Send,
     {
         let emit = std::sync::Mutex::new(emit);
         (emit.lock().unwrap())(AgentEvent::TurnStarted);
-        self.messages.push(Message::user(input));
+        self.raw_turn_messages.clear();
+        let user = Message::user(input);
+        self.messages.push(user.clone());
+        self.raw_turn_messages.push(user);
+        checkpoint(&self.raw_turn_messages)?;
         let tool_specs = self
             .tools
             .iter()
@@ -400,6 +589,8 @@ impl AgentKernel {
 
         let mut calls_used = 0;
         for _ in 0..self.budget.max_steps {
+            self.compress_if_needed(|event| (emit.lock().unwrap())(event))
+                .await?;
             (emit.lock().unwrap())(AgentEvent::ModelStarted {
                 provider: self.provider.name().to_owned(),
                 model: self.provider.model_id().to_owned(),
@@ -426,8 +617,10 @@ impl AgentKernel {
             drop(model_timer);
             let content = response.content;
             let tool_calls = response.tool_calls;
-            self.messages
-                .push(Message::assistant(content.clone(), tool_calls.clone()));
+            let assistant = Message::assistant(content.clone(), tool_calls.clone());
+            self.messages.push(assistant.clone());
+            self.raw_turn_messages.push(assistant);
+            checkpoint(&self.raw_turn_messages)?;
 
             if tool_calls.is_empty() {
                 (emit.lock().unwrap())(AgentEvent::TurnFinished);
@@ -471,10 +664,11 @@ impl AgentKernel {
                     name,
                     success: result.is_ok(),
                 });
-                self.messages.push(Message::tool(
-                    call.id,
-                    result.unwrap_or_else(|error| error.to_string()),
-                ));
+                let tool_message =
+                    Message::tool(call.id, result.unwrap_or_else(|error| error.to_string()));
+                self.messages.push(tool_message.clone());
+                self.raw_turn_messages.push(tool_message);
+                checkpoint(&self.raw_turn_messages)?;
             }
         }
 
@@ -482,7 +676,166 @@ impl AgentKernel {
     }
 }
 
-/// Selects request context without changing the durable in-memory transcript.
+fn recent_raw_start(messages: &[Message], budget: usize) -> usize {
+    let mut start = messages.len();
+    let mut used: usize = 0;
+    while start > 0 {
+        let cost = estimate_tokens(&messages[start - 1..start]);
+        if used.saturating_add(cost) > budget {
+            break;
+        }
+        used += cost;
+        start -= 1;
+    }
+    start
+}
+
+fn compact_tool_output(output: &str) -> Option<String> {
+    if estimate_text_tokens(output) < 256 {
+        return None;
+    }
+    let lines = output.lines().collect::<Vec<_>>();
+    let mut kept: Vec<String> = Vec::new();
+    for line in lines.iter().take(2) {
+        kept.push(line.chars().take(240).collect());
+    }
+    for line in &lines {
+        let lower = line.to_ascii_lowercase();
+        if ([
+            "error",
+            "fail",
+            "panic",
+            "stack overflow",
+            "passed",
+            "exit=",
+            "exit code",
+            "warning:",
+            "test result:",
+        ]
+        .iter()
+        .any(|needle| lower.contains(needle))
+            || (line.contains(".rs:") && line.chars().any(|c| c.is_ascii_digit())))
+            && !kept.iter().any(|saved| saved == line)
+        {
+            kept.push(line.chars().take(240).collect());
+        }
+        if kept.iter().map(String::len).sum::<usize>() > 1500 {
+            break;
+        }
+    }
+    let mut short = format!("[compressed tool output; {} original lines]\n", lines.len());
+    for line in kept {
+        short.push_str(&line);
+        short.push('\n');
+    }
+    if estimate_text_tokens(&short) >= estimate_text_tokens(output) {
+        None
+    } else {
+        Some(short)
+    }
+}
+
+#[derive(Clone, Debug)]
+struct StateEntry {
+    kind: String,
+    content: String,
+    importance: f64,
+}
+
+fn parse_semantic_state(output: &str) -> Option<Vec<StateEntry>> {
+    let value: Value = serde_json::from_str(output.trim()).ok()?;
+    let entries = value.get("state")?.as_array()?;
+    if entries.is_empty() {
+        return None;
+    }
+    entries
+        .iter()
+        .map(|entry| {
+            let kind = entry.get("type")?.as_str()?.trim();
+            let content = entry.get("content")?.as_str()?.trim();
+            let importance = entry.get("importance")?.as_f64()?;
+            if kind.is_empty()
+                || content.is_empty()
+                || !importance.is_finite()
+                || !(0.0..=1.0).contains(&importance)
+            {
+                return None;
+            }
+            Some(StateEntry {
+                kind: kind.to_owned(),
+                content: content.to_owned(),
+                importance,
+            })
+        })
+        .collect()
+}
+
+fn parse_saved_summary(summary: &str) -> Vec<StateEntry> {
+    let content = summary
+        .strip_prefix("[memory-summary]\n")
+        .unwrap_or(summary);
+    parse_semantic_state(content).unwrap_or_else(|| {
+        vec![StateEntry {
+            kind: "other".into(),
+            content: content.to_owned(),
+            importance: 0.8,
+        }]
+    })
+}
+
+fn serialize_state(entries: &[StateEntry]) -> String {
+    let state = entries
+        .iter()
+        .map(|entry| {
+            serde_json::json!({
+                "type": entry.kind, "content": entry.content, "importance": entry.importance,
+            })
+        })
+        .collect::<Vec<_>>();
+    format!("[memory-summary]\n{}", serde_json::json!({"state": state}))
+}
+
+fn fit_summary(entries: &[StateEntry], budget: usize) -> Option<String> {
+    let mut ranked = (0..entries.len()).collect::<Vec<_>>();
+    let score = |index: usize| {
+        let entry = &entries[index];
+        let recent = f64::from(u32::try_from(index).unwrap_or(u32::MAX))
+            / f64::from(u32::try_from(entries.len().max(1)).unwrap_or(u32::MAX));
+        let type_weight = match entry.kind.as_str() {
+            "constraint" | "decision" | "goal" | "failure" | "error" => 0.015,
+            "next_action" | "progress" => 0.008,
+            _ => 0.0,
+        };
+        entry.importance + 0.03 * recent + type_weight
+    };
+    ranked.sort_by(|&a, &b| score(b).total_cmp(&score(a)).then_with(|| b.cmp(&a)));
+    let mut selected = Vec::new();
+    for index in ranked {
+        let mut trial = selected.clone();
+        trial.push(index);
+        trial.sort_unstable();
+        let candidate = serialize_state(
+            &trial
+                .iter()
+                .map(|&i| entries[i].clone())
+                .collect::<Vec<_>>(),
+        );
+        if estimate_tokens(&[Message::system(candidate)]) <= budget {
+            selected = trial;
+        }
+    }
+    if selected.is_empty() {
+        return None;
+    }
+    Some(serialize_state(
+        &selected
+            .into_iter()
+            .map(|i| entries[i].clone())
+            .collect::<Vec<_>>(),
+    ))
+}
+
+/// Selects request context without changing the effective in-memory transcript.
 /// Old turns are removed first; optional retrieved context follows only when
 /// it fits the same budget used to decide whether to compact.
 fn request_context(
@@ -735,6 +1088,90 @@ mod tests {
 
     struct EchoTool;
 
+    #[tokio::test]
+    async fn checkpoint_failure_stops_before_tool_execution_and_keeps_recoverable_history() {
+        let provider = ScriptedProvider {
+            model: "scripted".into(),
+            responses: Mutex::new(VecDeque::from([ModelResponse {
+                content: String::new(),
+                tool_calls: vec![ToolCall {
+                    id: "call".into(),
+                    kind: "function".into(),
+                    function: FunctionCall {
+                        name: "echo".into(),
+                        arguments: "{}".into(),
+                    },
+                }],
+                finish_reason: None,
+            }])),
+        };
+        let mut registry = ToolRegistry::new();
+        registry.register(EchoTool);
+        let mut kernel = AgentKernel::new(Arc::new(provider), registry, Arc::new(DenyDangerous));
+        let mut saved = Vec::new();
+        let mut failed_once = false;
+        let result = kernel
+            .run_turn_checkpointed(
+                "test",
+                |_| {},
+                |messages| {
+                    if messages.len() == 2 && !failed_once {
+                        failed_once = true;
+                        return Err(AgentError::Persistence("disk failure".into()));
+                    }
+                    saved = messages.to_vec();
+                    Ok(())
+                },
+            )
+            .await;
+        assert!(matches!(result, Err(AgentError::Persistence(_))));
+        assert_eq!(saved.len(), 3);
+        assert_eq!(saved[0].role, model::Role::User);
+        assert!(saved[2].content.contains("Execution interrupted"));
+    }
+
+    #[tokio::test]
+    async fn each_model_and_tool_message_is_checkpointed_in_order() {
+        let provider = ScriptedProvider {
+            model: "scripted".into(),
+            responses: Mutex::new(VecDeque::from([
+                ModelResponse {
+                    content: String::new(),
+                    tool_calls: vec![ToolCall {
+                        id: "call".into(),
+                        kind: "function".into(),
+                        function: FunctionCall {
+                            name: "echo".into(),
+                            arguments: "{}".into(),
+                        },
+                    }],
+                    finish_reason: None,
+                },
+                ModelResponse {
+                    content: "done".into(),
+                    tool_calls: vec![],
+                    finish_reason: None,
+                },
+            ])),
+        };
+        let mut registry = ToolRegistry::new();
+        registry.register(EchoTool);
+        let mut kernel = AgentKernel::new(Arc::new(provider), registry, Arc::new(DenyDangerous));
+        let mut lengths = Vec::new();
+        kernel
+            .run_turn_checkpointed(
+                "test",
+                |_| {},
+                |messages| {
+                    lengths.push(messages.len());
+                    Ok(())
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(lengths, vec![1, 2, 3, 4, 4]);
+    }
+
     struct EchoProvider;
 
     #[async_trait]
@@ -838,13 +1275,13 @@ mod tests {
         let provider = ScriptedProvider {
             model: "scripted".to_owned(),
             responses: Mutex::new(VecDeque::from([ModelResponse {
-                content: "goal and decisions preserved".to_owned(),
+                content: r#"{"state":[{"type":"goal","content":"goal and decisions preserved","importance":0.9}]}"#.to_owned(),
                 tool_calls: Vec::new(),
                 finish_reason: Some("stop".to_owned()),
             }])),
         };
         let messages = (0..6)
-            .map(|index| Message::user(format!("{index}:{}", "x".repeat(100))))
+            .map(|index| Message::user(format!("{index}:{}", "x".repeat(3500))))
             .collect();
         let mut kernel = AgentKernel::new(
             Arc::new(provider),
@@ -854,7 +1291,6 @@ mod tests {
         .with_messages(messages)
         .with_compression_policy(CompressionPolicy {
             threshold_percent: 1,
-            retain_recent_messages: 2,
         });
 
         let result = kernel
@@ -863,10 +1299,10 @@ mod tests {
             .expect("compression should succeed")
             .expect("context should exceed threshold");
 
-        assert_eq!(result.removed_messages, 4);
-        assert_eq!(kernel.messages().len(), 3);
+        assert_eq!(result.removed_messages, 5);
+        assert_eq!(kernel.messages().len(), 2);
         assert!(kernel.messages()[0].content.contains("goal and decisions"));
-        assert!(kernel.messages()[2].content.starts_with("5:"));
+        assert!(kernel.messages()[1].content.starts_with("5:"));
     }
 
     #[test]
@@ -925,7 +1361,9 @@ mod tests {
         let provider = ScriptedProvider {
             model: "scripted".to_owned(),
             responses: Mutex::new(VecDeque::from([ModelResponse {
-                content: "short summary".to_owned(),
+                content:
+                    r#"{"state":[{"type":"progress","content":"short summary","importance":0.8}]}"#
+                        .to_owned(),
                 tool_calls: Vec::new(),
                 finish_reason: Some("stop".to_owned()),
             }])),
@@ -956,6 +1394,294 @@ mod tests {
                 .iter()
                 .any(|message| message.content == "new question")
         );
+    }
+
+    struct RecordingProvider {
+        replies: Mutex<VecDeque<ModelResponse>>,
+        request_tokens: Mutex<Vec<usize>>,
+    }
+
+    #[async_trait]
+    impl ModelProvider for RecordingProvider {
+        fn name(&self) -> &'static str {
+            "recording"
+        }
+        #[allow(clippy::unnecessary_literal_bound)]
+        fn model_id(&self) -> &str {
+            "recording"
+        }
+        fn context_window(&self) -> usize {
+            6_000
+        }
+        fn max_output_tokens(&self) -> Option<usize> {
+            Some(100)
+        }
+        async fn complete(&self, request: ModelRequest) -> Result<ModelResponse, ModelError> {
+            if request
+                .messages
+                .first()
+                .is_some_and(|m| m.content.starts_with("Compress the older conversation"))
+            {
+                return Ok(ModelResponse {
+                    content: r#"{"state":[{"type":"goal","content":"finish","importance":0.9}]}"#
+                        .into(),
+                    tool_calls: vec![],
+                    finish_reason: None,
+                });
+            }
+            self.request_tokens
+                .lock()
+                .unwrap()
+                .push(estimate_tokens(&request.messages));
+            self.replies
+                .lock()
+                .unwrap()
+                .pop_front()
+                .ok_or_else(|| ModelError::InvalidResponse("script exhausted".into()))
+        }
+    }
+
+    struct LargeTestTool;
+    #[async_trait]
+    impl Tool for LargeTestTool {
+        #[allow(clippy::unnecessary_literal_bound)]
+        fn name(&self) -> &str {
+            "test"
+        }
+        #[allow(clippy::unnecessary_literal_bound)]
+        fn description(&self) -> &str {
+            "Run tests"
+        }
+        fn input_schema(&self) -> Value {
+            json!({"type":"object"})
+        }
+        fn capability(&self, _: &Value) -> tool::Capability {
+            tool::Capability::Process
+        }
+        fn safety(&self, _: &Value) -> SafetyLevel {
+            SafetyLevel::Safe
+        }
+        async fn execute(&self, input: Value) -> Result<String, ToolError> {
+            if input["large"] == true {
+                Ok(format!(
+                    "cargo test\n{}\ntest result: FAILED. 243 passed; 1 failed\nparser::tests::nested\nsrc/parser.rs:281 stack overflow\nexit=101",
+                    "progress line\n".repeat(2000)
+                ))
+            } else {
+                Ok("quick check passed".into())
+            }
+        }
+    }
+
+    fn test_call(id: &str, large: bool) -> ToolCall {
+        ToolCall {
+            id: id.into(),
+            kind: "function".into(),
+            function: FunctionCall {
+                name: "test".into(),
+                arguments: format!("{{\"large\":{large}}}"),
+            },
+        }
+    }
+
+    #[tokio::test]
+    async fn compresses_between_tool_calls_and_preserves_raw_turn() {
+        let provider = Arc::new(RecordingProvider {
+            replies: Mutex::new(VecDeque::from([
+                ModelResponse {
+                    content: String::new(),
+                    tool_calls: vec![test_call("a", true)],
+                    finish_reason: None,
+                },
+                ModelResponse {
+                    content: String::new(),
+                    tool_calls: vec![test_call("b", false)],
+                    finish_reason: None,
+                },
+                ModelResponse {
+                    content: "done".into(),
+                    tool_calls: vec![],
+                    finish_reason: None,
+                },
+            ])),
+            request_tokens: Mutex::new(vec![]),
+        });
+        let mut registry = ToolRegistry::new();
+        registry.register(LargeTestTool);
+        let mut kernel = AgentKernel::new(provider.clone(), registry, Arc::new(DenyDangerous));
+        let mut events = Vec::new();
+        assert_eq!(
+            kernel
+                .run_turn("run tests", |e| events.push(e))
+                .await
+                .unwrap(),
+            "done"
+        );
+        let sizes = provider.request_tokens.lock().unwrap().clone();
+        assert_eq!(sizes.len(), 3);
+        assert!(
+            sizes[1] < 1000,
+            "second request should see reduced test output: {sizes:?}"
+        );
+        assert!(events.iter().any(|e| matches!(
+            e,
+            AgentEvent::ContextCompressed {
+                tool_outputs_reduced: 1,
+                semantic_called: false,
+                ..
+            }
+        )));
+        assert!(
+            kernel
+                .messages()
+                .iter()
+                .any(|m| m.content.contains("243 passed; 1 failed"))
+        );
+        let raw = kernel.take_turn_messages();
+        assert!(raw.iter().any(|m| m.content.len() > 20_000));
+    }
+
+    #[tokio::test]
+    async fn semantic_state_keeps_early_constraints_and_failures_without_summary_recursion() {
+        let provider = ScriptedProvider { model: "scripted".into(), responses: Mutex::new(VecDeque::from([
+            ModelResponse { content: r#"{"state":[{"type":"constraint","content":"Do not change the public API","importance":1.0},{"type":"failure","content":"Approach A failed because of a parser stack overflow","importance":0.95}]}"#.into(), tool_calls: vec![], finish_reason: None }
+        ])) };
+        let mut kernel = AgentKernel::new(
+            Arc::new(provider),
+            ToolRegistry::new(),
+            Arc::new(DenyDangerous),
+        )
+        .with_messages(vec![
+            Message::system("[memory-summary]\nDECISIONS: keep SQLite"),
+            Message::user(format!(
+                "Do not change the public API\n{}",
+                "task details ".repeat(1500)
+            )),
+            Message::assistant(
+                "Approach A failed because of a parser stack overflow",
+                vec![],
+            ),
+            Message::user("continue"),
+        ]);
+        let result = kernel.compact_now(|_| {}).await.unwrap().unwrap();
+        assert!(result.semantic_called);
+        assert!(result.summary.contains("Do not change the public API"));
+        assert!(
+            result
+                .summary
+                .contains("Approach A failed because of a parser stack overflow")
+        );
+        assert!(result.summary.contains("DECISIONS: keep SQLite"));
+        assert_eq!(kernel.messages().last().unwrap().content, "continue");
+    }
+
+    #[tokio::test]
+    async fn repeated_file_reads_collapse_older_tool_result() {
+        let provider = Arc::new(RecordingProvider {
+            replies: Mutex::new(VecDeque::new()),
+            request_tokens: Mutex::new(vec![]),
+        });
+        let read = |id: &str| ToolCall {
+            id: id.into(),
+            kind: "function".into(),
+            function: FunctionCall {
+                name: "read_file".into(),
+                arguments: "{\"path\":\"src/lib.rs\"}".into(),
+            },
+        };
+        let mut kernel = AgentKernel::new(provider, ToolRegistry::new(), Arc::new(DenyDangerous))
+            .with_messages(vec![
+                Message::user("inspect file"),
+                Message::assistant("", vec![read("first")]),
+                Message::tool("first", "old file body \n".repeat(500)),
+                Message::assistant("", vec![read("second")]),
+                Message::tool("second", "new file body \n".repeat(500)),
+                Message::user("current task"),
+            ]);
+        kernel.compact_now(|_| {}).await.unwrap();
+        assert!(
+            kernel
+                .messages()
+                .iter()
+                .any(|m| m.content.contains("duplicate tool output"))
+        );
+    }
+
+    #[test]
+    fn structured_summary_uses_importance_over_keywords_and_type() {
+        let entries = vec![
+            StateEntry {
+                kind: "other".into(),
+                content: "All deliverables use British English".into(),
+                importance: 0.95,
+            },
+            StateEntry {
+                kind: "error".into(),
+                content: "The word error appeared in a harmless example".into(),
+                importance: 0.05,
+            },
+        ];
+        let high_only = serialize_state(&entries[..1]);
+        let budget = estimate_tokens(&[Message::system(high_only)]) + 2;
+        let fitted = fit_summary(&entries, budget).unwrap();
+        let parsed = parse_saved_summary(&fitted);
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].content, "All deliverables use British English");
+        assert!(estimate_tokens(&[Message::system(fitted)]) <= budget);
+    }
+
+    #[tokio::test]
+    async fn semantic_model_can_preserve_constraint_without_keyword() {
+        let provider = ScriptedProvider { model: "scripted".into(), responses: Mutex::new(VecDeque::from([
+            ModelResponse { content: r#"{"state":[{"type":"constraint","content":"All deliverables use British English","importance":0.98}]}"#.into(), tool_calls: vec![], finish_reason: None }
+        ])) };
+        let mut kernel = AgentKernel::new(
+            Arc::new(provider),
+            ToolRegistry::new(),
+            Arc::new(DenyDangerous),
+        )
+        .with_messages(vec![
+            Message::user(format!(
+                "All deliverables use British English\n{}",
+                "background ".repeat(2000)
+            )),
+            Message::assistant("noted", vec![]),
+            Message::user("continue"),
+        ]);
+        let result = kernel.compact_now(|_| {}).await.unwrap().unwrap();
+        assert!(
+            result
+                .summary
+                .contains("All deliverables use British English")
+        );
+        let selected = request_context(kernel.messages(), kernel.context_budget()).unwrap();
+        assert!(estimate_tokens(&selected) <= kernel.context_budget().usable());
+    }
+
+    #[tokio::test]
+    async fn malformed_structured_output_keeps_original_context() {
+        let provider = ScriptedProvider {
+            model: "scripted".into(),
+            responses: Mutex::new(VecDeque::from([ModelResponse {
+                content: "{broken JSON".into(),
+                tool_calls: vec![],
+                finish_reason: None,
+            }])),
+        };
+        let mut kernel = AgentKernel::new(
+            Arc::new(provider),
+            ToolRegistry::new(),
+            Arc::new(DenyDangerous),
+        )
+        .with_messages(vec![
+            Message::user("long context ".repeat(2000)),
+            Message::assistant("old answer", vec![]),
+            Message::user("continue"),
+        ]);
+        let original = serde_json::to_string(kernel.messages()).unwrap();
+        assert!(kernel.compact_now(|_| {}).await.unwrap().is_none());
+        assert_eq!(serde_json::to_string(kernel.messages()).unwrap(), original);
+        assert!(!kernel.take_compression_dirty());
     }
 
     #[tokio::test]

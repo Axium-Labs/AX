@@ -2,7 +2,7 @@
 //!
 //! Resolution order — all local, never a network request:
 //!   1. explicit `--provider` / `--model` flags;
-//!   2. the last successfully selected provider/model in `~/.ax/config.toml`;
+//!   2. the last successfully selected provider/model in `~/.ax/config.json`;
 //!   3. locally detected configured providers (AX auth storage + environment);
 //!   4. a single configured provider is selected automatically;
 //!   5. multiple providers open the TUI `/model` picker;
@@ -123,7 +123,7 @@ pub fn require_resolved(cli: &Cli) -> Result<ModelSelection> {
     }
 }
 
-/// Persists a successfully applied model selection to `~/.ax/config.toml`.
+/// Persists a successfully applied model selection to `~/.ax/config.json`.
 ///
 /// # Errors
 ///
@@ -497,7 +497,7 @@ mod tests {
     fn config_round_trip() {
         // Write through a temp path so the real user config is untouched.
         let root = std::env::temp_dir().join(format!("ax-config-{}", std::process::id()));
-        let path = root.join("config.toml");
+        let path = root.join("config.json");
         let config = AxConfig {
             model: Some(ModelConfig {
                 provider: "deepseek".to_owned(),
@@ -513,11 +513,23 @@ mod tests {
             Some("high")
         );
         assert!(
-            AxConfig::load_from(&root.join("missing.toml"))
+            AxConfig::load_from(&root.join("missing.json"))
                 .unwrap()
                 .model_config()
                 .is_none()
         );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn legacy_toml_config_is_migrated_to_json() {
+        let root = std::env::temp_dir().join(format!("ax-config-migrate-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("config.toml"), "[model]\nprovider = 'deepseek'\nmodel = 'deepseek-flash'\n").unwrap();
+        let loaded = AxConfig::load_from_home(&root).unwrap();
+        assert_eq!(loaded.model_config().unwrap().provider, "deepseek");
+        assert!(root.join("config.json").is_file());
+        assert_eq!(AxConfig::load_from_home(&root).unwrap().model_config().unwrap().model, "deepseek-flash");
         fs::remove_dir_all(root).unwrap();
     }
 }

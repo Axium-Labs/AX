@@ -17,6 +17,12 @@ pub enum ViewOutcome {
 /// Result payload a view produces when accepted.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ModalAction {
+    MemoryEdited {
+        scope: String,
+        key: String,
+        expected: String,
+        value: String,
+    },
     ModelSelected(ModelInfo),
     ReasoningSelected {
         model: ModelInfo,

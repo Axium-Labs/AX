@@ -1,4 +1,4 @@
-//! User-level AX configuration, persisted at `~/.ax/config.toml`.
+//! User-level AX configuration, persisted at `~/.ax/config.json`.
 //!
 //! AX keeps runtime state and credentials separate: the session database
 //! lives in the project's `.ax` directory, credentials in `~/.ax/auth.json`,
@@ -28,7 +28,7 @@ pub(crate) fn ax_home() -> PathBuf {
 
 #[must_use]
 pub(crate) fn config_path() -> PathBuf {
-    ax_home().join("config.toml")
+    ax_home().join("config.json")
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -53,15 +53,30 @@ impl AxConfig {
     ///
     /// Returns an error when the file exists but cannot be parsed.
     pub fn load() -> Result<Self> {
-        Self::load_from(&config_path())
+        Self::load_from_home(&ax_home())
+    }
+
+    pub(crate) fn load_from_home(home: &Path) -> Result<Self> {
+        let path = home.join("config.json");
+        if path.is_file() { return Self::load_from(&path); }
+        let legacy = home.join("config.toml");
+        match fs::read_to_string(&legacy) {
+            Ok(contents) => {
+                let config: Self = toml::from_str(&contents).context("invalid legacy config.toml")?;
+                config.save_to(&path)?;
+                Ok(config)
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
+            Err(error) => Err(error).context("failed to read legacy config.toml"),
+        }
     }
 
     /// Loads a config from a specific path (tests inject a temporary file).
     pub(crate) fn load_from(path: &Path) -> Result<Self> {
         match fs::read_to_string(path) {
-            Ok(contents) => toml::from_str(&contents).context("invalid ~/.ax/config.toml"),
+            Ok(contents) => serde_json::from_str(&contents).context("invalid config.json"),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
-            Err(error) => Err(error).context("failed to read ~/.ax/config.toml"),
+            Err(error) => Err(error).context("failed to read config.json"),
         }
     }
 
@@ -79,9 +94,8 @@ impl AxConfig {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
-        let contents =
-            toml::to_string_pretty(self).context("failed to encode ~/.ax/config.toml")?;
-        let temporary = path.with_extension("toml.tmp");
+        let contents = serde_json::to_string_pretty(self).context("failed to encode config.json")?;
+        let temporary = path.with_extension("json.tmp");
         fs::write(&temporary, contents)
             .with_context(|| format!("failed to write {}", temporary.display()))?;
         fs::rename(&temporary, path).with_context(|| {

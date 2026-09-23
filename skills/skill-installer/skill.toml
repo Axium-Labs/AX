@@ -1,0 +1,4 @@
+name = "skill-installer"
+description = "Import a local or remote skill into AX's skills directory and adapt it to AX's package format."
+trigger_keywords = ["install skill", "import skill", "add skill", "安装技能", "导入技能", "添加技能"]
+required_tools = ["filesystem", "shell"]
