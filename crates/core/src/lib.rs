@@ -194,6 +194,15 @@ impl AgentKernel {
         estimate_tokens(&self.messages)
     }
 
+    #[must_use]
+    pub fn context_budget(&self) -> ContextBudget {
+        ContextBudget::new(
+            self.provider.context_window(),
+            self.provider.max_output_tokens(),
+            estimate_tool_schema_tokens(&self.tools),
+        )
+    }
+
     /// Summarizes old context when usage exceeds the configured fraction of
     /// the active model's context window. Recent messages are retained verbatim.
     ///
@@ -234,11 +243,7 @@ impl AgentKernel {
     {
         let _timer = tool::telemetry::Timer::new("context.compress");
         let estimated_tokens_before = self.estimated_context_tokens();
-        let budget = ContextBudget::new(
-            self.provider.context_window(),
-            self.provider.max_output_tokens(),
-            estimate_tool_schema_tokens(&self.tools),
-        );
+        let budget = self.context_budget();
         let threshold = budget.compact_threshold(self.compression.threshold_percent);
         let retain = self.compression.retain_recent_messages;
         if (!force && estimated_tokens_before < threshold) || self.messages.len() <= retain + 1 {
@@ -406,11 +411,12 @@ impl AgentKernel {
                 (emit.lock().unwrap())(AgentEvent::ThinkingDelta { delta });
             };
             let model_timer = tool::telemetry::Timer::new("model.request");
+            let request_messages = request_context(&self.messages, self.context_budget())?;
             let response = self
                 .provider
                 .complete_stream(
                     ModelRequest {
-                        messages: self.messages.clone(),
+                        messages: request_messages,
                         tools: tool_specs.clone(),
                     },
                     &mut on_delta,
@@ -474,6 +480,72 @@ impl AgentKernel {
 
         Err(AgentError::StepLimit(self.budget.max_steps))
     }
+}
+
+/// Selects request context without changing the durable in-memory transcript.
+/// Old turns are removed first; optional retrieved context follows only when
+/// it fits the same budget used to decide whether to compact.
+fn request_context(
+    messages: &[Message],
+    budget: ContextBudget,
+) -> Result<Vec<Message>, AgentError> {
+    let mut history = Vec::new();
+    let mut memory = Vec::new();
+    let mut skills = Vec::new();
+    for message in messages {
+        if message.role == model::Role::System && message.content.starts_with("[retrieved-memory]")
+        {
+            memory.push(message.clone());
+        } else if message.role == model::Role::System && message.content.starts_with("[ax-skill:") {
+            skills.push(message.clone());
+        } else {
+            history.push(message.clone());
+        }
+    }
+
+    let latest_turn_len = history
+        .iter()
+        .rposition(|message| message.role == model::Role::User)
+        .map_or(0, |index| {
+            history[index..]
+                .iter()
+                .filter(|message| message.role != model::Role::System)
+                .count()
+        });
+    history = select_context(
+        &history,
+        budget.history_budget(),
+        budget.session_summary_budget(),
+    );
+    if history
+        .iter()
+        .filter(|message| message.role != model::Role::System)
+        .count()
+        < latest_turn_len
+    {
+        return Err(AgentError::Budget(
+            "latest user turn exceeds the input budget".into(),
+        ));
+    }
+    let mut selected = history;
+    let mut remaining = budget.usable().saturating_sub(estimate_tokens(&selected));
+    // Routing and retrieval put their highest-priority entries first. When
+    // space is tight, optional memory gives way before selected skills.
+    for message in skills.into_iter().chain(memory) {
+        let cost = estimate_tokens(std::slice::from_ref(&message));
+        if cost <= remaining {
+            selected.push(message);
+            remaining -= cost;
+        }
+    }
+    let estimated = estimate_tokens(&selected);
+    if estimated > budget.usable() {
+        return Err(AgentError::Budget(format!(
+            "request needs {estimated} tokens, allowed {}",
+            budget.usable()
+        )));
+    }
+    Ok(selected)
 }
 
 /// Estimated token cost of the JSON tool schemas sent with every model
@@ -645,7 +717,11 @@ mod tests {
         }
 
         fn context_window(&self) -> usize {
-            1_000
+            6_000
+        }
+
+        fn max_output_tokens(&self) -> Option<usize> {
+            Some(100)
         }
 
         async fn complete(&self, _request: ModelRequest) -> Result<ModelResponse, ModelError> {
@@ -673,7 +749,11 @@ mod tests {
         }
 
         fn context_window(&self) -> usize {
-            1_000
+            6_000
+        }
+
+        fn max_output_tokens(&self) -> Option<usize> {
+            Some(100)
         }
 
         async fn complete(&self, request: ModelRequest) -> Result<ModelResponse, ModelError> {
@@ -773,7 +853,7 @@ mod tests {
         )
         .with_messages(messages)
         .with_compression_policy(CompressionPolicy {
-            threshold_percent: 10,
+            threshold_percent: 1,
             retain_recent_messages: 2,
         });
 
@@ -787,6 +867,95 @@ mod tests {
         assert_eq!(kernel.messages().len(), 3);
         assert!(kernel.messages()[0].content.contains("goal and decisions"));
         assert!(kernel.messages()[2].content.starts_with("5:"));
+    }
+
+    #[test]
+    fn request_context_fits_history_memory_skills_and_large_tool_schema() {
+        let budget = ContextBudget::new(6_000, Some(500), 1_200);
+        let mut messages = (0..30)
+            .map(|index| Message::user(format!("old {index}:{}", "x".repeat(400))))
+            .collect::<Vec<_>>();
+        messages.push(Message::system(format!(
+            "[retrieved-memory]\n{}",
+            "m".repeat(500)
+        )));
+        messages.push(Message::system(format!(
+            "[ax-skill:first]\n{}",
+            "s".repeat(2_000)
+        )));
+        messages.push(Message::system(format!(
+            "[ax-skill:second]\n{}",
+            "s".repeat(2_000)
+        )));
+        messages.push(Message::user("current request"));
+
+        let selected = request_context(&messages, budget).expect("request should fit");
+        assert!(estimate_tokens(&selected) <= budget.usable());
+        assert!(
+            selected
+                .iter()
+                .any(|message| message.content == "current request")
+        );
+        assert!(
+            selected
+                .iter()
+                .filter(|message| message.content.starts_with("old "))
+                .count()
+                < 30
+        );
+        assert_eq!(
+            messages.len(),
+            34,
+            "selection must not mutate source history"
+        );
+    }
+
+    #[test]
+    fn tiny_context_rejects_an_oversized_latest_turn() {
+        let budget = ContextBudget::new(1_000, Some(100), 700);
+        let messages = vec![Message::user("x".repeat(2_000))];
+        assert!(matches!(
+            request_context(&messages, budget),
+            Err(AgentError::Budget(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn compacted_context_stays_within_final_request_budget() {
+        let provider = ScriptedProvider {
+            model: "scripted".to_owned(),
+            responses: Mutex::new(VecDeque::from([ModelResponse {
+                content: "short summary".to_owned(),
+                tool_calls: Vec::new(),
+                finish_reason: Some("stop".to_owned()),
+            }])),
+        };
+        let messages = (0..30)
+            .map(|index| Message::user(format!("{index}:{}", "x".repeat(600))))
+            .collect();
+        let mut kernel = AgentKernel::new(
+            Arc::new(provider),
+            ToolRegistry::new(),
+            Arc::new(DenyDangerous),
+        )
+        .with_messages(messages);
+        assert!(kernel.compress_if_needed(|_| {}).await.unwrap().is_some());
+        kernel.push_context(Message::system(format!(
+            "[retrieved-memory]\n{}",
+            "m".repeat(500)
+        )));
+        kernel.push_context(Message::system(format!(
+            "[ax-skill:test]\n{}",
+            "s".repeat(2_000)
+        )));
+        kernel.push_context(Message::user("new question"));
+        let selected = request_context(kernel.messages(), kernel.context_budget()).unwrap();
+        assert!(estimate_tokens(&selected) <= kernel.context_budget().usable());
+        assert!(
+            selected
+                .iter()
+                .any(|message| message.content == "new question")
+        );
     }
 
     #[tokio::test]

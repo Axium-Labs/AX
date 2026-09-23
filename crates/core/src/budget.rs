@@ -54,11 +54,13 @@ impl ContextBudget {
             .saturating_sub(self.tool_schema_tokens)
     }
 
-    /// Token budget at which compaction should trigger, computed against the
-    /// genuinely usable space rather than the raw context window.
+    /// Trigger compaction at a fraction of the same history allowance used
+    /// when preparing a model request.
     #[must_use]
     pub fn compact_threshold(&self, percent: u8) -> usize {
-        self.usable().saturating_mul(usize::from(percent.min(100))) / 100
+        self.history_budget()
+            .saturating_mul(usize::from(percent.min(100)))
+            / 100
     }
 
     /// Total budget for restoring persisted conversation history when a
@@ -68,8 +70,8 @@ impl ContextBudget {
     #[must_use]
     pub const fn history_budget(&self) -> usize {
         self.usable()
-            .saturating_sub(Self::SKILLS_RESERVE_TOKENS)
-            .saturating_sub(Self::MEMORY_RESERVE_TOKENS)
+            .saturating_sub(self.skills_budget_tokens())
+            .saturating_sub(self.memory_budget_tokens())
     }
 
     /// Budget for the persisted session summary (and other restored system
@@ -92,13 +94,23 @@ impl ContextBudget {
     /// Token budget for lazily loaded skill instructions.
     #[must_use]
     pub const fn skills_budget_tokens(&self) -> usize {
-        Self::SKILLS_RESERVE_TOKENS
+        let quarter = self.usable() / 4;
+        if quarter < Self::SKILLS_RESERVE_TOKENS {
+            quarter
+        } else {
+            Self::SKILLS_RESERVE_TOKENS
+        }
     }
 
     /// Token budget for retrieved long-term memory facts.
     #[must_use]
     pub const fn memory_budget_tokens(&self) -> usize {
-        Self::MEMORY_RESERVE_TOKENS
+        let tenth = self.usable() / 10;
+        if tenth < Self::MEMORY_RESERVE_TOKENS {
+            tenth
+        } else {
+            Self::MEMORY_RESERVE_TOKENS
+        }
     }
 }
 
@@ -141,10 +153,10 @@ mod tests {
     }
 
     #[test]
-    fn compact_threshold_is_a_fraction_of_usable_space_not_the_raw_window() {
+    fn compact_threshold_is_a_fraction_of_history_budget() {
         let budget = ContextBudget::new(100_000, None, 0);
         let threshold = budget.compact_threshold(75);
-        assert_eq!(threshold, budget.usable() * 75 / 100);
+        assert_eq!(threshold, budget.history_budget() * 75 / 100);
         assert!(threshold < 75_000, "threshold must not use the raw window");
     }
 

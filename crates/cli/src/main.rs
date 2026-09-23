@@ -738,6 +738,11 @@ where
     } else {
         state.ensure_session(prompt)?;
     }
+    let budget = state
+        .runtime
+        .as_ref()
+        .expect("runtime initialized")
+        .context_budget();
     state
         .runtime
         .as_mut()
@@ -759,7 +764,6 @@ where
         )?;
     }
     let context_timer = tool::telemetry::Timer::new("context.prepare");
-    let budget = context_budget(selection, &state.mcp_tools);
     let memory_context = state.memory_context(prompt, budget.memory_budget_tokens())?;
     state
         .runtime
