@@ -171,24 +171,12 @@ fn fact_key(statement: &str) -> String {
 
 /// Rank by lexical relevance, with named preferences always eligible.
 #[must_use]
-pub fn retrieve(
-    mut records: Vec<MemoryRecord>,
-    query: &str,
-    max_chars: usize,
-) -> Vec<MemoryRecord> {
+pub fn retrieve(mut records: Vec<MemoryRecord>, query: &str) -> Vec<MemoryRecord> {
     let terms = terms(query);
     records.sort_by_key(|record| std::cmp::Reverse(score(record, &terms)));
-    let mut used = 0;
     records
         .into_iter()
-        .filter(|record| {
-            let size = record.key.chars().count() + record.value.chars().count() + 64;
-            if score(record, &terms) == 0 || used + size > max_chars {
-                return false;
-            }
-            used += size;
-            true
-        })
+        .filter(|record| score(record, &terms) > 0)
         .take(8)
         .collect()
 }
@@ -261,7 +249,6 @@ mod tests {
             owner: "p".into(),
             source: "user".into(),
         });
-        assert_eq!(retrieve(records.to_vec(), "build", 100)[0].key, "build");
-        assert!(retrieve(records.to_vec(), "build", 1).is_empty());
+        assert_eq!(retrieve(records.to_vec(), "build")[0].key, "build");
     }
 }

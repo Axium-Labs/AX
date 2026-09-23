@@ -20,6 +20,7 @@ pub struct DeepSeekConfig {
     pub model: String,
     pub endpoint: String,
     pub context_window: usize,
+    pub max_output_tokens: Option<usize>,
     pub reasoning_effort: Option<ReasoningEffort>,
 }
 
@@ -33,6 +34,7 @@ impl DeepSeekConfig {
             endpoint: std::env::var("DEEPSEEK_API_URL")
                 .unwrap_or_else(|_| DEFAULT_ENDPOINT.to_owned()),
             context_window: 1_048_576,
+            max_output_tokens: None,
             reasoning_effort: None,
         }
     }
@@ -53,6 +55,7 @@ impl DeepSeekConfig {
             model: model.unwrap_or_else(|| FALLBACK_MODEL.to_owned()),
             endpoint,
             context_window: 1_048_576,
+            max_output_tokens: None,
             reasoning_effort: None,
         })
     }
@@ -71,6 +74,7 @@ impl DeepSeekConfig {
             model,
             endpoint,
             context_window,
+            max_output_tokens: None,
             reasoning_effort: None,
         }
     }
@@ -183,6 +187,10 @@ impl ModelProvider for DeepSeekProvider {
 
     fn context_window(&self) -> usize {
         self.config.context_window
+    }
+
+    fn max_output_tokens(&self) -> Option<usize> {
+        self.config.max_output_tokens
     }
 
     async fn complete(&self, request: ModelRequest) -> Result<ModelResponse, ModelError> {
@@ -321,6 +329,7 @@ fn compatible_model_info(id: String, provider: &str, endpoint: &str) -> ModelInf
         id,
         provider: provider.to_owned(),
         context_window: if deepseek { 1_048_576 } else { 128_000 },
+        max_output_tokens: None,
         reasoning_efforts: if reasoning {
             vec![
                 ReasoningEffort::Low,

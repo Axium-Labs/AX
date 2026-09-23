@@ -330,11 +330,7 @@ fn find_exact_model(models: &[ModelInfo], term: &str) -> Option<ModelInfo> {
 }
 
 fn estimate_loaded(state: &ReplState) -> usize {
-    state
-        .loaded_messages
-        .iter()
-        .map(|m| m.content.chars().count().div_ceil(4) + 4)
-        .sum()
+    runtime_core::estimate_tokens(&state.loaded_messages)
 }
 
 fn memory_root() -> Box<dyn super::bottom_pane::PaneView> {

@@ -882,10 +882,7 @@ fn restore_transcript(app: &mut App, messages: &[Message], selection: &ModelSele
 }
 
 fn estimate_messages(messages: &[Message]) -> usize {
-    messages
-        .iter()
-        .map(|message| message.content.chars().count().div_ceil(4) + 4)
-        .sum()
+    runtime_core::estimate_tokens(messages)
 }
 
 #[cfg(test)]
@@ -902,6 +899,7 @@ mod tests {
             model: "deepseek-chat".to_owned(),
             codex_auth: None,
             context_window: None,
+            max_output_tokens: None,
             reasoning_effort: None,
             supports_tools: true,
         }

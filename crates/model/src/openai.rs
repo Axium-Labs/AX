@@ -30,6 +30,7 @@ pub struct OpenAiConfig {
     pub model: String,
     pub endpoint: String,
     pub context_window: usize,
+    pub max_output_tokens: Option<usize>,
     pub reasoning_effort: Option<ReasoningEffort>,
     credentials: CredentialSource,
     codex_catalog_path: Option<PathBuf>,
@@ -43,6 +44,7 @@ impl OpenAiConfig {
             model: model.unwrap_or_else(|| FALLBACK_MODEL.to_owned()),
             endpoint: std::env::var("OPENAI_API_URL").unwrap_or_else(|_| API_ENDPOINT.to_owned()),
             context_window: 200_000,
+            max_output_tokens: None,
             reasoning_effort: None,
             credentials: CredentialSource::ApiKey(api_key),
             codex_catalog_path: None,
@@ -62,6 +64,7 @@ impl OpenAiConfig {
             model: model.unwrap_or_else(|| FALLBACK_MODEL.to_owned()),
             endpoint: std::env::var("OPENAI_API_URL").unwrap_or_else(|_| API_ENDPOINT.to_owned()),
             context_window: 200_000,
+            max_output_tokens: None,
             reasoning_effort: None,
             credentials: CredentialSource::ApiKey(api_key),
             codex_catalog_path: None,
@@ -106,6 +109,7 @@ impl OpenAiConfig {
             endpoint: std::env::var("CODEX_API_URL")
                 .unwrap_or_else(|_| default_endpoint.to_owned()),
             context_window: 200_000,
+            max_output_tokens: None,
             reasoning_effort: None,
             credentials: CredentialSource::CodexFile(auth_path),
             codex_catalog_path,
@@ -121,6 +125,7 @@ impl OpenAiConfig {
             model: model.unwrap_or_else(|| FALLBACK_MODEL.to_owned()),
             endpoint: std::env::var("CODEX_API_URL").unwrap_or_else(|_| CODEX_ENDPOINT.to_owned()),
             context_window: 200_000,
+            max_output_tokens: None,
             reasoning_effort: None,
             credentials: CredentialSource::OAuth { access, account_id },
             codex_catalog_path: None,
@@ -254,6 +259,10 @@ impl ModelProvider for OpenAiProvider {
         self.config.context_window
     }
 
+    fn max_output_tokens(&self) -> Option<usize> {
+        self.config.max_output_tokens
+    }
+
     async fn complete(&self, request: ModelRequest) -> Result<ModelResponse, ModelError> {
         let payload = ResponsesRequest {
             model: &self.config.model,
@@ -369,6 +378,7 @@ impl ModelProvider for OpenAiProvider {
                 }
                 .to_owned(),
                 context_window: 200_000,
+                max_output_tokens: None,
                 reasoning_efforts: vec![
                     ReasoningEffort::Low,
                     ReasoningEffort::Medium,
@@ -469,6 +479,10 @@ fn parse_models_catalog(value: &Value, provider: &str) -> Result<Vec<ModelInfo>,
                     .and_then(Value::as_u64)
                     .and_then(|value| usize::try_from(value).ok())
                     .unwrap_or(200_000),
+                max_output_tokens: model
+                    .get("max_output_tokens")
+                    .and_then(Value::as_u64)
+                    .and_then(|value| usize::try_from(value).ok()),
                 reasoning_efforts: efforts,
                 default_reasoning_effort: model
                     .get("default_reasoning_level")
@@ -775,6 +789,19 @@ mod tests {
         );
         assert_eq!(response.finish_reason.as_deref(), Some("completed"));
         assert_eq!(find_sse_event_end(b"one\r\n\r\ntwo"), Some((3, 4)));
+    }
+
+    #[test]
+    fn model_catalog_preserves_max_output_tokens() {
+        let catalog = json!({
+            "models": [{
+                "id": "large-output-model",
+                "context_window": 200_000,
+                "max_output_tokens": 32_000
+            }]
+        });
+        let models = parse_models_catalog(&catalog, "openai").unwrap();
+        assert_eq!(models[0].max_output_tokens, Some(32_000));
     }
 
     #[test]

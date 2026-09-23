@@ -48,10 +48,10 @@ struct Cli {
     /// Override the active model's context-window token capacity.
     #[arg(long, global = true)]
     context_window: Option<NonZeroUsize>,
-    #[arg(long, default_value = ".ax", global = true)]
-    data_dir: PathBuf,
-    #[arg(long, default_value = "skills", global = true)]
-    skills_dir: PathBuf,
+    #[arg(long, global = true)]
+    data_dir: Option<PathBuf>,
+    #[arg(long, global = true)]
+    skills_dir: Option<PathBuf>,
     #[arg(long, global = true)]
     mcp_config: Option<PathBuf>,
     #[arg(long, global = true)]
@@ -99,6 +99,7 @@ struct ModelSelection {
     model: String,
     codex_auth: Option<PathBuf>,
     context_window: Option<usize>,
+    max_output_tokens: Option<usize>,
     reasoning_effort: Option<ReasoningEffort>,
     supports_tools: bool,
 }
@@ -320,7 +321,7 @@ impl ReplState {
             .ok_or_else(|| anyhow!("skill catalog was not initialized"))
     }
 
-    fn route_skills(&mut self, prompt: &str, chars_budget: usize) -> Result<Vec<Message>> {
+    fn route_skills(&mut self, prompt: &str, token_budget: usize) -> Result<Vec<Message>> {
         let mut available_tools = tools(&self.mcp_tools)
             .names()
             .into_iter()
@@ -331,22 +332,23 @@ impl ReplState {
             .skills()?
             .route_candidates(prompt, available_tools.iter().map(String::as_str));
         let mut messages = Vec::new();
-        let mut remaining_chars = chars_budget;
+        let mut remaining_tokens = token_budget;
         for matched in candidates {
             if self.active_skills.contains(&matched.name) {
                 continue;
             }
             let loaded = self.skills()?.load(&matched.name)?;
-            let size = loaded.instructions.chars().count();
-            if size > remaining_chars {
-                continue;
-            }
-            remaining_chars -= size;
-            self.active_skills.insert(matched.name.clone());
-            messages.push(Message::system(format!(
+            let message = Message::system(format!(
                 "{SKILL_CONTEXT_PREFIX}{}]\n{}",
                 loaded.metadata.name, loaded.instructions
-            )));
+            ));
+            let size = runtime_core::estimate_tokens(std::slice::from_ref(&message));
+            if size > remaining_tokens {
+                continue;
+            }
+            remaining_tokens -= size;
+            self.active_skills.insert(matched.name.clone());
+            messages.push(message);
             if messages.len() == 3 {
                 break;
             }
@@ -427,6 +429,18 @@ fn discover_project_root(start: &Path) -> PathBuf {
     start
 }
 
+fn resolve_directories(
+    cwd: &Path,
+    data_dir: Option<PathBuf>,
+    skills_dir: Option<PathBuf>,
+) -> (PathBuf, PathBuf) {
+    let project_root = discover_project_root(cwd);
+    (
+        data_dir.unwrap_or_else(|| project_root.join(".ax")),
+        skills_dir.unwrap_or_else(|| project_root.join("skills")),
+    )
+}
+
 fn home_directory() -> Option<PathBuf> {
     std::env::var_os("USERPROFILE")
         .or_else(|| std::env::var_os("HOME"))
@@ -489,7 +503,11 @@ fn context_budget(
     mcp_tools: &[McpToolProxy],
 ) -> runtime_core::ContextBudget {
     let tool_schema_tokens = runtime_core::estimate_tool_schema_tokens(&tools(mcp_tools));
-    runtime_core::ContextBudget::new(selection.context_capacity(), tool_schema_tokens)
+    runtime_core::ContextBudget::new(
+        selection.context_capacity(),
+        selection.max_output_tokens,
+        tool_schema_tokens,
+    )
 }
 
 fn kernel(
@@ -511,6 +529,7 @@ fn kernel(
             if let Some(context_window) = selection.context_window {
                 config.context_window = context_window;
             }
+            config.max_output_tokens = selection.max_output_tokens;
             config.reasoning_effort = selection.reasoning_effort;
             Arc::new(DeepSeekProvider::new(config))
         }
@@ -524,6 +543,7 @@ fn kernel(
             if let Some(context_window) = selection.context_window {
                 config.context_window = context_window;
             }
+            config.max_output_tokens = selection.max_output_tokens;
             config.reasoning_effort = selection.reasoning_effort;
             Arc::new(OpenAiProvider::new(config))
         }
@@ -545,6 +565,7 @@ fn kernel(
             if let Some(context_window) = selection.context_window {
                 config.context_window = context_window;
             }
+            config.max_output_tokens = selection.max_output_tokens;
             config.reasoning_effort = selection.reasoning_effort;
             Arc::new(OpenAiProvider::new(config))
         }
@@ -572,6 +593,7 @@ fn kernel(
                 endpoint,
                 selection.context_capacity(),
             );
+            config.max_output_tokens = selection.max_output_tokens;
             config.reasoning_effort = selection.reasoning_effort;
             Arc::new(DeepSeekProvider::new(config))
         }
@@ -612,6 +634,9 @@ fn render_event(event: AgentEvent) {
 async fn main() -> Result<()> {
     let startup_timer = tool::telemetry::Timer::new("startup.resolve");
     let cli = Cli::parse();
+    let cwd = std::env::current_dir()?;
+    let (data_dir, skills_dir) =
+        resolve_directories(&cwd, cli.data_dir.clone(), cli.skills_dir.clone());
     let budget = runtime_core::ExecutionBudget {
         max_steps: cli.max_steps.get(),
         max_tool_calls: cli.max_tool_calls.get(),
@@ -629,7 +654,7 @@ async fn main() -> Result<()> {
     match cli.command {
         Some(Command::Run { ref prompt }) => {
             let selection = model_selection::require_resolved(&cli)?;
-            let mut state = ReplState::new(cli.data_dir, cli.skills_dir, cli.mcp_config)?;
+            let mut state = ReplState::new(data_dir, skills_dir, cli.mcp_config.clone())?;
             state.execution_budget = budget;
             run_prompt(&mut state, &selection, approval, prompt).await?;
         }
@@ -663,9 +688,9 @@ async fn main() -> Result<()> {
             let resolution = model_selection::resolve_model_selection(&cli)?;
             run_tui(
                 resolution,
-                cli.data_dir,
-                cli.skills_dir,
-                cli.mcp_config,
+                data_dir,
+                skills_dir,
+                cli.mcp_config.clone(),
                 cli.allow_dangerous,
                 cli.codex_auth.clone(),
                 budget,
@@ -735,13 +760,13 @@ where
     }
     let context_timer = tool::telemetry::Timer::new("context.prepare");
     let budget = context_budget(selection, &state.mcp_tools);
-    let memory_context = state.memory_context(prompt, budget.memory_budget_chars())?;
+    let memory_context = state.memory_context(prompt, budget.memory_budget_tokens())?;
     state
         .runtime
         .as_mut()
         .expect("runtime initialized")
         .set_context("[retrieved-memory]", memory_context);
-    for skill_message in state.route_skills(prompt, budget.skills_budget_chars())? {
+    for skill_message in state.route_skills(prompt, budget.skills_budget_tokens())? {
         state.persist_messages(std::slice::from_ref(&skill_message))?;
         state
             .runtime
@@ -832,8 +857,9 @@ fn title_from_prompt(prompt: &str) -> String {
 
 #[cfg(test)]
 mod project_root_tests {
-    use super::discover_project_root;
+    use super::{discover_project_root, resolve_directories};
     use std::fs;
+    use std::path::PathBuf;
 
     fn temp_dir(name: &str) -> std::path::PathBuf {
         let root = std::env::temp_dir().join(format!(
@@ -886,6 +912,37 @@ mod project_root_tests {
         assert_eq!(
             discover_project_root(&root),
             fs::canonicalize(&root).unwrap()
+        );
+
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn default_directories_are_stable_from_nested_working_directories() {
+        let root = temp_dir("stable-defaults");
+        fs::create_dir_all(root.join(".git")).unwrap();
+        let nested = root.join("crates").join("core");
+        fs::create_dir_all(&nested).unwrap();
+
+        let from_root = resolve_directories(&root, None, None);
+        let from_nested = resolve_directories(&nested, None, None);
+        assert_eq!(from_root, from_nested);
+        assert_eq!(from_root.0, fs::canonicalize(&root).unwrap().join(".ax"));
+        assert_eq!(from_root.1, fs::canonicalize(&root).unwrap().join("skills"));
+
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn explicit_directories_override_project_defaults() {
+        let root = temp_dir("explicit-defaults");
+        fs::create_dir_all(root.join(".git")).unwrap();
+        let data = PathBuf::from("custom-data");
+        let skills = PathBuf::from("custom-skills");
+
+        assert_eq!(
+            resolve_directories(&root, Some(data.clone()), Some(skills.clone())),
+            (data, skills)
         );
 
         fs::remove_dir_all(&root).unwrap();

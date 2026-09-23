@@ -174,7 +174,10 @@ impl AuthStorage {
                 ModelError::InvalidResponse(format!("failed to encode auth storage: {error}"))
             })?,
         )?;
-        set_private_permissions(&temporary)?;
+        if let Err(error) = set_private_permissions(&temporary) {
+            let _ = fs::remove_file(&temporary);
+            return Err(error);
+        }
         fs::rename(temporary, &self.path)?;
         Ok(())
     }
@@ -195,24 +198,32 @@ fn set_private_permissions(path: &Path) -> Result<(), ModelError> {
 /// `0600`. Windows has no direct equivalent of a mode bit, so this shells out
 /// to `icacls` (present on every supported Windows version) to strip
 /// inherited ACEs and grant full control solely to the current user.
-/// Best-effort: failing to tighten the ACL never fails credential storage,
-/// since the file already lives under the user's own profile directory.
 #[cfg(windows)]
-#[allow(clippy::unnecessary_wraps)]
 fn set_private_permissions(path: &Path) -> Result<(), ModelError> {
-    let Some(user) = std::env::var("USERNAME")
+    let user = std::env::var("USERNAME")
         .ok()
         .filter(|name| !name.is_empty())
-    else {
-        return Ok(());
-    };
-    let _ = std::process::Command::new("icacls")
+        .ok_or_else(|| {
+            ModelError::Configuration(
+                "cannot restrict auth.json permissions: USERNAME is unavailable".to_owned(),
+            )
+        })?;
+    let output = std::process::Command::new("icacls")
         .arg(path)
         .arg("/inheritance:r")
         .arg("/grant:r")
         .arg(format!("{user}:F"))
-        .output();
-    Ok(())
+        .output()?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        let detail = String::from_utf8_lossy(&output.stderr);
+        Err(ModelError::Configuration(format!(
+            "failed to restrict auth.json permissions with icacls (status {}): {}",
+            output.status,
+            detail.trim()
+        )))
+    }
 }
 
 #[cfg(not(any(unix, windows)))]

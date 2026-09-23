@@ -14,9 +14,8 @@ pub struct ContextBudget {
 }
 
 impl ContextBudget {
-    /// Conservative reserve for the model's own reply. AX does not track a
-    /// per-provider max-output-tokens setting, so a fixed reserve is used
-    /// instead of assuming the whole window is available for input.
+    /// Conservative reserve used only when the model catalog does not expose
+    /// a maximum output size.
     pub const RESERVED_OUTPUT_TOKENS: usize = 8_000;
     /// Tokens carved out of the usable budget for lazily loaded skill
     /// instructions.
@@ -30,10 +29,17 @@ impl ContextBudget {
     pub const SESSION_SUMMARY_SHARE_PERCENT: u8 = 50;
 
     #[must_use]
-    pub const fn new(context_window: usize, tool_schema_tokens: usize) -> Self {
+    pub const fn new(
+        context_window: usize,
+        max_output_tokens: Option<usize>,
+        tool_schema_tokens: usize,
+    ) -> Self {
         Self {
             context_window,
-            reserved_output: Self::RESERVED_OUTPUT_TOKENS,
+            reserved_output: match max_output_tokens {
+                Some(tokens) => tokens,
+                None => Self::RESERVED_OUTPUT_TOKENS,
+            },
             tool_schema_tokens,
         }
     }
@@ -83,17 +89,16 @@ impl ContextBudget {
         self.history_budget()
     }
 
-    /// Character budget for lazily loaded skill instructions (approximating
-    /// the crate's own ~4-chars-per-token estimate for ASCII text).
+    /// Token budget for lazily loaded skill instructions.
     #[must_use]
-    pub const fn skills_budget_chars(&self) -> usize {
-        Self::SKILLS_RESERVE_TOKENS * 4
+    pub const fn skills_budget_tokens(&self) -> usize {
+        Self::SKILLS_RESERVE_TOKENS
     }
 
-    /// Character budget for retrieved long-term memory facts.
+    /// Token budget for retrieved long-term memory facts.
     #[must_use]
-    pub const fn memory_budget_chars(&self) -> usize {
-        Self::MEMORY_RESERVE_TOKENS * 4
+    pub const fn memory_budget_tokens(&self) -> usize {
+        Self::MEMORY_RESERVE_TOKENS
     }
 }
 
@@ -121,7 +126,7 @@ mod tests {
 
     #[test]
     fn usable_space_subtracts_output_and_tool_schema_reserves() {
-        let budget = ContextBudget::new(100_000, 5_000);
+        let budget = ContextBudget::new(100_000, None, 5_000);
         assert_eq!(
             budget.usable(),
             100_000 - ContextBudget::RESERVED_OUTPUT_TOKENS - 5_000
@@ -129,8 +134,15 @@ mod tests {
     }
 
     #[test]
+    fn model_output_limit_replaces_the_fallback_reserve() {
+        let budget = ContextBudget::new(100_000, Some(32_000), 5_000);
+        assert_eq!(budget.reserved_output, 32_000);
+        assert_eq!(budget.usable(), 63_000);
+    }
+
+    #[test]
     fn compact_threshold_is_a_fraction_of_usable_space_not_the_raw_window() {
-        let budget = ContextBudget::new(100_000, 0);
+        let budget = ContextBudget::new(100_000, None, 0);
         let threshold = budget.compact_threshold(75);
         assert_eq!(threshold, budget.usable() * 75 / 100);
         assert!(threshold < 75_000, "threshold must not use the raw window");
@@ -138,8 +150,8 @@ mod tests {
 
     #[test]
     fn a_larger_tool_schema_cost_shrinks_every_derived_budget() {
-        let light = ContextBudget::new(100_000, 0);
-        let heavy = ContextBudget::new(100_000, 20_000);
+        let light = ContextBudget::new(100_000, None, 0);
+        let heavy = ContextBudget::new(100_000, None, 20_000);
         assert!(heavy.usable() < light.usable());
         assert!(heavy.compact_threshold(75) < light.compact_threshold(75));
         assert!(heavy.history_budget() < light.history_budget());
@@ -147,7 +159,7 @@ mod tests {
 
     #[test]
     fn tiny_context_windows_saturate_instead_of_underflowing() {
-        let budget = ContextBudget::new(1_000, 500);
+        let budget = ContextBudget::new(1_000, None, 500);
         assert_eq!(budget.usable(), 0);
         assert_eq!(budget.compact_threshold(75), 0);
         assert_eq!(budget.history_budget(), 0);
@@ -157,7 +169,7 @@ mod tests {
 
     #[test]
     fn session_summary_gets_only_a_share_of_the_history_budget() {
-        let budget = ContextBudget::new(100_000, 0);
+        let budget = ContextBudget::new(100_000, None, 0);
         assert_eq!(
             budget.session_summary_budget(),
             budget.history_budget() * usize::from(ContextBudget::SESSION_SUMMARY_SHARE_PERCENT)

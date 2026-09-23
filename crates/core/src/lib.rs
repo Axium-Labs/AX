@@ -236,6 +236,7 @@ impl AgentKernel {
         let estimated_tokens_before = self.estimated_context_tokens();
         let budget = ContextBudget::new(
             self.provider.context_window(),
+            self.provider.max_output_tokens(),
             estimate_tool_schema_tokens(&self.tools),
         );
         let threshold = budget.compact_threshold(self.compression.threshold_percent);

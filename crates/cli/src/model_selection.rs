@@ -197,6 +197,7 @@ pub(crate) fn unconfigured_selection() -> ModelSelection {
         model: "(not configured)".to_owned(),
         codex_auth: None,
         context_window: Some(64_000),
+        max_output_tokens: None,
         reasoning_effort: None,
         supports_tools: true,
     }
@@ -254,6 +255,7 @@ fn selection_for_provider_id(
     let info = models.iter().find(|model| model.id == model_id);
     let context_window =
         info.and_then(|model| (model.context_window > 0).then_some(model.context_window));
+    let max_output_tokens = info.and_then(|model| model.max_output_tokens);
     let endpoint = info
         .and_then(|model| model.endpoint.clone())
         .or_else(|| provider_chat_endpoint(provider_id));
@@ -266,6 +268,7 @@ fn selection_for_provider_id(
         model: model_id,
         codex_auth,
         context_window,
+        max_output_tokens,
         reasoning_effort,
         supports_tools,
     })
@@ -326,6 +329,7 @@ fn selection_from_info(info: &ModelInfo) -> Result<ModelSelection> {
         model: info.id.clone(),
         codex_auth: None,
         context_window: (info.context_window > 0).then_some(info.context_window),
+        max_output_tokens: info.max_output_tokens,
         reasoning_effort: info.default_reasoning_effort,
         supports_tools: info.supports_tools,
     })
@@ -460,6 +464,7 @@ mod tests {
                 display_name: "First".to_owned(),
                 provider: "deepseek".to_owned(),
                 context_window: 128_000,
+                max_output_tokens: None,
                 reasoning_efforts: Vec::new(),
                 default_reasoning_effort: None,
                 supports_tools: true,
@@ -470,6 +475,7 @@ mod tests {
                 display_name: "Fallback".to_owned(),
                 provider: "deepseek".to_owned(),
                 context_window: 128_000,
+                max_output_tokens: None,
                 reasoning_efforts: Vec::new(),
                 default_reasoning_effort: None,
                 supports_tools: true,

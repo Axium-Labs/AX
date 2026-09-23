@@ -77,6 +77,8 @@ pub struct ModelInfo {
     pub display_name: String,
     pub provider: String,
     pub context_window: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_output_tokens: Option<usize>,
     pub reasoning_efforts: Vec<ReasoningEffort>,
     pub default_reasoning_effort: Option<ReasoningEffort>,
     pub supports_tools: bool,
@@ -192,6 +194,9 @@ pub trait ModelProvider: Send + Sync {
     fn name(&self) -> &str;
     fn model_id(&self) -> &str;
     fn context_window(&self) -> usize;
+    fn max_output_tokens(&self) -> Option<usize> {
+        None
+    }
     async fn complete(&self, request: ModelRequest) -> Result<ModelResponse, ModelError>;
 
     async fn list_models(&self) -> Result<Vec<ModelInfo>, ModelError> {
@@ -204,6 +209,7 @@ pub trait ModelProvider: Send + Sync {
             display_name: self.model_id().to_owned(),
             provider: self.name().to_owned(),
             context_window: self.context_window(),
+            max_output_tokens: self.max_output_tokens(),
             reasoning_efforts: Vec::new(),
             default_reasoning_effort: None,
             supports_tools: true,
