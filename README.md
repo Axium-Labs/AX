@@ -130,7 +130,7 @@ No network call happens during startup.
 Models are discovered dynamically into `~/.ax/models/` (a bundled catalog plus
 a per-provider refresh cache). Switch anytime with `/model`; the last
 selection — provider, model and reasoning effort — is persisted to
-`~/.ax/config.toml` and restored on the next launch.
+`~/.ax/config.json` and restored on the next launch.
 
 To pick a provider explicitly from the command line:
 
@@ -170,10 +170,11 @@ so the things that make an agent powerful never get in the way of starting it
 or of a normal conversation. The trade-off is intentional: capability is loaded
 on demand, not at startup.
 
-## Advanced
+## Documentation
 
 The internal architecture — agent loop, context management, multi-agent
 scheduling, SQLite schema, module layout — is documented in
+[docs/README.md](docs/README.md). Start with
 [docs/architecture.md](docs/architecture.md).
 
 ## License
