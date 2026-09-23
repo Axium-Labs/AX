@@ -71,6 +71,14 @@ jobs:
             cargo build --release --target "${{ matrix.target }}"
           fi
 
+      - name: Enable qemu (aarch64 musl smoke test)
+        if: matrix.target == 'aarch64-unknown-linux-musl'
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y qemu-user-static binfmt-support
+
       - name: Smoke test
         shell: bash
         run: |
