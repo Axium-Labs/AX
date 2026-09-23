@@ -18,24 +18,36 @@ fixed fractions of the raw window, all limits derive from one structure:
 
 ```text
 context window (provider-reported)
-  − RESERVED_OUTPUT_TOKENS           → room for the reply
-  − tool schema token estimate       → room for the tools actually sent
+  − reserved output (max_output_tokens, else RESERVED_OUTPUT_TOKENS)
+  − tool schema token estimate
   ────────────────────────────────
   usable()
-  − SKILLS_RESERVE_TOKENS            → skill instructions
-  − MEMORY_RESERVE_TOKENS            → retrieved memory
+  − skills_budget_tokens()          → min(usable()/4, SKILLS_RESERVE_TOKENS)
+  − memory_budget_tokens()          → min(usable()/10, MEMORY_RESERVE_TOKENS)
   ────────────────────────────────
   history_budget()
-  ─ SESSION_SUMMARY_SHARE_PERCENT    → persisted summary / agent state
-  ────────────────────────────────
-  recent_messages_budget()           → verbatim recent conversation
 ```
+
+The history budget is further viewed through two explicit accessors:
+
+- `session_summary_budget()` — 50% of `history_budget()`
+  (`SESSION_SUMMARY_SHARE_PERCENT`): the cap for the restored persisted
+  summary / agent state.
+- `recent_messages_budget()` — `history_budget()` itself: the total cap for
+  restored conversation when a session is reopened.
+
+When a session is restored, `select_context(messages, total_budget,
+system_budget)` is called with `recent_messages_budget()` and
+`session_summary_budget()`: the summary/system state may not exceed the 50%
+share, and the whole restored set may not exceed the total — so a large
+summary can never crowd out the recent messages.
 
 Key behaviors:
 
-- `compact_threshold()` is a percentage of `usable()`, not of the raw window.
-- The summary share is capped so a large summary can never crowd out the
-  recent messages.
+- Compaction pressure is a percentage of `history_budget()`:
+  `compact_threshold(percent)`. Automatic checks use `SAFE_WATERMARK_PERCENT`
+  (65) as the soft target and `HARD_PRESSURE_PERCENT` (90) as the hard
+  threshold; `RECENT_RAW_PERCENT` (40) bounds the raw recent-history budget.
 - Every layer is an explicitly named method/constant; adding a new consumer of
   context space starts from this structure rather than a new magic number.
 

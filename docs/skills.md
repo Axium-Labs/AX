@@ -32,8 +32,8 @@ future marketplace.
 - `route_candidates` returns **every** candidate whose required tools are
   available, not just the top-1 keyword hit; the caller decides.
 - `instructions.md` is read only after a route hit and a dependency check.
-- Matched instructions are injected into the model context (up to a few per
-  turn, bounded by the skill token reserve of `ContextBudget` — see
+- Matched instructions are injected into the model context (up to 3 per turn,
+  bounded by the skill token reserve of `ContextBudget` — see
   [context.md](context.md)).
 
 ## Enable / disable

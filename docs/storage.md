@@ -137,7 +137,7 @@ is lost.
 1. Read `project.json`; return if present.
 2. Else read the legacy `project-id` text file.
 3. Else generate a new UUID.
-4. Write `project.json` atomically (temp file + rename).
+4. Write `project.json` atomically (temp file + hard link).
 5. Delete the old `project-id` file.
 
 ### Legacy `config.toml` → `config.json`
