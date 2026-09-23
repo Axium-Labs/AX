@@ -133,27 +133,26 @@ impl ContextBudget {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Default)]
 pub struct ExecutionBudget {
+    /// Zero disables the corresponding limit.
     pub max_steps: usize,
     pub max_tool_calls: usize,
     pub turn_timeout_secs: u64,
     pub tool_timeout_secs: u64,
 }
-impl Default for ExecutionBudget {
-    fn default() -> Self {
-        Self {
-            max_steps: 64,
-            max_tool_calls: 128,
-            turn_timeout_secs: 600,
-            tool_timeout_secs: 120,
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use super::ContextBudget;
+    use super::{ContextBudget, ExecutionBudget};
+
+    #[test]
+    fn execution_limits_are_unlimited_by_default() {
+        let budget = ExecutionBudget::default();
+        assert_eq!(budget.max_steps, 0);
+        assert_eq!(budget.max_tool_calls, 0);
+        assert_eq!(budget.turn_timeout_secs, 0);
+        assert_eq!(budget.tool_timeout_secs, 0);
+    }
 
     #[test]
     fn usable_space_subtracts_output_and_tool_schema_reserves() {

@@ -11,12 +11,19 @@ service to sign up for, no remote telemetry.
 
 - **Rust native** — one binary, no runtime, no Node, no Docker.
 - **Fast startup** — providers, skills, MCP servers and memory load on demand.
+- **Standard skills and focused tools** — Agent Skills `SKILL.md` packages with lazy instructions and optional resources, read-only web search/fetch, LSP through configurable MCP servers, and native image input on supported vision models.
 - **Small binary** — a compact workspace of focused crates, not a framework.
 - **Simple workflow** — type, get an answer, switch models, move on.
 - **Local-first** — everything lives in `~/.ax` and your project's `.ax`.
 
 No benchmarks are published yet; "fast" here means the startup path does as
 little as possible by design.
+
+Portable backups: `ax export backup.axpack` saves sessions and memory; use
+`--memory` or `--sessions` to select one type. Run
+`ax import backup.axpack --dry-run` to inspect conflicts, then
+`ax import backup.axpack` to merge.
+Credentials and caches are excluded. See [backup details](docs/backup.md).
 
 ## Quick Start
 
@@ -125,7 +132,7 @@ No network call happens during startup.
 | OpenAI Codex | OAuth login | `/login` → Codex OAuth |
 | DeepSeek | API key | `/login` → API key, or `DEEPSEEK_API_KEY` |
 | OpenAI | API key | `/login` → API key, or `OPENAI_API_KEY` |
-| OpenAI-compatible | API key + base URL | `OPENAI_API_KEY` / `OPENAI_BASE_URL` |
+| OpenAI-compatible vendors (Groq, Mistral, OpenRouter, etc.) | Provider API key | `/login` → provider, or its API-key environment variable |
 
 Models are discovered dynamically into `~/.ax/models/` (a bundled catalog plus
 a per-provider refresh cache). Switch anytime with `/model`; the last

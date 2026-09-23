@@ -171,8 +171,9 @@ legacy `config.toml`, saves the result as `config.json`, and continues.
 
 ## Backup & troubleshooting
 
-- Back up `.ax/memory.sqlite3` **and** `.ax/sessions/` together (e.g. `tar` /
-  zip the whole `.ax`).
+- For portable backups, use `ax export backup.axpack`; see [backup.md](backup.md).
+- For low-level disaster recovery on one installation, keep the database and
+  its JSONL event streams together.
 - Old and new AX versions should not run against the same data directory:
   old versions ignore JSONL and can create inconsistencies.
 - Do not edit JSONL files manually — the SQLite index uses exact offsets.

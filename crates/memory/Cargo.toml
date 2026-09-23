@@ -11,6 +11,8 @@ serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 uuid.workspace = true
+zip = { version = "0.6", default-features = false, features = ["deflate"] }
+sha2 = "0.10"
 
 [lints]
 workspace = true

@@ -58,11 +58,14 @@ impl AxConfig {
 
     pub(crate) fn load_from_home(home: &Path) -> Result<Self> {
         let path = home.join("config.json");
-        if path.is_file() { return Self::load_from(&path); }
+        if path.is_file() {
+            return Self::load_from(&path);
+        }
         let legacy = home.join("config.toml");
         match fs::read_to_string(&legacy) {
             Ok(contents) => {
-                let config: Self = toml::from_str(&contents).context("invalid legacy config.toml")?;
+                let config: Self =
+                    toml::from_str(&contents).context("invalid legacy config.toml")?;
                 config.save_to(&path)?;
                 Ok(config)
             }
@@ -94,7 +97,8 @@ impl AxConfig {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
-        let contents = serde_json::to_string_pretty(self).context("failed to encode config.json")?;
+        let contents =
+            serde_json::to_string_pretty(self).context("failed to encode config.json")?;
         let temporary = path.with_extension("json.tmp");
         fs::write(&temporary, contents)
             .with_context(|| format!("failed to write {}", temporary.display()))?;

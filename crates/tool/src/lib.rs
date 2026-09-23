@@ -3,8 +3,12 @@
 mod filesystem;
 mod patch;
 mod search;
+mod web;
+pub use web::{SearchProvider, SearchResult, WebTool};
+mod view_image;
 pub use patch::PatchTool;
 pub use search::SearchTool;
+pub use view_image::ViewImageTool;
 mod permission;
 mod shell;
 pub mod telemetry;
@@ -37,6 +41,16 @@ pub enum ToolError {
     PermissionDenied(String),
 }
 
+#[derive(Clone, Debug)]
+pub enum ToolOutput {
+    Text(String),
+    Image {
+        description: String,
+        media_type: String,
+        data: String,
+    },
+}
+
 impl From<std::io::Error> for ToolError {
     fn from(error: std::io::Error) -> Self {
         Self::Execution(error.to_string())
@@ -58,6 +72,9 @@ pub trait Tool: Send + Sync {
         }
     }
     async fn execute(&self, input: Value) -> Result<String, ToolError>;
+    async fn execute_output(&self, input: Value) -> Result<ToolOutput, ToolError> {
+        self.execute(input).await.map(ToolOutput::Text)
+    }
 }
 
 #[derive(Clone, Default)]
@@ -78,6 +95,10 @@ impl ToolRegistry {
     #[must_use]
     pub fn get(&self, name: &str) -> Option<Arc<dyn Tool>> {
         self.tools.get(name).cloned()
+    }
+
+    pub fn remove(&mut self, name: &str) {
+        self.tools.remove(name);
     }
 
     pub fn iter(&self) -> impl Iterator<Item = &Arc<dyn Tool>> {

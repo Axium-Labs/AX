@@ -23,11 +23,11 @@ cli ───────────────┬──> runtime-core ──>
 
 | Crate | Responsibility |
 |---|---|
-| `model` | Provider-neutral `ModelProvider`, messages, tool calls, response types. One streaming entry point (`complete_stream`) with a non-streaming fallback. |
-| `tool` | `Tool`, `ToolRegistry`, JSON Schema, `SafetyLevel`, plus built-ins: `shell`, `filesystem`, `patch`, `search`. Owns the `PermissionStore`. |
+| `model` | Provider-neutral `ModelProvider`, text/image message parts, capabilities, tool calls, response types. One streaming entry point (`complete_stream`) with a non-streaming fallback. |
+| `tool` | `Tool`, `ToolRegistry`, JSON Schema, `SafetyLevel`, plus built-ins: `shell`, `filesystem`, `patch`, `search`, `web`, `view_image`. Owns the `PermissionStore`. |
 | `runtime-core` | The model → tool → model agent loop, `AgentEvent` stream, context selection, `ContextBudget`, compaction, and `AgentSupervisor` for bounded-concurrency tasks. |
 | `mcp` | MCP client for stdio / Streamable HTTP / WebSocket, lazy connection, capability catalog, `McpToolProxy` and `McpGateway`. |
-| `skill` | `skill.toml` metadata indexing and dependency-aware routing; `instructions.md` is loaded only when a route hits. |
+| `skill` | `SKILL.md` frontmatter indexing and dependency-aware routing; Markdown body is loaded only when a route hits. Legacy packages remain supported. |
 | `memory` | SQLite session/message repository, effective-context snapshots, scoped facts, JSONL event streams, resume and compaction state. |
 | `cli` | The only composition root: clap arguments, provider selection, lazy SQLite/Skill/MCP initialization, REPL, ratatui TUI, session commands, permission dialogs. |
 
@@ -35,11 +35,18 @@ cli ───────────────┬──> runtime-core ──>
 
 Defines the provider-neutral `ModelProvider` trait, message types, tool calls
 and responses. `complete_stream` is the unified streaming entry point and
-falls back to a non-streaming implementation by default. Existing providers:
+falls back to a non-streaming implementation by default. Existing protocol
+adapters:
 
-- DeepSeek Chat Completions;
+- OpenAI-compatible Chat Completions (DeepSeek, Groq, Mistral, OpenRouter,
+  Together, xAI, Kimi and other compatible providers);
 - OpenAI Responses API;
 - Codex local-file auth + ChatGPT Codex Responses endpoint.
+
+`ProviderSpec` holds vendor identity, credential environment variable and
+protocol selection. `OpenAiCompatibleProvider` implements the shared Chat
+Completions request and response format; DeepSeek's endpoint and defaults stay
+in provider metadata.
 
 Providers also report their context window, which drives the kernel's
 compression policy. Adding a local model means implementing the trait — no
@@ -72,9 +79,10 @@ for the `/status` panel.
 
 Owns:
 
-- The **agent loop** constrained by `ExecutionBudget` (max model steps, max
-  tool calls, per-turn timeout, per-tool timeout — all configurable via CLI
-  flags). When the budget or a timeout fires, hanging tool calls get a
+- The **agent loop** with an `ExecutionBudget` (max model steps, max
+  tool calls, per-turn timeout, per-tool timeout). All four limits are
+  unlimited by default; positive CLI flag values enable finite limits.
+  When a configured budget or timeout fires, hanging tool calls get a
   placeholder result so the message record stays well-formed.
 - The **`AgentEvent` stream**: token deltas, tool state, compression events.
 - **Context management**: `context::select_context` picks history for the
@@ -113,13 +121,14 @@ name, description and declared capabilities are visible to the model via
 
 ### `skill`
 
-On first use, indexes only the `skill.toml` metadata: name, description,
-trigger keywords, required tools. Routing returns every candidate whose
-required tools are available (`route_candidates`), not just the top-1 keyword
-hit, and the caller decides; only after a hit and dependency check is the
-corresponding `instructions.md` read. The directory-package format can
-naturally be downloaded and installed by a future marketplace. See
-[skills.md](skills.md).
+On first use, indexes only standard `SKILL.md` YAML frontmatter (or a legacy
+`skill.toml`). The name and description drive metadata routing. After
+activation, the selected Markdown body is read and injected within the
+`ContextBudget` skill reserve; optional resources remain on demand. Project
+skills take precedence over global skills and malformed packages are isolated.
+A bounded metadata-only catalog lets the model select a skill by meaning through
+the ordinary filesystem tool when term matching misses it.
+`allowed-tools` never changes AX tool permissions. See [skills.md](skills.md).
 
 ### `memory`
 
@@ -171,7 +180,7 @@ Guarantees:
 
 1. The provider is built only on the first model call.
 2. Skills are indexed (metadata only) only on first routing or `/skills`.
-3. `instructions.md` is read only when a route hits.
+3. The skill instruction body is read only when a route hits.
 4. MCP processes/connections are established only on `/mcp tools <server>`;
    the capability catalog (names/descriptions/declared capabilities) is
    visible to the model without connecting.
@@ -197,10 +206,10 @@ user task
       → context pressure check / next model step
 ```
 
-The loop is bounded by `ExecutionBudget` (defaults: 64 model steps, 128 tool
-calls, 600s per-turn timeout, 120s per-tool timeout; overridable with
-`--max-steps` / `--max-tool-calls` / `--turn-timeout-secs` /
-`--tool-timeout-secs`). When the budget or a timeout fires, any hanging tool
+The loop has no default step, tool-call, turn-time or tool-time limits.
+`--max-steps`, `--max-tool-calls`, `--turn-timeout-secs` and
+`--tool-timeout-secs` accept positive limits; `0` means unlimited.
+When a configured budget or timeout fires, any hanging tool
 call gets an interruption placeholder so the message record stays valid. All
 user, assistant, tool, MCP and skill state messages are written to the current
 session. Compression keeps skill system context and the full raw history and
@@ -215,8 +224,9 @@ summary. Every model step and tool call records latency metrics visible in
 | A new model | Implement `ModelProvider` |
 | A new built-in tool | Implement `Tool` and register it |
 | A new MCP transport | Implement the transport request boundary |
-| A new skill | Add a `skill.toml` + `instructions.md` package |
+| A new skill | Add a `SKILL.md` package |
 | A new UI | Consume `AgentEvent` and call the kernel |
 | New storage | Keep session/message repository semantics; don't leak the database into core |
+| Portable backup | Use the memory crate ExportService/ImportService; CLI handles arguments and display |
 
 Step-by-step guidance lives in [development.md](development.md).

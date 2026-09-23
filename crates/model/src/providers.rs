@@ -4,6 +4,12 @@
 //! separately. Sharing an API-key dialog does not imply that Anthropic,
 //! Google, Bedrock, and `OpenAI` use the same request schema.
 
+use crate::{ModelError, ModelInfo, OpenAiCompatibleConfig, ReasoningEffort};
+
+pub const DEEPSEEK_FALLBACK_MODEL: &str = "deepseek-flash";
+const DEEPSEEK_BASE_URL: &str = "https://api.deepseek.com";
+const DEEPSEEK_CONTEXT_WINDOW: usize = 1_048_576;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ProviderAuthKind {
     ApiKey,
@@ -216,7 +222,7 @@ pub fn provider_base_url(id: &str) -> Option<&'static str> {
         "ant-ling" => "https://api.ant-ling.com/v1",
         "baseten" => "https://inference.baseten.co/v1",
         "cerebras" => "https://api.cerebras.ai/v1",
-        "deepseek" => "https://api.deepseek.com",
+        "deepseek" => DEEPSEEK_BASE_URL,
         "fireworks" => "https://api.fireworks.ai/inference",
         "groq" => "https://api.groq.com/openai/v1",
         "huggingface" => "https://router.huggingface.co/v1",
@@ -250,6 +256,86 @@ pub fn provider_chat_endpoint(id: &str) -> Option<String> {
     provider_base_url(id).map(|base| format!("{}/chat/completions", base.trim_end_matches('/')))
 }
 
+/// `DeepSeek`'s provider defaults, kept outside the shared wire adapter.
+#[must_use]
+pub fn deepseek_compatible_config(
+    model: Option<String>,
+    api_key: String,
+) -> OpenAiCompatibleConfig {
+    let endpoint = std::env::var("DEEPSEEK_API_URL")
+        .unwrap_or_else(|_| format!("{DEEPSEEK_BASE_URL}/chat/completions"));
+    OpenAiCompatibleConfig::new(
+        "deepseek",
+        model.unwrap_or_else(|| DEEPSEEK_FALLBACK_MODEL.to_owned()),
+        api_key,
+        endpoint,
+        DEEPSEEK_CONTEXT_WINDOW,
+    )
+}
+
+// Keep the old public constructors callable through the deprecated type alias.
+impl OpenAiCompatibleConfig {
+    #[deprecated(
+        note = "use deepseek_compatible_config for DeepSeek or OpenAiCompatibleConfig::new for other providers"
+    )]
+    #[must_use]
+    pub fn from_api_key(model: Option<String>, api_key: String) -> Self {
+        deepseek_compatible_config(model, api_key)
+    }
+
+    /// # Errors
+    ///
+    /// Returns [`ModelError::Configuration`] when `DEEPSEEK_API_KEY` is absent.
+    #[deprecated(
+        note = "resolve DeepSeek credentials in the caller, then use deepseek_compatible_config"
+    )]
+    pub fn from_env(model: Option<String>) -> Result<Self, ModelError> {
+        let api_key = std::env::var("DEEPSEEK_API_KEY")
+            .map_err(|_| ModelError::Configuration("DEEPSEEK_API_KEY is not set".to_owned()))?;
+        Ok(deepseek_compatible_config(model, api_key))
+    }
+
+    #[deprecated(note = "use OpenAiCompatibleConfig::new")]
+    #[must_use]
+    pub fn from_compatible(
+        provider_id: impl Into<String>,
+        model: String,
+        api_key: String,
+        endpoint: String,
+        context_window: usize,
+    ) -> Self {
+        Self::new(provider_id, model, api_key, endpoint, context_window)
+    }
+}
+
+pub(crate) fn compatible_model_info(id: String, provider: &str, endpoint: &str) -> ModelInfo {
+    let deepseek = provider == "deepseek";
+    let reasoning = deepseek && id.to_ascii_lowercase().contains("reason");
+    ModelInfo {
+        display_name: id.clone(),
+        id,
+        provider: provider.to_owned(),
+        context_window: if deepseek {
+            DEEPSEEK_CONTEXT_WINDOW
+        } else {
+            128_000
+        },
+        max_output_tokens: None,
+        reasoning_efforts: if reasoning {
+            vec![
+                ReasoningEffort::Low,
+                ReasoningEffort::Medium,
+                ReasoningEffort::High,
+            ]
+        } else {
+            Vec::new()
+        },
+        default_reasoning_effort: reasoning.then_some(ReasoningEffort::High),
+        supports_tools: true,
+        endpoint: (!deepseek).then(|| endpoint.to_owned()),
+    }
+}
+
 /// Providers for which pi exposes an account/subscription OAuth login in
 /// addition to (or instead of) an API-key login.
 #[must_use]
@@ -265,4 +351,86 @@ pub fn provider_supports_oauth(id: &str) -> bool {
             | "radius"
             | "xai"
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{ModelProvider, OpenAiCompatibleProvider};
+
+    #[test]
+    fn compatible_adapter_uses_selected_vendor_identity() {
+        for id in [
+            "deepseek",
+            "groq",
+            "mistral",
+            "openrouter",
+            "together",
+            "xai",
+            "kimi-coding",
+        ] {
+            assert_eq!(
+                provider(id).unwrap().protocol,
+                ProviderProtocol::OpenAiCompatible
+            );
+            let config = OpenAiCompatibleConfig::new(
+                id,
+                "test-model".to_owned(),
+                "test-key".to_owned(),
+                provider_chat_endpoint(id).unwrap(),
+                128_000,
+            );
+            let adapter = OpenAiCompatibleProvider::new(config);
+            assert_eq!(adapter.name(), id);
+            assert_eq!(adapter.model_id(), "test-model");
+        }
+    }
+
+    #[test]
+    fn deepseek_defaults_and_discovery_metadata_stay_provider_specific() {
+        let config = deepseek_compatible_config(None, "test-key".to_owned());
+        assert_eq!(config.provider_id, "deepseek");
+        assert_eq!(config.model, DEEPSEEK_FALLBACK_MODEL);
+        assert_eq!(config.context_window, DEEPSEEK_CONTEXT_WINDOW);
+
+        let deepseek = compatible_model_info(
+            "deepseek-reasoner".to_owned(),
+            "deepseek",
+            "https://api.deepseek.com/chat/completions",
+        );
+        let groq = compatible_model_info(
+            "groq-model".to_owned(),
+            "groq",
+            "https://api.groq.com/openai/v1/chat/completions",
+        );
+        assert_eq!(deepseek.context_window, DEEPSEEK_CONTEXT_WINDOW);
+        assert_eq!(
+            deepseek.default_reasoning_effort,
+            Some(ReasoningEffort::High)
+        );
+        assert!(deepseek.endpoint.is_none());
+        assert_eq!(groq.context_window, 128_000);
+        assert!(groq.reasoning_efforts.is_empty());
+        assert_eq!(
+            groq.endpoint.as_deref(),
+            Some("https://api.groq.com/openai/v1/chat/completions")
+        );
+    }
+
+    #[test]
+    #[allow(deprecated)]
+    fn legacy_public_aliases_still_construct_the_adapter() {
+        let config = crate::DeepSeekConfig::from_api_key(None, "test-key".to_owned());
+        let adapter = crate::DeepSeekProvider::new(config);
+        assert_eq!(adapter.name(), "deepseek");
+
+        let compatible = crate::DeepSeekConfig::from_compatible(
+            "groq",
+            "test-model".to_owned(),
+            "test-key".to_owned(),
+            "https://api.groq.com/openai/v1/chat/completions".to_owned(),
+            128_000,
+        );
+        assert_eq!(crate::DeepSeekProvider::new(compatible).name(), "groq");
+    }
 }

@@ -12,7 +12,7 @@ use model::{FunctionSpec, Message, ModelError, ModelProvider, ModelRequest, Tool
 use serde_json::Value;
 use thiserror::Error;
 use tokio::task::JoinSet;
-use tool::{SafetyLevel, ToolError, ToolPermission, ToolRegistry};
+use tool::{SafetyLevel, ToolError, ToolOutput, ToolPermission, ToolRegistry};
 
 #[derive(Clone, Debug)]
 pub enum AgentEvent {
@@ -134,9 +134,12 @@ impl AgentKernel {
     #[must_use]
     pub fn new(
         provider: Arc<dyn ModelProvider>,
-        tools: ToolRegistry,
+        mut tools: ToolRegistry,
         approval: Arc<dyn ApprovalPolicy>,
     ) -> Self {
+        if !provider.capabilities().vision {
+            tools.remove("view_image");
+        }
         Self {
             provider,
             tools,
@@ -176,6 +179,11 @@ impl AgentKernel {
     pub fn with_messages(mut self, messages: Vec<Message>) -> Self {
         self.messages = messages;
         self
+    }
+
+    #[must_use]
+    pub fn has_tool(&self, name: &str) -> bool {
+        self.tools.get(name).is_some()
     }
 
     /// Adds dynamically selected context, such as lazily loaded skill instructions.
@@ -298,7 +306,9 @@ impl AgentKernel {
 
         // Largest old, reproducible outputs first. Never mutate the raw turn log.
         let mut candidates = (0..recent_start)
-            .filter(|&i| self.messages[i].role == model::Role::Tool)
+            .filter(|&i| {
+                self.messages[i].role == model::Role::Tool && self.messages[i].parts.is_empty()
+            })
             .collect::<Vec<_>>();
         candidates.sort_by_key(|&i| {
             std::cmp::Reverse(estimate_tokens(std::slice::from_ref(&self.messages[i])))
@@ -330,7 +340,8 @@ impl AgentKernel {
                 })
                 .collect::<std::collections::HashMap<_, _>>();
             for i in (0..self.messages.len()).rev() {
-                if self.messages[i].role != model::Role::Tool {
+                if self.messages[i].role != model::Role::Tool || !self.messages[i].parts.is_empty()
+                {
                     continue;
                 }
                 let content = self.messages[i].content.clone();
@@ -493,7 +504,7 @@ impl AgentKernel {
     /// # Errors
     ///
     /// Returns an error when the provider or a tool fails structurally, tool
-    /// arguments are invalid JSON, or the bounded loop reaches its step limit.
+    /// arguments are invalid JSON, or a configured step limit is reached.
     ///
     /// # Panics
     ///
@@ -524,11 +535,16 @@ impl AgentKernel {
         F: FnMut(AgentEvent) + Send,
         H: FnMut(&[Message]) -> Result<(), AgentError> + Send,
     {
-        let timeout = std::time::Duration::from_secs(self.budget.turn_timeout_secs.max(1));
-        let result =
-            tokio::time::timeout(timeout, self.run_turn_inner(input, emit, &mut checkpoint))
-                .await
-                .unwrap_or_else(|_| Err(AgentError::Budget("turn timeout".into())));
+        let result = if self.budget.turn_timeout_secs == 0 {
+            self.run_turn_inner(input, emit, &mut checkpoint).await
+        } else {
+            tokio::time::timeout(
+                std::time::Duration::from_secs(self.budget.turn_timeout_secs),
+                self.run_turn_inner(input, emit, &mut checkpoint),
+            )
+            .await
+            .unwrap_or_else(|_| Err(AgentError::Budget("turn timeout".into())))
+        };
         if result.is_err() {
             // Persist a valid tool-call transcript even if a deadline interrupts execution.
             let answered = self
@@ -588,7 +604,12 @@ impl AgentKernel {
             .collect::<Vec<_>>();
 
         let mut calls_used = 0;
-        for _ in 0..self.budget.max_steps {
+        let mut steps_used = 0usize;
+        loop {
+            if self.budget.max_steps != 0 && steps_used >= self.budget.max_steps {
+                return Err(AgentError::StepLimit(self.budget.max_steps));
+            }
+            steps_used = steps_used.saturating_add(1);
             self.compress_if_needed(|event| (emit.lock().unwrap())(event))
                 .await?;
             (emit.lock().unwrap())(AgentEvent::ModelStarted {
@@ -627,10 +648,12 @@ impl AgentKernel {
                 return Ok(content);
             }
 
-            if calls_used + tool_calls.len() > self.budget.max_tool_calls {
+            if self.budget.max_tool_calls != 0
+                && tool_calls.len() > self.budget.max_tool_calls.saturating_sub(calls_used)
+            {
                 return Err(AgentError::Budget("tool call limit".into()));
             }
-            calls_used += tool_calls.len();
+            calls_used = calls_used.saturating_add(tool_calls.len());
             for call in tool_calls {
                 let name = call.function.name;
                 (emit.lock().unwrap())(AgentEvent::ToolStarted { name: name.clone() });
@@ -651,12 +674,16 @@ impl AgentKernel {
                     .await;
                 let result = if approved {
                     let _timer = tool::telemetry::Timer::new(format!("tool.{}", tool.name()));
-                    tokio::time::timeout(
-                        std::time::Duration::from_secs(self.budget.tool_timeout_secs.max(1)),
-                        tool.execute(input),
-                    )
-                    .await
-                    .unwrap_or_else(|_| Err(ToolError::Execution("tool timeout".into())))
+                    if self.budget.tool_timeout_secs == 0 {
+                        tool.execute_output(input).await
+                    } else {
+                        tokio::time::timeout(
+                            std::time::Duration::from_secs(self.budget.tool_timeout_secs),
+                            tool.execute_output(input),
+                        )
+                        .await
+                        .unwrap_or_else(|_| Err(ToolError::Execution("tool timeout".into())))
+                    }
                 } else {
                     Err(ToolError::PermissionDenied(name.clone()))
                 };
@@ -665,14 +692,26 @@ impl AgentKernel {
                     success: result.is_ok(),
                 });
                 let tool_message =
-                    Message::tool(call.id, result.unwrap_or_else(|error| error.to_string()));
+                    match result.unwrap_or_else(|error| ToolOutput::Text(error.to_string())) {
+                        ToolOutput::Text(text) => Message::tool(call.id, text),
+                        ToolOutput::Image {
+                            description,
+                            media_type,
+                            data,
+                        } => {
+                            let mut message = Message::tool(call.id, description.clone());
+                            message.parts = vec![
+                                model::ContentPart::Text { text: description },
+                                model::ContentPart::Image { media_type, data },
+                            ];
+                            message
+                        }
+                    };
                 self.messages.push(tool_message.clone());
                 self.raw_turn_messages.push(tool_message);
                 checkpoint(&self.raw_turn_messages)?;
             }
         }
-
-        Err(AgentError::StepLimit(self.budget.max_steps))
     }
 }
 
@@ -922,6 +961,14 @@ pub fn estimate_tokens(messages: &[Message]) -> usize {
         .iter()
         .map(|message| {
             estimate_text_tokens(&message.content)
+                + message
+                    .parts
+                    .iter()
+                    .map(|part| match part {
+                        model::ContentPart::Text { text } => estimate_text_tokens(text),
+                        model::ContentPart::Image { .. } => 2048,
+                    })
+                    .sum::<usize>()
                 + message
                     .tool_calls
                     .iter()
@@ -1733,14 +1780,24 @@ mod tests {
             model: "test".into(),
             responses: Mutex::new(VecDeque::from([ModelResponse {
                 content: String::new(),
-                tool_calls: vec![ToolCall {
-                    id: "pending".into(),
-                    kind: "function".into(),
-                    function: FunctionCall {
-                        name: "echo".into(),
-                        arguments: "{}".into(),
+                tool_calls: vec![
+                    ToolCall {
+                        id: "pending-1".into(),
+                        kind: "function".into(),
+                        function: FunctionCall {
+                            name: "echo".into(),
+                            arguments: "{}".into(),
+                        },
                     },
-                }],
+                    ToolCall {
+                        id: "pending-2".into(),
+                        kind: "function".into(),
+                        function: FunctionCall {
+                            name: "echo".into(),
+                            arguments: "{}".into(),
+                        },
+                    },
+                ],
                 finish_reason: None,
             }])),
         };
@@ -1748,7 +1805,7 @@ mod tests {
         tools.register(EchoTool);
         let mut kernel = AgentKernel::new(Arc::new(provider), tools, Arc::new(AllowAll))
             .with_execution_budget(ExecutionBudget {
-                max_tool_calls: 0,
+                max_tool_calls: 1,
                 ..ExecutionBudget::default()
             });
         assert!(matches!(
@@ -1757,7 +1814,7 @@ mod tests {
         ));
         assert_eq!(
             kernel.messages().last().unwrap().tool_call_id.as_deref(),
-            Some("pending")
+            Some("pending-2")
         );
         assert!(
             kernel

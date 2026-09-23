@@ -12,6 +12,7 @@ design decisions that shaped the code are recorded as ADRs in
 | [memory.md](memory.md) | Memory: scopes, project identity, retrieval, persistence |
 | [context.md](context.md) | Context budgeting, compression, session resume |
 | [storage.md](storage.md) | Storage: SQLite schema, JSONL event streams, data directories, migration |
+| [backup.md](backup.md) | Versioned axpack export/import, data boundaries and project remapping |
 | [tools.md](tools.md) | Tools, permissions, safety |
 | [mcp.md](mcp.md) | MCP integration: configuration, transports, lazy connection |
 | [skills.md](skills.md) | Skills: package format, routing, enable/disable |

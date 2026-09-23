@@ -1,4 +1,0 @@
-name = "skill-creator"
-description = "Create or update an AX skill package with focused instructions and valid metadata."
-trigger_keywords = ["create skill", "new skill", "write skill", "update skill", "创建技能", "编写技能", "修改技能"]
-required_tools = ["filesystem", "shell"]

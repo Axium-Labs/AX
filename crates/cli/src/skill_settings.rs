@@ -70,6 +70,12 @@ required_tools = ["mcp"]
             state.skills().unwrap().directory("review"),
             Some(source.as_path())
         );
+        let (catalog_context, used) = state.skill_catalog_context(10_000).unwrap();
+        let catalog_context = catalog_context.unwrap();
+        assert!(used > 0);
+        assert!(catalog_context.content.contains("Review code"));
+        assert!(catalog_context.content.contains("instructions.md"));
+        assert!(!catalog_context.content.contains("Review carefully."));
         state.create_session("test").unwrap();
         let session = state.current_session_id().unwrap().to_owned();
         let routed = state.route_skills("review", 1000).unwrap();
@@ -80,6 +86,14 @@ required_tools = ["mcp"]
             .loaded_messages
             .push(Message::user("Keep this message"));
         state.toggle_skill("review").unwrap();
+        assert!(
+            state
+                .skill_catalog_context(10_000)
+                .unwrap()
+                .0
+                .as_ref()
+                .is_none_or(|message| !message.content.contains("Review code"))
+        );
         assert!(
             state
                 .loaded_messages

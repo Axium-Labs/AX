@@ -61,9 +61,10 @@ Quick smoke test of a local build:
 
 ### A new model
 
-1. Implement `ModelProvider` in `crates/model` (see `deepseek.rs` / `openai.rs`
-   for shape).
-2. Register the provider id/endpoint/env-var in the provider catalog.
+1. For a new protocol, implement `ModelProvider` in `crates/model` (see
+   `openai_compatible.rs` / `openai.rs` for shape). Providers that use the
+   existing Chat Completions protocol reuse `OpenAiCompatibleProvider`.
+2. Register the provider id/endpoint/env-var and protocol in the provider catalog.
 3. Wire resolution in `crates/cli/src/model_selection.rs` and the login
    options in the TUI.
 
@@ -82,8 +83,12 @@ Quick smoke test of a local build:
 
 ### A new skill
 
-1. Create `skills/<name>/skill.toml` (name, description,
-   `trigger_keywords`, `required_tools`) and `instructions.md`.
+1. Create `skills/<name>/SKILL.md` with standard YAML frontmatter
+   (`name`, `description`, optional `license`, `compatibility`, `metadata`,
+   and `allowed-tools`) and a Markdown body. Describe both the task and its
+   use cases in `description`. See [skills.md](skills.md) for validation and
+   precedence. Legacy `skill.toml` plus `instructions.md` only supports
+   existing user data.
 2. No code changes needed — indexing and routing are automatic.
 
 ### A new UI

@@ -1,5 +1,0 @@
-name = "coding"
-description = "Implement, debug, test, and review software changes."
-trigger_keywords = ["code", "coding", "rust", "compile", "test", "代码", "实现", "编译", "测试"]
-required_tools = ["filesystem", "shell"]
-

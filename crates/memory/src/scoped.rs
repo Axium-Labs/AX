@@ -19,7 +19,7 @@ impl MemoryScope {
         }
     }
 }
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct MemoryRecord {
     pub key: String,
     pub value: String,
@@ -128,8 +128,15 @@ impl MemoryStore {
                 "invalid scope owner or empty key".into(),
             ));
         }
-        if memory.scope == MemoryScope::Session && self.session(&memory.owner)?.is_none() {
-            return Err(MemoryError::InvalidValue("unknown memory session".into()));
+        if memory.scope == MemoryScope::Session {
+            let exists: bool = self.connection.query_row(
+                "SELECT EXISTS(SELECT 1 FROM sessions WHERE id=?1)",
+                [&memory.owner],
+                |row| row.get(0),
+            )?;
+            if !exists {
+                return Err(MemoryError::InvalidValue("unknown memory session".into()));
+            }
         }
         self.connection.execute("INSERT INTO scoped_memories(scope, owner, key, value, source, always_include) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
             ON CONFLICT(scope, owner, key) DO UPDATE SET value=excluded.value, source=excluded.source, always_include=excluded.always_include, updated_at=unixepoch()",

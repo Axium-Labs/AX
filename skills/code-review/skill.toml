@@ -1,4 +1,0 @@
-name = "code-review"
-description = "Review a code diff for actionable regressions and report findings without editing files."
-trigger_keywords = ["code review", "review diff", "review changes", "review commit", "代码审查", "审查代码", "审查改动"]
-required_tools = ["filesystem", "shell", "search"]

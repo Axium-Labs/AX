@@ -20,8 +20,8 @@ use std::{
 };
 
 use model::{
-    AuthStorage, DeepSeekConfig, DeepSeekProvider, ModelInfo, ModelRegistry, OpenAiConfig,
-    OpenAiProvider, ProviderProtocol,
+    AuthStorage, ModelInfo, ModelRegistry, OpenAiCompatibleConfig, OpenAiCompatibleProvider,
+    OpenAiConfig, OpenAiProvider, ProviderProtocol,
 };
 
 /// Overall deadline for a full catalog refresh, mirroring pi's 15s timeout.
@@ -144,7 +144,7 @@ pub(crate) fn cached_snapshot(data_dir: &Path, codex_auth: Option<&PathBuf>) -> 
             .ok()
             .flatten()
             .unwrap_or_default();
-        let provider = DeepSeekProvider::new(DeepSeekConfig::from_api_key(None, key));
+        let provider = OpenAiCompatibleProvider::new(model::deepseek_compatible_config(None, key));
         models.extend(registry.cached(&provider, "cached snapshot").models);
     }
     if configured.iter().any(|provider| provider == "openai") {
@@ -214,9 +214,9 @@ async fn run_refresh(data_dir: &Path, codex_auth: Option<PathBuf>) -> CatalogRef
             .flatten()?;
         Some(
             registry
-                .discover(&DeepSeekProvider::new(DeepSeekConfig::from_api_key(
-                    None, key,
-                )))
+                .discover(&OpenAiCompatibleProvider::new(
+                    model::deepseek_compatible_config(None, key),
+                ))
                 .await,
         )
     };
@@ -280,7 +280,7 @@ async fn run_refresh(data_dir: &Path, codex_auth: Option<PathBuf>) -> CatalogRef
     CatalogRefreshResult { models, failed }
 }
 
-fn compatible_provider(auth: &AuthStorage, provider_id: &str) -> Option<DeepSeekProvider> {
+fn compatible_provider(auth: &AuthStorage, provider_id: &str) -> Option<OpenAiCompatibleProvider> {
     let spec = model::provider(provider_id)?;
     if spec.protocol != ProviderProtocol::OpenAiCompatible {
         return None;
@@ -291,7 +291,7 @@ fn compatible_provider(auth: &AuthStorage, provider_id: &str) -> Option<DeepSeek
         .ok()
         .flatten()?;
     let endpoint = model::provider_chat_endpoint(provider_id)?;
-    Some(DeepSeekProvider::new(DeepSeekConfig::from_compatible(
+    Some(OpenAiCompatibleProvider::new(OpenAiCompatibleConfig::new(
         provider_id,
         "catalog-only".to_owned(),
         key,

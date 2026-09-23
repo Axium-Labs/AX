@@ -4,17 +4,15 @@ use std::time::Duration;
 use async_trait::async_trait;
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
 
 use crate::{
     FunctionCall, Message, ModelError, ModelInfo, ModelProvider, ModelRequest, ModelResponse,
     ReasoningEffort, ToolCall, ToolSpec,
 };
 
-const DEFAULT_ENDPOINT: &str = "https://api.deepseek.com/chat/completions";
-pub const FALLBACK_MODEL: &str = "deepseek-flash";
-
 #[derive(Clone, Debug)]
-pub struct DeepSeekConfig {
+pub struct OpenAiCompatibleConfig {
     pub provider_id: String,
     pub api_key: String,
     pub model: String,
@@ -24,44 +22,9 @@ pub struct DeepSeekConfig {
     pub reasoning_effort: Option<ReasoningEffort>,
 }
 
-impl DeepSeekConfig {
+impl OpenAiCompatibleConfig {
     #[must_use]
-    pub fn from_api_key(model: Option<String>, api_key: String) -> Self {
-        Self {
-            provider_id: "deepseek".to_owned(),
-            api_key,
-            model: model.unwrap_or_else(|| FALLBACK_MODEL.to_owned()),
-            endpoint: std::env::var("DEEPSEEK_API_URL")
-                .unwrap_or_else(|_| DEFAULT_ENDPOINT.to_owned()),
-            context_window: 1_048_576,
-            max_output_tokens: None,
-            reasoning_effort: None,
-        }
-    }
-
-    /// Builds a provider configuration from the `DeepSeek` environment variables.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`ModelError::Configuration`] when `DEEPSEEK_API_KEY` is absent.
-    pub fn from_env(model: Option<String>) -> Result<Self, ModelError> {
-        let api_key = std::env::var("DEEPSEEK_API_KEY")
-            .map_err(|_| ModelError::Configuration("DEEPSEEK_API_KEY is not set".to_owned()))?;
-        let endpoint =
-            std::env::var("DEEPSEEK_API_URL").unwrap_or_else(|_| DEFAULT_ENDPOINT.to_owned());
-        Ok(Self {
-            provider_id: "deepseek".to_owned(),
-            api_key,
-            model: model.unwrap_or_else(|| FALLBACK_MODEL.to_owned()),
-            endpoint,
-            context_window: 1_048_576,
-            max_output_tokens: None,
-            reasoning_effort: None,
-        })
-    }
-
-    #[must_use]
-    pub fn from_compatible(
+    pub fn new(
         provider_id: impl Into<String>,
         model: String,
         api_key: String,
@@ -80,14 +43,14 @@ impl DeepSeekConfig {
     }
 }
 
-pub struct DeepSeekProvider {
+pub struct OpenAiCompatibleProvider {
     client: reqwest::Client,
-    config: DeepSeekConfig,
+    config: OpenAiCompatibleConfig,
 }
 
-impl DeepSeekProvider {
+impl OpenAiCompatibleProvider {
     #[must_use]
-    pub fn new(config: DeepSeekConfig) -> Self {
+    pub fn new(config: OpenAiCompatibleConfig) -> Self {
         Self {
             client: reqwest::Client::new(),
             config,
@@ -98,11 +61,43 @@ impl DeepSeekProvider {
 #[derive(Serialize)]
 struct ChatRequest<'a> {
     model: &'a str,
-    messages: &'a [Message],
+    messages: Vec<Value>,
     tools: &'a [ToolSpec],
     stream: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     reasoning_effort: Option<ReasoningEffort>,
+}
+
+fn chat_messages(messages: &[Message]) -> Vec<Value> {
+    messages
+        .iter()
+        .map(|message| {
+            let mut value = json!({"role":message.role,"content":message.content});
+            if let Some(id) = &message.tool_call_id {
+                value["tool_call_id"] = json!(id);
+            }
+            if !message.tool_calls.is_empty() {
+                value["tool_calls"] = json!(message.tool_calls);
+            }
+            value
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod content_tests {
+    use super::*;
+    #[test]
+    fn text_only_provider_omits_multimodal_metadata() {
+        let mut message = Message::tool("call", "image description");
+        message.parts = vec![crate::ContentPart::Image {
+            media_type: "image/png".into(),
+            data: "AAAA".into(),
+        }];
+        let output = chat_messages(&[message]);
+        assert!(output[0].get("parts").is_none());
+        assert_eq!(output[0]["content"], "image description");
+    }
 }
 
 #[derive(Deserialize)]
@@ -149,7 +144,7 @@ struct StreamChoice {
 #[derive(Default, Deserialize)]
 struct StreamDelta {
     content: Option<String>,
-    /// `DeepSeek` reasoning models stream their chain-of-thought here.
+    /// Compatible reasoning models may stream reasoning content here.
     reasoning_content: Option<String>,
     #[serde(default)]
     tool_calls: Vec<DeltaToolCall>,
@@ -176,7 +171,7 @@ struct PartialToolCall {
 }
 
 #[async_trait]
-impl ModelProvider for DeepSeekProvider {
+impl ModelProvider for OpenAiCompatibleProvider {
     fn name(&self) -> &str {
         &self.config.provider_id
     }
@@ -200,7 +195,7 @@ impl ModelProvider for DeepSeekProvider {
             .bearer_auth(&self.config.api_key)
             .json(&ChatRequest {
                 model: &self.config.model,
-                messages: &request.messages,
+                messages: chat_messages(&request.messages),
                 tools: &request.tools,
                 stream: false,
                 reasoning_effort: self.config.reasoning_effort,
@@ -233,7 +228,7 @@ impl ModelProvider for DeepSeekProvider {
             .bearer_auth(&self.config.api_key)
             .json(&ChatRequest {
                 model: &self.config.model,
-                messages: &request.messages,
+                messages: chat_messages(&request.messages),
                 tools: &request.tools,
                 stream: true,
                 reasoning_effort: self.config.reasoning_effort,
@@ -311,37 +306,17 @@ impl ModelProvider for DeepSeekProvider {
             .data
             .into_iter()
             .map(|model| {
-                compatible_model_info(model.id, &self.config.provider_id, &self.config.endpoint)
+                crate::providers::compatible_model_info(
+                    model.id,
+                    &self.config.provider_id,
+                    &self.config.endpoint,
+                )
             })
             .collect())
     }
 
     fn fallback_models(&self) -> Vec<ModelInfo> {
         Vec::new()
-    }
-}
-
-fn compatible_model_info(id: String, provider: &str, endpoint: &str) -> ModelInfo {
-    let deepseek = provider == "deepseek";
-    let reasoning = deepseek && id.to_ascii_lowercase().contains("reason");
-    ModelInfo {
-        display_name: id.clone(),
-        id,
-        provider: provider.to_owned(),
-        context_window: if deepseek { 1_048_576 } else { 128_000 },
-        max_output_tokens: None,
-        reasoning_efforts: if reasoning {
-            vec![
-                ReasoningEffort::Low,
-                ReasoningEffort::Medium,
-                ReasoningEffort::High,
-            ]
-        } else {
-            Vec::new()
-        },
-        default_reasoning_effort: reasoning.then_some(ReasoningEffort::High),
-        supports_tools: true,
-        endpoint: (!deepseek).then(|| endpoint.to_owned()),
     }
 }
 

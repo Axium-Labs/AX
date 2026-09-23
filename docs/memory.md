@@ -4,6 +4,7 @@ AX stores raw session history, effective-context snapshots and scoped facts in
 SQLite. Context compaction only changes effective context — it never promotes
 a summary to global or project memory and never deletes raw messages. The
 on-disk layout and schema are documented in [storage.md](storage.md).
+Portable export and import are documented in [backup.md](backup.md).
 
 ## Scopes and writes
 

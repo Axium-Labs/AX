@@ -53,6 +53,31 @@ enabled = false
 connection exists, so the model can discover what a sleeping/disabled server
 offers before spending a real connection on `list_tools`/`call`.
 
+### LSP server
+
+For code intelligence, install an MCP server that exposes LSP operations and
+add it to `mcp.toml` using the server's documented command and arguments:
+
+```toml
+[servers.lsp]
+transport = "stdio"
+command = "your-lsp-mcp-server"
+args = ["--your-server-options"]
+description = "Language-server code intelligence for this project"
+capabilities = ["lsp", "definitions", "references", "diagnostics"]
+request_timeout_secs = 300
+```
+
+Replace the command and arguments with those required by the MCP server;
+AX does not launch a language server or translate LSP messages itself. The
+MCP server decides which language servers to use. Discover its actual tool
+names with `/mcp` or `mcp` `action="list_tools"` before calling them.
+`request_timeout_secs` is a separate MCP request limit; increase it for
+long-running language-server operations if needed.
+Legacy skills that used `required_tools: [lsp]` should use
+`metadata.ax.required-tools: "mcp"` after migration to `SKILL.md`
+so they can route through the MCP gateway.
+
 ## Lazy connection & capability catalog
 
 - Servers are **not** connected at startup. A connection (and process spawn)

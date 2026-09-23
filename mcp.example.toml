@@ -22,6 +22,16 @@ description = "Project issue tracker"
 capabilities = ["issues", "tasks"]
 enabled = false
 
+# Supply an installed MCP server that exposes LSP operations, then enable it.
+[servers.lsp]
+transport = "stdio"
+command = "your-lsp-mcp-server"
+args = ["--your-server-options"]
+description = "Language-server code intelligence for this project"
+capabilities = ["lsp", "definitions", "references", "diagnostics"]
+request_timeout_secs = 300
+enabled = false
+
 [servers.custom-websocket]
 transport = "websocket"
 url = "wss://example.com/mcp"

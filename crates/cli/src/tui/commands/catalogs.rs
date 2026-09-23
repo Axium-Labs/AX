@@ -40,10 +40,18 @@ pub(super) fn skill_items(state: &mut ReplState) -> Result<Vec<SurfaceItem>> {
 
 pub(super) fn open_skills(state: &mut ReplState, pane: &mut BottomPane) -> Result<()> {
     let items = skill_items(state)?;
+    let mut help = vec!["Type to search names, descriptions, or status".into()];
+    help.extend(
+        state
+            .skills()?
+            .issues()
+            .iter()
+            .map(|issue| format!("Skipped: {issue}")),
+    );
     pane.push_view(SurfaceView::manager(
         "Skills",
         "skills",
-        vec!["Type to search names, descriptions, or status".into()],
+        help,
         items,
         "Enter details | Space enable/disable | Esc back",
     ));
@@ -135,35 +143,7 @@ pub(super) async fn open_detail(
 ) -> Result<()> {
     let mut lines = vec![format!("Name: {id}")];
     match surface {
-        "skills" => {
-            let available = available_tools(state);
-            let disabled = state.disabled_skills()?.contains(id);
-            let catalog = state.skills()?;
-            let status = catalog
-                .statuses(available.iter().map(String::as_str))
-                .into_iter()
-                .find(|s| s.metadata.name == id)
-                .ok_or_else(|| anyhow::anyhow!("Unknown skill: {id}"))?;
-            lines.push(format!(
-                "Source: {}",
-                catalog.directory(id).expect("indexed skill").display()
-            ));
-            lines.push(format!("Enabled: {}", !disabled));
-            lines.push(format!(
-                "Missing tools: {}",
-                status.missing_tools.join(", ")
-            ));
-            lines.push(format!("Description: {}", status.metadata.description));
-            lines.push(format!(
-                "Triggers: {}",
-                status.metadata.trigger_keywords.join(", ")
-            ));
-            lines.push(format!(
-                "Required tools: {}",
-                status.metadata.required_tools.join(", ")
-            ));
-            lines.push("Instructions load only when routed into a task.".into());
-        }
+        "skills" => append_skill_details(state, id, &mut lines)?,
         "tools" => {
             let registry = tools(&state.mcp_tools);
             let gateway = mcp::McpGateway::new(state.mcp()?);
@@ -226,5 +206,41 @@ pub(super) async fn open_detail(
         _ => {}
     }
     pane.push_view(SurfaceView::info("Details", lines));
+    Ok(())
+}
+
+fn append_skill_details(state: &mut ReplState, id: &str, lines: &mut Vec<String>) -> Result<()> {
+    let available = available_tools(state);
+    let disabled = state.disabled_skills()?.contains(id);
+    let catalog = state.skills()?;
+    let status = catalog
+        .statuses(available.iter().map(String::as_str))
+        .into_iter()
+        .find(|s| s.metadata.name == id)
+        .ok_or_else(|| anyhow::anyhow!("Unknown skill: {id}"))?;
+    lines.push(format!(
+        "Source: {}",
+        catalog.directory(id).expect("indexed skill").display()
+    ));
+    lines.push(format!("Enabled: {}", !disabled));
+    lines.push(format!(
+        "Missing tools: {}",
+        status.missing_tools.join(", ")
+    ));
+    lines.push(format!("Description: {}", status.metadata.description));
+    if let Some(license) = &status.metadata.license {
+        lines.push(format!("License: {license}"));
+    }
+    if let Some(compatibility) = &status.metadata.compatibility {
+        lines.push(format!("Compatibility: {compatibility}"));
+    }
+    if let Some(allowed) = &status.metadata.allowed_tools {
+        lines.push(format!("Declared allowed tools: {allowed}"));
+    }
+    lines.push(format!(
+        "Required tools: {}",
+        status.metadata.required_tools.join(", ")
+    ));
+    lines.push("Instructions load only when routed into a task.".into());
     Ok(())
 }

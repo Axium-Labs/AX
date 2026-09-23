@@ -243,6 +243,15 @@ struct ResponsesResponse {
 
 #[async_trait]
 impl ModelProvider for OpenAiProvider {
+    fn capabilities(&self) -> crate::ModelCapabilities {
+        crate::ModelCapabilities {
+            vision: self.config.model.starts_with("gpt-4o")
+                || self.config.model.starts_with("gpt-4.1")
+                || self.config.model.starts_with("gpt-5")
+                || self.config.model.starts_with("gpt-6"),
+            tool_calling: true,
+        }
+    }
     fn name(&self) -> &str {
         if self.config.is_codex {
             "openai-codex"
@@ -641,11 +650,17 @@ fn response_input(messages: &[Message]) -> Vec<Value> {
     let mut input = Vec::new();
     for message in messages {
         match message.role {
-            Role::Tool => input.push(json!({
-                "type": "function_call_output",
-                "call_id": message.tool_call_id,
-                "output": message.content
-            })),
+            Role::Tool => {
+                let output = if message.parts.is_empty() {
+                    json!(message.content)
+                } else {
+                    Value::Array(message.parts.iter().map(|part| match part {
+                        crate::ContentPart::Text { text } => json!({"type":"input_text","text":text}),
+                        crate::ContentPart::Image { media_type, data } => json!({"type":"input_image","image_url":format!("data:{media_type};base64,{data}")}),
+                    }).collect())
+                };
+                input.push(json!({"type":"function_call_output","call_id":message.tool_call_id,"output":output}));
+            }
             Role::Assistant if !message.tool_calls.is_empty() => {
                 if !message.content.is_empty() {
                     input.push(json!({ "role": "assistant", "content": message.content }));
@@ -663,7 +678,15 @@ fn response_input(messages: &[Message]) -> Vec<Value> {
                 input.push(json!({ "role": "developer", "content": message.content }));
             }
             Role::User | Role::Assistant => {
-                input.push(json!({ "role": message.role, "content": message.content }));
+                if message.parts.is_empty() {
+                    input.push(json!({ "role": message.role, "content": message.content }));
+                } else {
+                    let parts: Vec<Value> = message.parts.iter().map(|part| match part {
+                        crate::ContentPart::Text { text } => json!({"type":"input_text","text":text}),
+                        crate::ContentPart::Image { media_type, data } => json!({"type":"input_image","image_url":format!("data:{media_type};base64,{data}")}),
+                    }).collect();
+                    input.push(json!({"role":message.role,"content":parts}));
+                }
             }
         }
     }
@@ -742,6 +765,26 @@ fn truncate_error(message: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn response_tool_output_preserves_native_image_part() {
+        let mut message = Message::tool("call-1", "image");
+        message.parts = vec![
+            crate::ContentPart::Text {
+                text: "image".into(),
+            },
+            crate::ContentPart::Image {
+                media_type: "image/png".into(),
+                data: "AAAA".into(),
+            },
+        ];
+        let input = response_input(&[message]);
+        assert_eq!(input[0]["output"][1]["type"], "input_image");
+        assert_eq!(
+            input[0]["output"][1]["image_url"],
+            "data:image/png;base64,AAAA"
+        );
+    }
 
     #[test]
     fn parses_text_and_function_calls() {

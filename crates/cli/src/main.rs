@@ -12,8 +12,8 @@ use clap::{Parser, Subcommand, ValueEnum};
 use mcp::{McpConfig, McpManager, McpToolProxy};
 use memory::{MemoryStore, MessageKind, MessageRole, NewMessage, Session, StoredMessage};
 use model::{
-    AuthStorage, DeepSeekConfig, DeepSeekProvider, Message, ModelProvider, OpenAiConfig,
-    OpenAiProvider, ReasoningEffort, Role,
+    AuthStorage, Message, ModelProvider, OpenAiCompatibleConfig, OpenAiCompatibleProvider,
+    OpenAiConfig, OpenAiProvider, ReasoningEffort, Role,
 };
 use runtime_core::{AgentEvent, AgentKernel, AllowAll, ApprovalPolicy, DenyDangerous};
 use runtime_core::{AgentSupervisor, AgentTask};
@@ -33,6 +33,7 @@ use model_selection::ModelResolution;
 use tui::run_tui;
 
 const SKILL_CONTEXT_PREFIX: &str = "[ax-skill:";
+const SKILL_CATALOG_PREFIX: &str = "[skill-catalog]";
 
 #[derive(Parser)]
 #[command(
@@ -60,20 +61,38 @@ struct Cli {
     mcp_config: Option<PathBuf>,
     #[arg(long, global = true)]
     allow_dangerous: bool,
-    #[arg(long, global = true, default_value = "64")]
-    max_steps: NonZeroUsize,
-    #[arg(long, global = true, default_value = "128")]
-    max_tool_calls: NonZeroUsize,
-    #[arg(long, global = true, default_value = "600")]
-    turn_timeout_secs: NonZeroUsize,
-    #[arg(long, global = true, default_value = "120")]
-    tool_timeout_secs: NonZeroUsize,
+    /// Maximum model steps per turn; 0 (default) means unlimited.
+    #[arg(long, global = true, default_value_t = 0)]
+    max_steps: usize,
+    /// Maximum tool calls per turn; 0 (default) means unlimited.
+    #[arg(long, global = true, default_value_t = 0)]
+    max_tool_calls: usize,
+    /// Turn timeout in seconds; 0 (default) means unlimited.
+    #[arg(long, global = true, default_value_t = 0)]
+    turn_timeout_secs: u64,
+    /// Tool timeout in seconds; 0 (default) means unlimited.
+    #[arg(long, global = true, default_value_t = 0)]
+    tool_timeout_secs: u64,
     #[command(subcommand)]
     command: Option<Command>,
 }
 
 #[derive(Subcommand)]
 enum Command {
+    /// Export portable user data to a new .axpack archive.
+    Export {
+        path: PathBuf,
+        #[arg(long)]
+        memory: bool,
+        #[arg(long)]
+        sessions: bool,
+    },
+    /// Validate and merge a .axpack archive.
+    Import {
+        path: PathBuf,
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Run one persisted task and exit.
     Run { prompt: String },
     /// Run independent tasks with bounded concurrency.
@@ -368,27 +387,85 @@ impl ReplState {
 
     fn skills(&mut self) -> Result<&SkillCatalog> {
         if self.skill_catalog.is_none() {
-            self.skill_catalog =
-                Some(SkillCatalog::index(&self.skills_dir).with_context(|| {
+            let global_skills = config::ax_home().join("skills");
+            let catalog = SkillCatalog::index_sources([&self.skills_dir, &global_skills])
+                .with_context(|| {
                     format!(
                         "failed to index skills directory {}",
                         self.skills_dir.display()
                     )
-                })?);
+                })?;
+            for issue in catalog.issues() {
+                eprintln!("Skill discovery: {issue}");
+            }
+            self.skill_catalog = Some(catalog);
         }
         self.skill_catalog
             .as_ref()
             .ok_or_else(|| anyhow!("skill catalog was not initialized"))
     }
 
-    fn route_skills(&mut self, prompt: &str, token_budget: usize) -> Result<Vec<Message>> {
+    fn skill_tool_names(&self) -> Vec<String> {
         let mut available_tools = tools(&self.mcp_tools)
             .names()
             .into_iter()
             .map(str::to_owned)
             .collect::<Vec<_>>();
+        if self
+            .runtime
+            .as_ref()
+            .is_some_and(|runtime| !runtime.has_tool("view_image"))
+        {
+            available_tools.retain(|name| name != "view_image");
+        }
         available_tools.push("mcp".to_owned());
         available_tools.push("memory".to_owned());
+        available_tools
+    }
+
+    /// Expose only descriptions and paths for skills the agent may choose
+    /// semantically when automatic metadata ranking does not find a match.
+    fn skill_catalog_context(&mut self, token_budget: usize) -> Result<(Option<Message>, usize)> {
+        let available_tools = self.skill_tool_names();
+        let disabled = self.disabled_skills()?;
+        let active = self.active_skills.clone();
+        let catalog = self.skills()?;
+        let mut content = format!(
+            "{SKILL_CATALOG_PREFIX}\nAvailable Agent Skills (metadata only). If a skill applies, read its listed instruction file with the filesystem tool before following it. Skill declarations never grant tool permission.\n"
+        );
+        let mut included = false;
+        for status in catalog.statuses(available_tools.iter().map(String::as_str)) {
+            if !status.available()
+                || disabled.contains(&status.metadata.name)
+                || active.contains(&status.metadata.name)
+            {
+                continue;
+            }
+            let Some(instruction_path) = catalog.instruction_path(&status.metadata.name) else {
+                continue;
+            };
+            let line = format!(
+                "- {}: {} (file: {})\n",
+                status.metadata.name,
+                status.metadata.description,
+                instruction_path.display()
+            );
+            let candidate = Message::system(format!("{content}{line}"));
+            if runtime_core::estimate_tokens(std::slice::from_ref(&candidate)) <= token_budget {
+                content.push_str(&line);
+                included = true;
+            }
+        }
+        if !included {
+            return Ok((None, 0));
+        }
+        let message = Message::system(content);
+        let size = runtime_core::estimate_tokens(std::slice::from_ref(&message));
+        Ok((Some(message), size))
+    }
+
+    fn route_skills(&mut self, prompt: &str, token_budget: usize) -> Result<Vec<Message>> {
+        let available_tools = self.skill_tool_names();
         let disabled_skills = self.disabled_skills()?;
         let candidates = self
             .skills()?
@@ -400,10 +477,18 @@ impl ReplState {
             {
                 continue;
             }
-            let loaded = self.skills()?.load(&matched.name)?;
+            let loaded = match self.skills()?.load(&matched.name) {
+                Ok(loaded) => loaded,
+                Err(error) => {
+                    eprintln!("Skill loading: {error}");
+                    continue;
+                }
+            };
             let message = Message::system(format!(
-                "{SKILL_CONTEXT_PREFIX}{}]\n{}",
-                loaded.metadata.name, loaded.instructions
+                "{SKILL_CONTEXT_PREFIX}{}]\nSkill root: {}\n{}",
+                loaded.metadata.name,
+                loaded.directory.display(),
+                loaded.instructions
             ));
             let size = runtime_core::estimate_tokens(std::slice::from_ref(&message));
             if size > remaining_tokens {
@@ -417,6 +502,25 @@ impl ReplState {
             }
         }
         Ok(messages)
+    }
+
+    fn prepare_skill_context(&mut self, prompt: &str, token_budget: usize) -> Result<()> {
+        let skill_messages = self.route_skills(prompt, token_budget)?;
+        let routed_tokens = runtime_core::estimate_tokens(&skill_messages);
+        let (catalog_context, _) =
+            self.skill_catalog_context(token_budget.saturating_sub(routed_tokens))?;
+        self.runtime
+            .as_mut()
+            .ok_or_else(|| anyhow!("agent runtime was not initialized"))?
+            .set_context(SKILL_CATALOG_PREFIX, catalog_context);
+        for skill_message in skill_messages {
+            self.persist_messages(std::slice::from_ref(&skill_message))?;
+            self.runtime
+                .as_mut()
+                .ok_or_else(|| anyhow!("agent runtime was not initialized"))?
+                .push_context(skill_message);
+        }
+        Ok(())
     }
 
     fn mcp(&mut self) -> Result<Arc<tokio::sync::Mutex<McpManager>>> {
@@ -557,10 +661,17 @@ fn tools(mcp_tools: &[McpToolProxy]) -> ToolRegistry {
     registry.register(FilesystemTool);
     registry.register(tool::PatchTool);
     registry.register(tool::SearchTool);
+    registry.register(tool::WebTool::new());
+    registry.register(tool::ViewImageTool::new(tool_workspace()));
     for tool in mcp_tools {
         registry.register(tool.clone());
     }
     registry
+}
+
+fn tool_workspace() -> PathBuf {
+    let cwd = std::env::current_dir().unwrap_or_default();
+    discover_project_root(&cwd)
 }
 
 /// Single source of the context budget available for one turn: reserves room
@@ -594,13 +705,13 @@ fn kernel(
                 .ok_or_else(|| {
                     anyhow!("DeepSeek is not configured; open /model and press A to add an API key")
                 })?;
-            let mut config = DeepSeekConfig::from_api_key(Some(selection.model.clone()), key);
+            let mut config = model::deepseek_compatible_config(Some(selection.model.clone()), key);
             if let Some(context_window) = selection.context_window {
                 config.context_window = context_window;
             }
             config.max_output_tokens = selection.max_output_tokens;
             config.reasoning_effort = selection.reasoning_effort;
-            Arc::new(DeepSeekProvider::new(config))
+            Arc::new(OpenAiCompatibleProvider::new(config))
         }
         ProviderKind::Openai => {
             let key = auth
@@ -655,7 +766,7 @@ fn kernel(
                 .endpoint
                 .clone()
                 .ok_or_else(|| anyhow!("{} catalog did not provide an API endpoint", spec.name))?;
-            let mut config = DeepSeekConfig::from_compatible(
+            let mut config = OpenAiCompatibleConfig::new(
                 spec.id,
                 selection.model.clone(),
                 key,
@@ -664,7 +775,7 @@ fn kernel(
             );
             config.max_output_tokens = selection.max_output_tokens;
             config.reasoning_effort = selection.reasoning_effort;
-            Arc::new(DeepSeekProvider::new(config))
+            Arc::new(OpenAiCompatibleProvider::new(config))
         }
     };
     let tool_registry = if selection.supports_tools {
@@ -709,10 +820,10 @@ async fn main() -> Result<()> {
     let (data_dir, skills_dir) =
         resolve_directories(&cwd, cli.data_dir.clone(), cli.skills_dir.clone());
     let budget = runtime_core::ExecutionBudget {
-        max_steps: cli.max_steps.get(),
-        max_tool_calls: cli.max_tool_calls.get(),
-        turn_timeout_secs: cli.turn_timeout_secs.get() as u64,
-        tool_timeout_secs: cli.tool_timeout_secs.get() as u64,
+        max_steps: cli.max_steps,
+        max_tool_calls: cli.max_tool_calls,
+        turn_timeout_secs: cli.turn_timeout_secs,
+        tool_timeout_secs: cli.tool_timeout_secs,
     };
     drop(startup_timer);
     let auth_path = ax_auth_path();
@@ -723,6 +834,16 @@ async fn main() -> Result<()> {
     };
 
     match cli.command {
+        Some(Command::Export {
+            ref path,
+            memory,
+            sessions,
+        }) => {
+            run_export(path, &data_dir, &cwd, memory, sessions)?;
+        }
+        Some(Command::Import { ref path, dry_run }) => {
+            run_import(path, &data_dir, &cwd, dry_run)?;
+        }
         Some(Command::Run { ref prompt }) => {
             let selection = model_selection::require_resolved(&cli)?;
             let mut state = ReplState::new(data_dir, skills_dir, cli.mcp_config.clone())?;
@@ -770,6 +891,113 @@ async fn main() -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn run_export(
+    path: &Path,
+    data_dir: &Path,
+    cwd: &Path,
+    memory: bool,
+    sessions: bool,
+) -> Result<()> {
+    let project_root = discover_project_root(cwd);
+    let project_path = database_path(data_dir);
+    let project_id = if project_path.exists() {
+        project_identity::load_or_create(&project_root)?
+    } else {
+        project_identity::load_existing(&project_root)?
+            .unwrap_or_else(|| uuid::Uuid::nil().to_string())
+    };
+    let global_path = config::ax_home().join("memory.sqlite3");
+    let project = if project_path.exists() {
+        MemoryStore::open(&project_path)?
+    } else {
+        MemoryStore::open_in_memory()?
+    };
+    if project_path.exists() {
+        project.migrate_project_owner(
+            &project_id,
+            &project_root.to_string_lossy(),
+            data_dir == project_root.join(".ax"),
+        )?;
+    }
+    let global = if global_path.exists() {
+        MemoryStore::open(&global_path)?
+    } else {
+        MemoryStore::open_in_memory()?
+    };
+    let selection = if memory || sessions {
+        memory::backup::ExportSelection { memory, sessions }
+    } else {
+        memory::backup::ExportSelection::all()
+    };
+    let report = memory::backup::ExportService {
+        project: &project,
+        global: &global,
+        project_id: &project_id,
+    }
+    .export(path, selection)?;
+    println!("{}", serde_json::to_string_pretty(&report)?);
+    Ok(())
+}
+
+fn run_import(path: &Path, data_dir: &Path, cwd: &Path, dry_run: bool) -> Result<()> {
+    let project_root = discover_project_root(cwd);
+    let project_path = database_path(data_dir);
+    let global_path = config::ax_home().join("memory.sqlite3");
+    let report = if dry_run {
+        let project_id = project_identity::load_existing(&project_root)?;
+        memory::backup::ImportService::dry_run(
+            path,
+            &project_path,
+            &global_path,
+            project_id.as_deref(),
+        )?
+    } else {
+        // Reject invalid packages before creating an identity or opening stores.
+        let existing_project_id = project_identity::load_existing(&project_root)?;
+        memory::backup::ImportService::dry_run(
+            path,
+            &project_path,
+            &global_path,
+            existing_project_id.as_deref(),
+        )?;
+        let project_id = project_identity::load_or_create(&project_root)?;
+        if let Some(parent) = project_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let mut project = MemoryStore::open(&project_path)?;
+        memory::backup::ImportService {
+            project: &mut project,
+            global_path: &global_path,
+            target_project_id: &project_id,
+        }
+        .import(path)?
+    };
+    println!("{}", serde_json::to_string_pretty(&report)?);
+    Ok(())
+}
+
+#[cfg(test)]
+mod backup_cli_tests {
+    use super::*;
+    #[test]
+    fn parses_export_selection_and_import_dry_run() {
+        let export = Cli::try_parse_from(["ax", "export", "backup.axpack", "--memory"]).unwrap();
+        assert!(matches!(
+            export.command,
+            Some(Command::Export {
+                memory: true,
+                sessions: false,
+                ..
+            })
+        ));
+        let import = Cli::try_parse_from(["ax", "import", "backup.axpack", "--dry-run"]).unwrap();
+        assert!(matches!(
+            import.command,
+            Some(Command::Import { dry_run: true, .. })
+        ));
+    }
 }
 
 async fn run_prompt(
@@ -841,14 +1069,7 @@ where
         .as_mut()
         .expect("runtime initialized")
         .set_context("[retrieved-memory]", memory_context);
-    for skill_message in state.route_skills(prompt, budget.skills_budget_tokens())? {
-        state.persist_messages(std::slice::from_ref(&skill_message))?;
-        state
-            .runtime
-            .as_mut()
-            .ok_or_else(|| anyhow!("agent runtime was not initialized"))?
-            .push_context(skill_message);
-    }
+    state.prepare_skill_context(prompt, budget.skills_budget_tokens())?;
     drop(context_timer);
     let mut runtime = state.runtime.take().expect("runtime initialized");
     let mut saved = 0;
@@ -920,6 +1141,7 @@ fn restore_message(stored: &StoredMessage) -> Message {
             MessageRole::System => Role::System,
         },
         content: stored.content.clone(),
+        parts: Vec::new(),
         tool_call_id: None,
         tool_calls: Vec::new(),
     }

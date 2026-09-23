@@ -423,10 +423,11 @@ fn status_panel(
         format!("Directory         {}", app.directory),
     ];
     lines.push(format!(
-        "Budget            {} steps / {} tool calls / {}s",
-        state.execution_budget.max_steps,
-        state.execution_budget.max_tool_calls,
-        state.execution_budget.turn_timeout_secs
+        "Budget            {} steps / {} tool calls / {} turn / {} tool",
+        limit_display(state.execution_budget.max_steps),
+        limit_display(state.execution_budget.max_tool_calls),
+        timeout_display(state.execution_budget.turn_timeout_secs),
+        timeout_display(state.execution_budget.tool_timeout_secs)
     ));
     lines.push("Latency (count / avg ms / max ms)".into());
     for (label, metric) in tool::telemetry::snapshot() {
@@ -438,6 +439,22 @@ fn status_panel(
         ));
     }
     SurfaceView::info("AX Status", lines)
+}
+
+fn limit_display(value: usize) -> String {
+    if value == 0 {
+        "unlimited".into()
+    } else {
+        value.to_string()
+    }
+}
+
+fn timeout_display(seconds: u64) -> String {
+    if seconds == 0 {
+        "unlimited".into()
+    } else {
+        format!("{seconds}s")
+    }
 }
 
 fn item(id: &str, label: &str, value: &str) -> SurfaceItem {
