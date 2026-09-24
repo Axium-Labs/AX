@@ -126,8 +126,9 @@ On first use, indexes only standard `SKILL.md` YAML frontmatter (or a legacy
 activation, the selected Markdown body is read and injected within the
 `ContextBudget` skill reserve; optional resources remain on demand. Project
 skills take precedence over global skills and malformed packages are isolated.
-A bounded metadata-only catalog lets the model select a skill by meaning through
-the ordinary filesystem tool when term matching misses it.
+A compact metadata-only catalog lets the model select a skill by meaning through
+the ordinary filesystem tool when strong automatic matching misses it; AX omits
+that catalog when automatic routing has already selected a skill.
 `allowed-tools` never changes AX tool permissions. See [skills.md](skills.md).
 
 ### `memory`

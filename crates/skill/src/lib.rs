@@ -293,34 +293,66 @@ impl SkillCatalog {
         let available = available_tools.into_iter().collect::<HashSet<_>>();
         let input_terms = terms(input);
         let lowered_input = input.to_lowercase();
-        let mut matches =
-            self.skills
-                .values()
-                .filter(|skill| {
-                    skill
-                        .metadata
-                        .required_tools
-                        .iter()
-                        .all(|tool| available.contains(tool.as_str()))
+        let mut matches = self
+            .skills
+            .values()
+            .filter(|skill| {
+                skill
+                    .metadata
+                    .required_tools
+                    .iter()
+                    .all(|tool| available.contains(tool.as_str()))
+            })
+            .filter_map(|skill| {
+                let name = &skill.metadata.name;
+                let name_overlap = terms(name).intersection(&input_terms).count();
+                let description_overlap = terms(&skill.metadata.description)
+                    .intersection(&input_terms)
+                    .count();
+                let explicit_name = mentions_name(&lowered_input, name);
+                let score =
+                    usize::from(explicit_name) * 12 + name_overlap * 5 + description_overlap * 2;
+                (explicit_name || name_overlap > 0 || description_overlap >= 2).then(|| {
+                    SkillMatch {
+                        name: name.clone(),
+                        score,
+                    }
                 })
-                .filter_map(|skill| {
-                    let name = &skill.metadata.name;
-                    let name_overlap = terms(name).intersection(&input_terms).count();
-                    let description_overlap = terms(&skill.metadata.description)
-                        .intersection(&input_terms)
-                        .count();
-                    let score = usize::from(lowered_input.contains(name)) * 12
-                        + name_overlap * 5
-                        + description_overlap * 2;
-                    (lowered_input.contains(name) || name_overlap > 0 || description_overlap >= 2)
-                        .then(|| SkillMatch {
-                            name: name.clone(),
-                            score,
-                        })
-                })
-                .collect::<Vec<_>>();
+            })
+            .collect::<Vec<_>>();
         matches.sort_by(|a, b| b.score.cmp(&a.score).then_with(|| a.name.cmp(&b.name)));
         matches
+    }
+
+    /// Restrict automatic body loading to explicit names or strong metadata
+    /// matches. Weaker candidates remain visible in the metadata catalog.
+    #[must_use]
+    pub fn auto_route_candidates<'a>(
+        &self,
+        input: &str,
+        available_tools: impl IntoIterator<Item = &'a str>,
+    ) -> Vec<SkillMatch> {
+        let input_terms = terms(input);
+        let lowered_input = input.to_lowercase();
+        self.route_candidates(input, available_tools)
+            .into_iter()
+            .filter(|matched| {
+                let Some(skill) = self.skills.get(&matched.name) else {
+                    return false;
+                };
+                let name_overlap = terms(&skill.metadata.name)
+                    .intersection(&input_terms)
+                    .count();
+                let description_overlap = terms(&skill.metadata.description)
+                    .intersection(&input_terms)
+                    .count();
+                mentions_name(&lowered_input, &skill.metadata.name)
+                    || description_overlap >= 3
+                    || (name_overlap > 0 && description_overlap >= 2)
+                    || ((2..=3).contains(&input_terms.len())
+                        && description_overlap == input_terms.len())
+            })
+            .collect()
     }
     #[must_use]
     pub fn route<'a>(
@@ -787,7 +819,7 @@ fn terms(input: &str) -> HashSet<String> {
     const STOP: &[&str] = &[
         "a", "an", "and", "the", "to", "for", "of", "on", "in", "or", "with", "when", "use",
         "using", "this", "that", "from", "into", "can", "is", "are", "do", "does", "user", "users",
-        "skill",
+        "skill", "please", "could", "would", "you", "me", "my",
     ];
     input
         .to_lowercase()
@@ -801,4 +833,13 @@ fn terms(input: &str) -> HashSet<String> {
             (stem.chars().count() >= 2 && !STOP.contains(&stem)).then(|| stem.to_owned())
         })
         .collect()
+}
+
+fn mentions_name(input: &str, name: &str) -> bool {
+    input.match_indices(name).any(|(start, _)| {
+        let before = input[..start].chars().next_back();
+        let after = input[start + name.len()..].chars().next();
+        before.is_none_or(|ch| !ch.is_alphanumeric() && ch != '-')
+            && after.is_none_or(|ch| !ch.is_alphanumeric() && ch != '-')
+    })
 }

@@ -431,7 +431,7 @@ impl ReplState {
         let active = self.active_skills.clone();
         let catalog = self.skills()?;
         let mut content = format!(
-            "{SKILL_CATALOG_PREFIX}\nAvailable Agent Skills (metadata only). If a skill applies, read its listed instruction file with the filesystem tool before following it. Skill declarations never grant tool permission.\n"
+            "{SKILL_CATALOG_PREFIX}\nChoose a relevant skill by description; read its file with the filesystem tool. Tool permissions still apply.\n"
         );
         let mut included = false;
         for status in catalog.statuses(available_tools.iter().map(String::as_str)) {
@@ -445,7 +445,7 @@ impl ReplState {
                 continue;
             };
             let line = format!(
-                "- {}: {} (file: {})\n",
+                "{} | {} | {}\n",
                 status.metadata.name,
                 status.metadata.description,
                 instruction_path.display()
@@ -469,7 +469,7 @@ impl ReplState {
         let disabled_skills = self.disabled_skills()?;
         let candidates = self
             .skills()?
-            .route_candidates(prompt, available_tools.iter().map(String::as_str));
+            .auto_route_candidates(prompt, available_tools.iter().map(String::as_str));
         let mut messages = Vec::new();
         let mut remaining_tokens = token_budget;
         for matched in candidates {
@@ -506,9 +506,11 @@ impl ReplState {
 
     fn prepare_skill_context(&mut self, prompt: &str, token_budget: usize) -> Result<()> {
         let skill_messages = self.route_skills(prompt, token_budget)?;
-        let routed_tokens = runtime_core::estimate_tokens(&skill_messages);
-        let (catalog_context, _) =
-            self.skill_catalog_context(token_budget.saturating_sub(routed_tokens))?;
+        let catalog_context = if skill_messages.is_empty() {
+            self.skill_catalog_context(token_budget)?.0
+        } else {
+            None
+        };
         self.runtime
             .as_mut()
             .ok_or_else(|| anyhow!("agent runtime was not initialized"))?

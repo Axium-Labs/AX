@@ -56,11 +56,13 @@ same directory. Invalid packages and duplicates are reported individually in
 stderr and `/skills`; they do not suppress valid skills.
 
 Routing ranks candidates using the task text against the skill's name and
-description, including the use cases written in that description. AX also
-places a bounded metadata-only catalog in model context, so the agent can
-select a skill by meaning when term overlap misses it and read its instruction
-file through the ordinary permission-controlled filesystem tool. It does not
-use a private trigger list for new skills. An optional
+description, including the use cases written in that description. Only an
+explicit skill name or a strong description match triggers automatic body
+loading. Otherwise AX puts a compact, bounded metadata catalog in model
+context so the agent can choose by meaning and read the listed instruction
+file through the ordinary permission-controlled filesystem tool. The catalog
+is omitted when automatic routing has already selected a skill. Routing does
+not use a private trigger list for new skills. An optional
 `metadata.ax.required-tools` dependency is checked against registered tools,
 but permission is still decided for each actual call. Fast-ranked skills are
 loaded on activation and injected as tagged system context (up to three per

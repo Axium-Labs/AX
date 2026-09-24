@@ -99,6 +99,28 @@ fn description_routes_without_private_triggers() {
         "skill-installer"
     );
     assert!(catalog.route("What time is it?", []).is_none());
+    assert_eq!(
+        catalog.auto_route_candidates("Inspect modified code for regressions", [])[0].name,
+        "code-review"
+    );
+    assert_eq!(
+        catalog.auto_route_candidates("Import a skill directory", [])[0].name,
+        "skill-installer"
+    );
+    assert!(
+        catalog
+            .auto_route_candidates("Summarize this code", [])
+            .is_empty()
+    );
+    assert!(
+        catalog
+            .auto_route_candidates("encoding format", [])
+            .is_empty()
+    );
+    assert_eq!(
+        catalog.auto_route_candidates("Use code-review", [])[0].name,
+        "code-review"
+    );
 }
 
 #[test]
