@@ -31,6 +31,11 @@ cli ───────────────┬──> runtime-core ──>
 | `memory` | SQLite session/message repository, effective-context snapshots, scoped facts, JSONL event streams, resume and compaction state. |
 | `cli` | The only composition root: clap arguments, provider selection, lazy SQLite/Skill/MCP initialization, REPL, ratatui TUI, session commands, permission dialogs. |
 
+The explicit `ax --update` path belongs to the CLI and exits before normal
+runtime setup. It checks the latest GitHub Release, verifies its archive against
+`SHA256SUMS`, and replaces the current executable. On Windows replacement is
+deferred until the running process exits. It never touches user or project data.
+
 ### `model`
 
 Defines the provider-neutral `ModelProvider` trait, message types, tool calls

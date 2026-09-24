@@ -76,6 +76,16 @@ Both installers accept two environment variables:
 | `AX_VERSION` | Install a specific release tag instead of latest (e.g. `AX_VERSION=v0.1.0`) |
 | `AX_INSTALL_DIR` | Override the install directory |
 
+To update the executable you are currently running to the latest GitHub
+Release, run `ax --update`. AX checks the release version, verifies the
+download against `SHA256SUMS`, and replaces only that executable. On Windows,
+the verified update is scheduled for replacement after the command exits;
+restart AX before using the new version. The command does not change your
+`~/.ax` user data or
+any project's `.ax` directory. If you installed a separate copy using
+`AX_INSTALL_DIR`, run that copy's `ax --update` to update it. A push to `main`
+alone is not a release; the release workflow runs for `v*` tags.
+
 ```bash
 AX_VERSION=v0.1.0 curl -fsSL https://raw.githubusercontent.com/Axium-Labs/AX/main/scripts/install.sh | sh
 AX_INSTALL_DIR="$HOME/bin" curl -fsSL https://raw.githubusercontent.com/Axium-Labs/AX/main/scripts/install.sh | sh

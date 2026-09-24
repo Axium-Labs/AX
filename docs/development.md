@@ -124,3 +124,8 @@ The workflow:
 
 Installers (`scripts/install.sh`, `scripts/install.ps1`) fetch the latest
 release from GitHub and verify the archive against `SHA256SUMS`.
+The explicit `ax --update` command uses the same release and checksum. It
+updates the running executable's path; on Windows a detached helper waits for
+AX to exit before replacing the verified binary. Update code lives in
+`crates/cli/src/update.rs` and does no work on ordinary startup. User and
+project data directories are untouched.

@@ -29,6 +29,7 @@ mod providers;
 mod session_restore;
 mod skill_settings;
 mod tui;
+mod update;
 use model_selection::ModelResolution;
 use tui::run_tui;
 
@@ -42,6 +43,9 @@ const SKILL_CATALOG_PREFIX: &str = "[skill-catalog]";
     about = "A fast, lightweight AI agent for the terminal"
 )]
 struct Cli {
+    /// Update this AX executable from the latest GitHub Release.
+    #[arg(long)]
+    update: bool,
     /// Provider, when chosen explicitly. Otherwise AX resolves the selection
     /// from the persisted config, then local credential detection.
     #[arg(long, global = true)]
@@ -818,6 +822,12 @@ fn render_event(event: AgentEvent) {
 async fn main() -> Result<()> {
     let startup_timer = tool::telemetry::Timer::new("startup.resolve");
     let cli = Cli::parse();
+    if cli.update {
+        if cli.command.is_some() {
+            return Err(anyhow!("--update cannot be combined with a subcommand"));
+        }
+        return update::run().await;
+    }
     let cwd = std::env::current_dir()?;
     let (data_dir, skills_dir) =
         resolve_directories(&cwd, cli.data_dir.clone(), cli.skills_dir.clone());
