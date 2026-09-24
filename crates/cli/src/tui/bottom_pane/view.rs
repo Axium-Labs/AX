@@ -35,6 +35,14 @@ pub enum ModalAction {
     SessionOpen(String),
     SessionNew,
     SessionDelete(String),
+    SessionRenameStart {
+        id: String,
+        title: String,
+    },
+    SessionRenamed {
+        id: String,
+        title: String,
+    },
     /// Tool approval decision.
     Approval(bool),
     SurfaceSelected {
@@ -57,9 +65,10 @@ pub trait PaneView {
     /// Preferred height in rows for the given terminal width.
     fn preferred_height(&self, width: u16) -> u16;
 
-    /// Human readable title (used in tests and accessibility hints).
-    #[allow(dead_code)]
-    fn title(&self) -> &'static str;
+    /// Approval and other urgent views can opt out of the brief reveal.
+    fn animate_open(&self) -> bool {
+        true
+    }
 
     /// Refresh a manager snapshot in place, retaining its navigation state.
     fn refresh_surface(&mut self, _surface: &str, _items: &[super::surface::SurfaceItem]) {}

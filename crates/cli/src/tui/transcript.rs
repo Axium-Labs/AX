@@ -7,6 +7,9 @@ use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use ratatui::widgets::Wrap;
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::time::{Duration, Instant};
 
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
@@ -36,7 +39,9 @@ pub enum TranscriptEntry {
     Message(TranscriptKind, String),
     Tool {
         name: String,
+        detail: String,
         state: ToolState,
+        finished_at: Option<Instant>,
     },
 }
 
@@ -52,6 +57,20 @@ pub struct Transcript {
     history: Vec<Line<'static>>,
     /// Distance from the bottom in visual rows.
     pub scroll_from_bottom: usize,
+    pub streaming: bool,
+    /// Completed Markdown is parsed once per terminal width. Only the active
+    /// tail changes as content deltas arrive.
+    rendered: RefCell<HashMap<(usize, u16), Vec<Line<'static>>>>,
+    stream_prefix: RefCell<Option<StreamPrefix>>,
+}
+
+const TOOL_SETTLE: Duration = Duration::from_millis(150);
+
+struct StreamPrefix {
+    index: usize,
+    width: u16,
+    end: usize,
+    lines: Vec<Line<'static>>,
 }
 
 impl Default for Transcript {
@@ -66,12 +85,25 @@ impl Transcript {
             entries: Vec::new(),
             history: Vec::new(),
             scroll_from_bottom: 0,
+            streaming: false,
+            rendered: RefCell::new(HashMap::new()),
+            stream_prefix: RefCell::new(None),
         }
     }
 
     pub fn push(&mut self, kind: TranscriptKind, text: impl Into<String>) {
         self.entries
             .push(TranscriptEntry::Message(kind, text.into()));
+    }
+
+    pub fn mark_next_queued_running(&mut self) {
+        if let Some(TranscriptEntry::Message(TranscriptKind::Status, text)) = self
+            .entries
+            .iter_mut()
+            .find(|entry| matches!(entry, TranscriptEntry::Message(TranscriptKind::Status, text) if text.starts_with("Queued —")))
+        {
+            "Running queued task…".clone_into(text);
+        }
     }
 
     pub fn card(&mut self, info: StartupInfo) {
@@ -82,32 +114,40 @@ impl Transcript {
         self.entries.clear();
         self.history.clear();
         self.scroll_from_bottom = 0;
+        self.streaming = false;
+        self.rendered.borrow_mut().clear();
+        self.stream_prefix.borrow_mut().take();
     }
 
-    pub fn tool_started(&mut self, name: impl Into<String>) {
+    pub fn tool_started(&mut self, name: impl Into<String>, detail: impl Into<String>) {
         self.entries.push(TranscriptEntry::Tool {
             name: name.into(),
+            detail: detail.into(),
             state: ToolState::Running,
+            finished_at: None,
         });
     }
 
     pub fn tool_finished(&mut self, name: &str, success: bool) {
-        if let Some(TranscriptEntry::Tool { state, .. }) = self.entries.iter_mut().rev().find(
-            |entry| matches!(entry, TranscriptEntry::Tool { name: found, state: ToolState::Running } if found == name),
+        if let Some(TranscriptEntry::Tool { state, finished_at, .. }) = self.entries.iter_mut().rev().find(
+            |entry| matches!(entry, TranscriptEntry::Tool { name: found, state: ToolState::Running, .. } if found == name),
         ) {
             *state = if success {
                 ToolState::Succeeded
             } else {
                 ToolState::Failed
             };
+            *finished_at = Some(Instant::now());
         } else {
             self.entries.push(TranscriptEntry::Tool {
                 name: name.to_owned(),
+                detail: String::new(),
                 state: if success {
                     ToolState::Succeeded
                 } else {
                     ToolState::Failed
                 },
+                finished_at: Some(Instant::now()),
             });
         }
     }
@@ -115,6 +155,11 @@ impl Transcript {
     /// Append a streaming content delta to the current agent message, starting
     /// a new entry when needed.
     pub fn push_agent_delta(&mut self, delta: &str) {
+        self.streaming = true;
+        let last = self.entries.len().saturating_sub(1);
+        self.rendered
+            .borrow_mut()
+            .retain(|(index, _), _| *index != last);
         if let Some(TranscriptEntry::Message(TranscriptKind::Agent, text)) = self.entries.last_mut()
         {
             text.push_str(delta);
@@ -130,20 +175,32 @@ impl Transcript {
         match entry {
             TranscriptEntry::Card(info) => info.lines(width),
             TranscriptEntry::Rendered(lines) => lines.clone(),
-            TranscriptEntry::Tool { name, state } => {
-                let (marker, label, bg) = match state {
-                    ToolState::Running => ("•", "running", theme::TOOL_PENDING_BG),
-                    ToolState::Succeeded => ("✓", "completed", theme::TOOL_SUCCESS_BG),
-                    ToolState::Failed => ("×", "failed", theme::TOOL_ERROR_BG),
+            TranscriptEntry::Tool {
+                name,
+                detail,
+                state,
+                finished_at,
+            } => {
+                let (marker, label, bg, marker_color) = match state {
+                    ToolState::Running => ("•", "running", theme::TOOL_PENDING_BG, theme::ACCENT),
+                    ToolState::Succeeded => ("✓", "done", theme::TOOL_SUCCESS_BG, theme::SUCCESS),
+                    ToolState::Failed => ("×", "failed", theme::TOOL_ERROR_BG, theme::ERROR),
                 };
-                let inner = usize::from(width.saturating_sub(2));
-                let content = format!(" {marker} {name} · {label}");
-                let padding = inner.saturating_sub(content.chars().count());
-                let style = Style::default().bg(bg).fg(ratatui::style::Color::Reset);
-                vec![Line::from(Span::styled(
-                    format!("{content}{} ", " ".repeat(padding)),
-                    style,
-                ))]
+                let settling = finished_at.is_some_and(|at| at.elapsed() < TOOL_SETTLE);
+                let content = if *state == ToolState::Running || settling {
+                    detail.clone()
+                } else {
+                    format!("{name} · {label}")
+                };
+                let marker = format!(" {marker} ");
+                let used = marker.width() + content.width();
+                let padding = usize::from(width).saturating_sub(used);
+                let body = theme::body().bg(bg);
+                vec![Line::from(vec![
+                    Span::styled(marker, Style::default().fg(marker_color).bg(bg)),
+                    Span::styled(content, body),
+                    Span::styled(" ".repeat(padding), body),
+                ])]
             }
             TranscriptEntry::Message(TranscriptKind::User, text) => {
                 let style = theme::body().bg(theme::USER_MESSAGE_BG);
@@ -218,17 +275,81 @@ impl Transcript {
         }
     }
 
-    fn entry_height(entry: &TranscriptEntry, width: u16) -> usize {
-        Paragraph::new(Self::entry_lines(entry, width))
+    fn lines_for(&self, index: usize, width: u16) -> Vec<Line<'static>> {
+        let entry = &self.entries[index];
+        if let TranscriptEntry::Message(TranscriptKind::Agent, text) = entry
+            && self.streaming
+            && index + 1 == self.entries.len()
+        {
+            // A later reference definition can restyle an earlier link, so
+            // keep the full CommonMark parser context for those messages.
+            if text.contains("][") || text.contains("]:") {
+                self.stream_prefix.borrow_mut().take();
+                return Self::entry_lines(entry, width);
+            }
+            let previous_end = self
+                .stream_prefix
+                .borrow()
+                .as_ref()
+                .filter(|cached| cached.index == index && cached.end <= text.len())
+                .map_or(0, |cached| cached.end);
+            let end = previous_end + markdown::stable_prefix_end(&text[previous_end..]);
+            if end == 0 {
+                return Self::entry_lines(entry, width);
+            }
+            let cached = self.stream_prefix.borrow().as_ref().and_then(|cached| {
+                ((cached.index, cached.width, cached.end) == (index, width, end))
+                    .then(|| cached.lines.clone())
+            });
+            let prefix = if let Some(lines) = cached {
+                lines
+            } else {
+                let lines = markdown::agent_lines(&text[..end], width);
+                *self.stream_prefix.borrow_mut() = Some(StreamPrefix {
+                    index,
+                    width,
+                    end,
+                    lines: lines.clone(),
+                });
+                lines
+            };
+            let mut lines = prefix;
+            lines.extend(markdown::agent_lines(&text[end..], width));
+            return lines;
+        }
+        if !matches!(entry, TranscriptEntry::Message(TranscriptKind::Agent, _)) {
+            return Self::entry_lines(entry, width);
+        }
+        if let Some(lines) = self.rendered.borrow().get(&(index, width)) {
+            return lines.clone();
+        }
+        let lines = Self::entry_lines(entry, width);
+        self.rendered
+            .borrow_mut()
+            .insert((index, width), lines.clone());
+        lines
+    }
+
+    fn entry_height(&self, index: usize, width: u16) -> usize {
+        Paragraph::new(self.lines_for(index, width))
             .wrap(Wrap { trim: false })
             .line_count(width.max(1))
     }
 
     pub fn height(&self, width: u16) -> usize {
-        self.entries
-            .iter()
-            .map(|entry| Self::entry_height(entry, width))
-            .sum()
+        let rows: usize = (0..self.entries.len())
+            .map(|index| self.entry_height(index, width))
+            .sum();
+        let cursor_row = self.streaming
+            && matches!(
+                self.entries.last(),
+                Some(TranscriptEntry::Message(TranscriptKind::Agent, _))
+            )
+            && self
+                .lines_for(self.entries.len() - 1, width)
+                .last()
+                .is_some_and(|line| line.width() >= usize::from(width));
+        rows + usize::from(cursor_row)
     }
 
     pub fn full_height(&self, width: u16) -> usize {
@@ -240,6 +361,25 @@ impl Transcript {
                     .wrap(Wrap { trim: false })
                     .line_count(width.max(1))
             }
+    }
+
+    pub fn is_animating(&self) -> bool {
+        self.entries.iter().any(|entry| {
+            matches!(entry, TranscriptEntry::Tool { finished_at: Some(at), .. } if at.elapsed() < TOOL_SETTLE)
+        })
+    }
+
+    pub fn settle_transitions(&mut self) -> bool {
+        let mut changed = false;
+        for entry in &mut self.entries {
+            if let TranscriptEntry::Tool { finished_at, .. } = entry
+                && finished_at.is_some_and(|at| at.elapsed() >= TOOL_SETTLE)
+            {
+                *finished_at = None;
+                changed = true;
+            }
+        }
+        changed
     }
 
     pub fn scroll_up(&mut self, rows: usize, width: u16, visible_rows: u16) {
@@ -266,10 +406,18 @@ impl Transcript {
         let mut total = self.height(width);
         let mut committed = Vec::new();
         while total > limit && !self.entries.is_empty() {
+            if matches!(self.entries.first(), Some(TranscriptEntry::Tool { finished_at: Some(at), .. }) if at.elapsed() < TOOL_SETTLE)
+            {
+                break;
+            }
+            if matches!(self.entries.first(), Some(TranscriptEntry::Message(TranscriptKind::Status, text)) if text.starts_with("Queued —"))
+            {
+                break;
+            }
             if !allow_last && self.entries.len() == 1 {
                 break;
             }
-            let lines = Self::entry_lines(&self.entries[0], width);
+            let lines = self.lines_for(0, width);
             let mut split = 0;
             for line in &lines {
                 let rows = Paragraph::new(line.clone())
@@ -287,6 +435,8 @@ impl Transcript {
                 break;
             }
             self.entries.remove(0);
+            self.rendered.borrow_mut().clear();
+            self.stream_prefix.borrow_mut().take();
             committed.extend(lines[..split].iter().cloned());
             if split < lines.len() {
                 self.entries
@@ -305,8 +455,21 @@ impl Transcript {
         } else {
             Vec::new()
         };
-        for entry in &self.entries {
-            lines.extend(Self::entry_lines(entry, width));
+        for index in 0..self.entries.len() {
+            lines.extend(self.lines_for(index, width));
+        }
+        if self.streaming
+            && matches!(
+                self.entries.last(),
+                Some(TranscriptEntry::Message(TranscriptKind::Agent, _))
+            )
+            && let Some(line) = lines.last_mut()
+        {
+            if line.width() < usize::from(width) {
+                line.spans.push(Span::styled("▍", theme::accent()));
+            } else {
+                lines.push(Line::from(Span::styled("▍", theme::accent())));
+            }
         }
         let visible = area.height as usize;
         let rendered_rows = Paragraph::new(lines.clone())
@@ -328,6 +491,105 @@ mod tests {
     use ratatui::{Terminal, backend::TestBackend};
 
     #[test]
+    fn tool_detail_collapses_after_completion() {
+        let mut transcript = Transcript::new();
+        transcript.tool_started("search", "searching 'secret' in src");
+        let running = Transcript::entry_lines(&transcript.entries[0], 80);
+        assert!(running[0].spans[1].content.contains("searching 'secret'"));
+        assert_eq!(running[0].spans[0].style.fg, Some(theme::ACCENT));
+        transcript.tool_finished("search", true);
+        let settling = Transcript::entry_lines(&transcript.entries[0], 80);
+        assert!(settling[0].spans[1].content.contains("searching 'secret'"));
+        assert!(transcript.is_animating());
+        if let TranscriptEntry::Tool { finished_at, .. } = &mut transcript.entries[0] {
+            *finished_at = Instant::now().checked_sub(TOOL_SETTLE);
+        }
+        let finished = Transcript::entry_lines(&transcript.entries[0], 80);
+        assert!(finished[0].spans[1].content.contains("search · done"));
+        assert!(!finished[0].spans[1].content.contains("secret"));
+        assert_eq!(finished[0].spans[0].style.fg, Some(theme::SUCCESS));
+    }
+
+    #[test]
+    fn queued_notice_updates_before_it_enters_terminal_scrollback() {
+        let mut transcript = Transcript::new();
+        transcript.push(
+            TranscriptKind::Status,
+            "Queued — will run after the current task finishes",
+        );
+        transcript.push(TranscriptKind::Agent, "many rows\n\n".repeat(20));
+        assert!(transcript.drain_overflow(40, 6, false).is_empty());
+        transcript.mark_next_queued_running();
+        assert!(matches!(
+            transcript.entries.first(),
+            Some(TranscriptEntry::Message(TranscriptKind::Status, text)) if text == "Running queued task…"
+        ));
+        assert!(!transcript.drain_overflow(40, 6, true).is_empty());
+    }
+
+    #[test]
+    fn streaming_cursor_disappears_when_the_turn_finishes() {
+        let backend = TestBackend::new(40, 6);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut transcript = Transcript::new();
+        transcript.push_agent_delta("Hello");
+        terminal
+            .draw(|frame| transcript.render(frame, frame.area()))
+            .unwrap();
+        assert!(
+            terminal
+                .backend()
+                .buffer()
+                .content
+                .iter()
+                .any(|cell| cell.symbol() == "▍")
+        );
+        transcript.streaming = false;
+        terminal
+            .draw(|frame| transcript.render(frame, frame.area()))
+            .unwrap();
+        assert!(
+            !terminal
+                .backend()
+                .buffer()
+                .content
+                .iter()
+                .any(|cell| cell.symbol() == "▍")
+        );
+    }
+
+    #[test]
+    fn streaming_blocks_match_the_complete_markdown_render() {
+        for text in [
+            "First paragraph.\n\nSecond paragraph",
+            "- first\n- second\n\nAfter list",
+            "```rust\nlet x = 1;\n```\n\nAfter code",
+            "[link][id]\n\n[id]: https://example.com\n\nAfter link",
+            "# Heading\n\n> quoted\n> again\n\nNormal text",
+            "| A | B |\n|---|---|\n| 1 | 2 |\n\nAfter table",
+            "- [x] first\n- [ ] second\n\nAfter tasks",
+        ] {
+            let mut transcript = Transcript::new();
+            let mut so_far = String::new();
+            for part in text.split_inclusive('\n') {
+                so_far.push_str(part);
+                transcript.push_agent_delta(part);
+                let streamed = transcript.lines_for(0, 80);
+                let whole = markdown::agent_lines(&so_far, 80);
+                assert_eq!(streamed, whole, "render changed for {so_far}");
+            }
+        }
+        let mut transcript = Transcript::new();
+        transcript.push_agent_delta("First paragraph.\n\nSecond");
+        let _ = transcript.lines_for(0, 80);
+        transcript.push_agent_delta(" paragraph.\n\nThird");
+        assert_eq!(
+            transcript.lines_for(0, 80),
+            markdown::agent_lines("First paragraph.\n\nSecond paragraph.\n\nThird", 80)
+        );
+    }
+
+    #[test]
     fn drains_completed_overflow_for_terminal_scrollback() {
         let mut transcript = Transcript::new();
         for index in 0..12 {
@@ -336,11 +598,7 @@ mod tests {
         let committed = transcript.drain_overflow(40, 8, true);
         assert!(!committed.is_empty());
         assert!(transcript.entries.len() < 12);
-        let remaining_height = transcript
-            .entries
-            .iter()
-            .map(|entry| Transcript::entry_height(entry, 40))
-            .sum::<usize>();
+        let remaining_height = transcript.height(40);
         assert!(remaining_height <= 8);
     }
 

@@ -88,7 +88,11 @@ effective context:
 
 ## Sessions & resume
 
-- **`/resume`** — opens a previous session (up to 50 listed). Selecting one
+- **`/resume`** — searches recent sessions across projects registered in
+  `~/.ax/session-projects.json` (up to 100 listed). Ctrl+P filters by project;
+  Ctrl+R renames, Ctrl+D deletes, and Ctrl+N starts a new session. Projects
+  are registered when a session is created or `/resume` is opened. Selecting one
+  switches the working directory and project-local storage to that project,
   restores the saved effective context when available, then adds messages
   after its compression watermark. Older database versions fall back to the
   session summary plus uncompacted messages. `select_context` bounds the
@@ -96,11 +100,21 @@ effective context:
   UI separately restores the complete stored history. The selected session
   becomes current, the runtime is rebuilt on demand, and session-scoped
   permission decisions reset.
+  The TUI shows a loading state during the restore operation.
 - **`/new`** — starts a fresh session. The active session reference, loaded
   messages, active skills and runtime are cleared and session permissions are
   reset. The SQLite session row is created lazily on the next prompt, using
-  that prompt for its title. The previous session stays stored and can be
+  a short first-clause title from that prompt. The previous session stays stored and can be
   reopened with `/resume`.
+
+Typing `@` in the composer searches project file names on demand. A selected
+reference is resolved inside the project root and its UTF-8 text is included
+in the same context reserve as skills. Oversized, non-text, and out-of-project
+files are skipped. Referenced content is saved as session agent state so it
+survives resume; raw user messages still keep the `@` token.
+
+The TUI keeps the reader's position when new streamed output arrives above the
+composer. A footer hint marks unseen output; End returns to the latest text.
 
 Interrupted tool calls saved just before a crash are restored with an explicit
 marker and are never replayed automatically — see [memory.md](memory.md).

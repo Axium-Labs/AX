@@ -156,7 +156,7 @@ impl PaneView for ModelPicker {
             )),
             Line::from(vec![
                 Span::styled("Type to search: ", theme::dim()),
-                Span::raw(&self.filter),
+                Span::styled(&self.filter, theme::body()),
             ]),
         ];
         let visible = self.visible();
@@ -219,7 +219,7 @@ impl PaneView for ModelPicker {
         }
         lines.push(Line::from(vec![
             Span::styled("Current  ", theme::dim()),
-            Span::raw(&self.current_model),
+            Span::styled(&self.current_model, theme::body()),
         ]));
         lines.push(Line::from(Span::styled(
             "↑↓ navigate · Enter select · Esc back",
@@ -234,10 +234,6 @@ impl PaneView for ModelPicker {
         u16::try_from(self.visible().len().min(MAX_VISIBLE).saturating_add(7))
             .unwrap_or(12)
             .min(24)
-    }
-
-    fn title(&self) -> &'static str {
-        "Select model"
     }
 
     fn take_action(&mut self) -> Option<ModalAction> {
@@ -314,9 +310,6 @@ impl PaneView for ReasoningPicker {
         u16::try_from(self.model.reasoning_efforts.len())
             .unwrap_or(u16::MAX)
             .saturating_add(3)
-    }
-    fn title(&self) -> &'static str {
-        "Reasoning effort"
     }
     fn take_action(&mut self) -> Option<ModalAction> {
         self.action.take()

@@ -22,6 +22,7 @@ pub struct PickerItem {
     pub label: String,
     /// Secondary dim description.
     pub detail: String,
+    pub project: String,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -35,7 +36,8 @@ pub struct Picker {
     items: Vec<PickerItem>,
     filter: String,
     selected: usize,
-    /// Accelerator keys available on the session picker (n = new, d = delete).
+    project_filter: Option<String>,
+    /// Session actions use Ctrl shortcuts so every character remains searchable.
     extra_hint: bool,
     outcome: ViewOutcome,
     action: Option<ModalAction>,
@@ -49,6 +51,7 @@ impl Picker {
             items,
             filter: String::new(),
             selected: 0,
+            project_filter: None,
             extra_hint: true,
             outcome: ViewOutcome::Continue,
             action: None,
@@ -56,16 +59,16 @@ impl Picker {
     }
 
     fn filtered(&self) -> Vec<&PickerItem> {
-        if self.filter.is_empty() {
-            return self.items.iter().collect();
-        }
         let needle = self.filter.to_ascii_lowercase();
         self.items
             .iter()
             .filter(|item| {
-                item.label.to_ascii_lowercase().contains(&needle)
-                    || item.id.to_ascii_lowercase().contains(&needle)
-                    || item.detail.to_ascii_lowercase().contains(&needle)
+                self.project_filter
+                    .as_ref()
+                    .is_none_or(|project| project == &item.project)
+                    && (item.label.to_ascii_lowercase().contains(&needle)
+                        || item.id.to_ascii_lowercase().contains(&needle)
+                        || item.detail.to_ascii_lowercase().contains(&needle))
             })
             .collect()
     }
@@ -92,10 +95,17 @@ impl Picker {
     fn render_rows(&self, area: Rect, buf: &mut Buffer) {
         let mut lines = Vec::new();
         lines.push(Line::from(Span::styled(self.title, theme::title())));
+        lines.push(Line::from(Span::styled(
+            format!(
+                "Project: {}",
+                self.project_filter.as_deref().unwrap_or("all")
+            ),
+            theme::dim(),
+        )));
         if !self.filter.is_empty() {
             lines.push(Line::from(vec![
                 Span::styled("› ", theme::accent()),
-                Span::raw(self.filter.clone()),
+                Span::styled(self.filter.clone(), theme::body()),
             ]));
         }
         let items = self.filtered();
@@ -137,7 +147,7 @@ impl Picker {
             ]));
         }
         let hint = if self.extra_hint {
-            "↑↓ move · enter open · n new · d delete · esc back"
+            "↑↓ move · enter open · Ctrl+P project · Ctrl+R rename · Ctrl+D delete · Ctrl+N new"
         } else {
             "↑↓ move · enter select · esc back"
         };
@@ -154,9 +164,50 @@ impl PaneView for Picker {
         if key.kind != KeyEventKind::Press {
             return ViewOutcome::Continue;
         }
-        if key.modifiers.contains(KeyModifiers::CONTROL)
-            || key.modifiers.contains(KeyModifiers::ALT)
-        {
+        if key.modifiers.contains(KeyModifiers::CONTROL) {
+            match key.code {
+                KeyCode::Char('p') => {
+                    let mut projects = self
+                        .items
+                        .iter()
+                        .map(|item| item.project.clone())
+                        .collect::<Vec<_>>();
+                    projects.sort();
+                    projects.dedup();
+                    self.project_filter = match &self.project_filter {
+                        None => projects.first().cloned(),
+                        Some(current) => projects
+                            .iter()
+                            .position(|name| name == current)
+                            .and_then(|index| projects.get(index + 1))
+                            .cloned(),
+                    };
+                    self.selected = 0;
+                }
+                KeyCode::Char('r') => {
+                    if let Some(item) = self.filtered().get(self.selected).copied() {
+                        self.action = Some(ModalAction::SessionRenameStart {
+                            id: item.id.clone(),
+                            title: item.label.clone(),
+                        });
+                        self.outcome = ViewOutcome::Accepted;
+                    }
+                }
+                KeyCode::Char('n') => {
+                    self.action = Some(ModalAction::SessionNew);
+                    self.outcome = ViewOutcome::Accepted;
+                }
+                KeyCode::Char('d') => {
+                    if let Some(item) = self.filtered().get(self.selected).copied() {
+                        self.action = Some(ModalAction::SessionDelete(item.id.clone()));
+                        self.outcome = ViewOutcome::Accepted;
+                    }
+                }
+                _ => {}
+            }
+            return self.outcome;
+        }
+        if key.modifiers.contains(KeyModifiers::ALT) {
             return ViewOutcome::Continue;
         }
         match key.code {
@@ -184,16 +235,6 @@ impl PaneView for Picker {
                 self.filter.pop();
                 self.clamp_selection();
             }
-            KeyCode::Char('n') if self.extra_hint && self.filter.is_empty() => {
-                self.action = Some(ModalAction::SessionNew);
-                self.outcome = ViewOutcome::Accepted;
-            }
-            KeyCode::Char('d') if self.extra_hint && self.filter.is_empty() => {
-                if let Some(item) = self.filtered().get(self.selected).copied() {
-                    self.action = Some(ModalAction::SessionDelete(item.id.clone()));
-                    self.outcome = ViewOutcome::Accepted;
-                }
-            }
             KeyCode::Char(c) => {
                 self.filter.push(c);
                 self.clamp_selection();
@@ -210,15 +251,52 @@ impl PaneView for Picker {
     fn preferred_height(&self, _width: u16) -> u16 {
         let rows = self.filtered().len().min(MAX_VISIBLE_ROWS);
         let filter_row = u16::from(!self.filter.is_empty());
-        // title + optional filter + rows + hint
-        2 + filter_row + u16::try_from(rows).unwrap_or(u16::MAX) + 1
-    }
-
-    fn title(&self) -> &'static str {
-        self.title
+        // title + project filter + optional query + rows + hint
+        3 + filter_row + u16::try_from(rows).unwrap_or(u16::MAX)
     }
 
     fn take_action(&mut self) -> Option<ModalAction> {
         self.action.take()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn session_search_and_project_filter_keep_actions_on_visible_item() {
+        let mut picker = Picker::for_sessions(vec![
+            PickerItem {
+                id: "a|1".into(),
+                label: "Deploy".into(),
+                detail: "alpha".into(),
+                project: "alpha".into(),
+            },
+            PickerItem {
+                id: "b|2".into(),
+                label: "Debug".into(),
+                detail: "beta".into(),
+                project: "beta".into(),
+            },
+        ]);
+        let key = |code, modifiers| KeyEvent::new(code, modifiers);
+        picker.handle_key(key(KeyCode::Char('d'), KeyModifiers::NONE));
+        assert_eq!(picker.filtered().len(), 2);
+        picker.handle_key(key(KeyCode::Char('e'), KeyModifiers::NONE));
+        assert_eq!(picker.filtered().len(), 2);
+        picker.handle_key(key(KeyCode::Char('b'), KeyModifiers::NONE));
+        assert_eq!(picker.filtered()[0].id, "b|2");
+        picker.handle_key(key(KeyCode::Char('p'), KeyModifiers::CONTROL));
+        assert!(picker.filtered().is_empty());
+        picker.handle_key(key(KeyCode::Char('p'), KeyModifiers::CONTROL));
+        assert_eq!(picker.filtered()[0].id, "b|2");
+        assert_eq!(
+            picker.handle_key(key(KeyCode::Char('r'), KeyModifiers::CONTROL)),
+            ViewOutcome::Accepted
+        );
+        assert!(
+            matches!(picker.take_action(), Some(ModalAction::SessionRenameStart { id, .. }) if id == "b|2")
+        );
     }
 }

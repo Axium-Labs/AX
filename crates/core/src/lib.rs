@@ -30,6 +30,7 @@ pub enum AgentEvent {
     },
     ToolStarted {
         name: String,
+        detail: String,
     },
     ToolFinished {
         name: String,
@@ -656,7 +657,6 @@ impl AgentKernel {
             calls_used = calls_used.saturating_add(tool_calls.len());
             for call in tool_calls {
                 let name = call.function.name;
-                (emit.lock().unwrap())(AgentEvent::ToolStarted { name: name.clone() });
                 let input: Value =
                     serde_json::from_str(&call.function.arguments).map_err(|source| {
                         AgentError::InvalidToolArguments {
@@ -664,6 +664,10 @@ impl AgentKernel {
                             source,
                         }
                     })?;
+                (emit.lock().unwrap())(AgentEvent::ToolStarted {
+                    name: name.clone(),
+                    detail: tool_activity(&name, &input),
+                });
                 let tool = self
                     .tools
                     .get(&name)
@@ -712,6 +716,56 @@ impl AgentKernel {
                 checkpoint(&self.raw_turn_messages)?;
             }
         }
+    }
+}
+
+fn tool_activity(name: &str, input: &Value) -> String {
+    let field = |key: &str| input.get(key).and_then(Value::as_str).unwrap_or("");
+    let detail = match name {
+        "search" => format!("searching '{}' in {}", field("query"), field("path")),
+        "filesystem" => format!("{} {}", field("operation"), field("path")),
+        "patch" => format!("editing {}", field("path")),
+        "shell" => format!("running {}", field("command").lines().next().unwrap_or("")),
+        "web" => format!(
+            "{} {}",
+            field("operation"),
+            if field("url").is_empty() {
+                field("query")
+            } else {
+                field("url")
+            }
+        ),
+        "mcp" => format!("{} {} {}", field("action"), field("server"), field("tool")),
+        _ if name.starts_with("mcp__") => format!("calling {name}"),
+        _ => format!("calling {name}"),
+    };
+    detail.chars().take(120).collect()
+}
+
+#[cfg(test)]
+mod tool_activity_tests {
+    use super::tool_activity;
+    use serde_json::json;
+
+    #[test]
+    fn describes_read_search_edit_and_command() {
+        assert!(
+            tool_activity("search", &json!({"query":"needle","path":"src"})).contains("needle")
+        );
+        assert!(
+            tool_activity(
+                "filesystem",
+                &json!({"operation":"read","path":"README.md"})
+            )
+            .contains("read README.md")
+        );
+        assert!(
+            tool_activity("patch", &json!({"path":"src/main.rs"})).contains("editing src/main.rs")
+        );
+        assert!(
+            tool_activity("shell", &json!({"command":"cargo test\nother"}))
+                .contains("running cargo test")
+        );
     }
 }
 

@@ -67,7 +67,7 @@ impl PaneView for SecretInput {
             Line::default(),
             Line::from(vec![
                 Span::styled("› ", theme::accent()),
-                Span::raw("•".repeat(self.value.chars().count())),
+                Span::styled("•".repeat(self.value.chars().count()), theme::body()),
             ]),
             Line::default(),
             Line::from(Span::styled("Enter save · Esc cancel", theme::dim())),
@@ -79,9 +79,6 @@ impl PaneView for SecretInput {
 
     fn preferred_height(&self, _width: u16) -> u16 {
         6
-    }
-    fn title(&self) -> &'static str {
-        "Configure API key"
     }
     fn take_action(&mut self) -> Option<ModalAction> {
         self.action.take()

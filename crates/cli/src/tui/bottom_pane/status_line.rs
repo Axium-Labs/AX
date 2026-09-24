@@ -11,6 +11,7 @@ use ratatui::{
     text::{Line, Span},
     widgets::Widget,
 };
+use std::time::Instant;
 
 use super::super::theme;
 
@@ -20,6 +21,9 @@ pub struct StatusLine {
     pub session: String,
     pub directory: String,
     pub working: bool,
+    pub streaming: bool,
+    pub unseen_output: bool,
+    pub loading_session: Option<Instant>,
     pub context_percent: usize,
     pub context_window: usize,
     pub context_tokens: usize,
@@ -35,6 +39,9 @@ impl StatusLine {
             session: String::new(),
             directory: String::new(),
             working: false,
+            streaming: false,
+            unseen_output: false,
+            loading_session: None,
             context_percent: 0,
             context_window: 0,
             context_tokens: 0,
@@ -58,7 +65,19 @@ impl StatusLine {
         } else {
             format!("{pwd} • {}", self.session)
         };
-        Line::from(Span::styled(truncate(pwd_line, width), theme::dim())).render(top, buf);
+        let top_line = if self.loading_session.is_some() {
+            "Loading session…".to_owned()
+        } else if self.unseen_output {
+            "↓ New output · End to follow".to_owned()
+        } else {
+            pwd_line
+        };
+        let top_style = if self.loading_session.is_some() || self.unseen_output {
+            theme::accent()
+        } else {
+            theme::dim()
+        };
+        Line::from(Span::styled(truncate(top_line, width), top_style)).render(top, buf);
 
         // Line 2: context usage (left) and model name (right-aligned).
         let tokens = format_tokens(self.context_tokens);
@@ -70,7 +89,9 @@ impl StatusLine {
         } else {
             theme::dim()
         };
-        let working_marker = if self.working {
+        let working_marker = if self.streaming {
+            "▍ ".to_owned()
+        } else if self.working {
             const SPINNER: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
             format!("{} ", SPINNER[self.spin % SPINNER.len()])
         } else {

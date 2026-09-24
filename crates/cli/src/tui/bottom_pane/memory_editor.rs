@@ -76,9 +76,6 @@ impl PaneView for MemoryEditor {
     fn preferred_height(&self, _: u16) -> u16 {
         12
     }
-    fn title(&self) -> &'static str {
-        "Edit memory"
-    }
     fn take_action(&mut self) -> Option<ModalAction> {
         self.action.take()
     }

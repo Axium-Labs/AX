@@ -122,7 +122,7 @@ impl PaneView for ApprovalDialog {
         ]));
         lines.push(Line::from(vec![
             Span::styled("safety   ", theme::muted()),
-            Span::raw(format!("{:?}", self.safety)),
+            Span::styled(format!("{:?}", self.safety), theme::body()),
         ]));
         lines.push(Line::from(Span::styled("input", theme::muted())));
         let input_rows = self.wrapped_input(area.width);
@@ -172,8 +172,8 @@ impl PaneView for ApprovalDialog {
         u16::try_from(10 + input).unwrap_or(u16::MAX)
     }
 
-    fn title(&self) -> &'static str {
-        "approval"
+    fn animate_open(&self) -> bool {
+        false
     }
 
     fn take_action(&mut self) -> Option<ModalAction> {

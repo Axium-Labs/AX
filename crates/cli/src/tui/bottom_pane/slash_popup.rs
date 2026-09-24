@@ -10,11 +10,13 @@ use ratatui::layout::Rect;
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Widget;
+use std::time::{Duration, Instant};
 
 use super::super::commands::{SlashCommandDef, filter_commands};
 use super::super::theme;
 
 pub const MAX_POPUP_ROWS: usize = 12;
+const SELECTION_FEEDBACK: Duration = Duration::from_millis(150);
 
 /// Outcome of routing a key to the open popup.
 #[derive(Clone, Debug)]
@@ -30,6 +32,7 @@ pub struct SlashPopup {
     suppressed: bool,
     filter: String,
     selected: usize,
+    selected_at: Instant,
 }
 
 impl Default for SlashPopup {
@@ -45,11 +48,14 @@ impl SlashPopup {
             suppressed: false,
             filter: String::new(),
             selected: 0,
+            selected_at: Instant::now(),
         }
     }
 
     /// Recompute popup state from the current composer text.
     pub fn sync(&mut self, text: &str) {
+        let was_open = self.open;
+        let previous_filter = self.filter.clone();
         if self.suppressed {
             self.open = false;
             return;
@@ -68,6 +74,9 @@ impl SlashPopup {
             self.selected = 0;
         } else {
             self.selected = self.selected.min(count - 1);
+        }
+        if self.open && (!was_open || self.filter != previous_filter) {
+            self.selected_at = Instant::now();
         }
     }
 
@@ -98,6 +107,7 @@ impl SlashPopup {
             } else {
                 self.selected - 1
             };
+            self.selected_at = Instant::now();
         }
     }
 
@@ -105,7 +115,17 @@ impl SlashPopup {
         let count = self.items().len();
         if count > 0 {
             self.selected = (self.selected + 1) % count;
+            self.selected_at = Instant::now();
         }
+    }
+
+    pub fn is_animating(&self) -> bool {
+        self.is_open()
+            && self.selected_at.elapsed() < SELECTION_FEEDBACK + Duration::from_millis(80)
+    }
+
+    fn selection_active(&self) -> bool {
+        self.selected_at.elapsed() < SELECTION_FEEDBACK
     }
 
     pub fn selected(&self) -> Option<&'static SlashCommandDef> {
@@ -149,13 +169,20 @@ impl SlashPopup {
             return;
         }
         let items = self.items();
+        let start = self
+            .selected
+            .saturating_sub(MAX_POPUP_ROWS.saturating_sub(1));
         let rows = items
             .into_iter()
             .enumerate()
+            .skip(start)
+            .take(MAX_POPUP_ROWS)
             .map(|(index, command)| {
                 let selected = index == self.selected;
                 let marker = if selected { "› " } else { "  " };
-                let name_style = if selected {
+                let name_style = if selected && self.selection_active() {
+                    theme::selected_row_active()
+                } else if selected {
                     theme::selected_row()
                 } else {
                     theme::accent()
@@ -163,7 +190,7 @@ impl SlashPopup {
                 let desc_style = if selected {
                     theme::selected_row()
                 } else {
-                    theme::dim()
+                    theme::muted()
                 };
                 let marker_style = if selected {
                     theme::selected_row()
@@ -173,7 +200,7 @@ impl SlashPopup {
                 let hint_style = if selected {
                     theme::selected_row()
                 } else {
-                    theme::dim()
+                    theme::muted()
                 };
                 let mut spans = vec![
                     Span::styled(marker, marker_style),
@@ -188,21 +215,13 @@ impl SlashPopup {
             .collect::<Vec<_>>();
         let mut lines = rows;
         // Dim separator directly above the popup list.
-        lines.insert(0, Line::from(Span::styled(" commands", theme::dim())));
+        lines.insert(0, Line::from(Span::styled(" commands", theme::muted())));
         lines.push(Line::from(Span::styled(
             " ↑↓ navigate   Enter select   Esc close",
-            theme::dim(),
+            theme::muted(),
         )));
-        let paragraph = ratatui::widgets::Paragraph::new(lines)
-            .style(Style::default().bg(theme::CANVAS_BG))
-            .scroll((
-                u16::try_from(
-                    self.selected
-                        .saturating_sub(MAX_POPUP_ROWS.saturating_sub(1)),
-                )
-                .unwrap_or(u16::MAX),
-                0,
-            ));
+        let paragraph =
+            ratatui::widgets::Paragraph::new(lines).style(Style::default().bg(theme::CANVAS_BG));
         paragraph.render(area, buf);
     }
 }
@@ -234,6 +253,32 @@ mod tests {
         popup.unsuppress();
         popup.sync("/mo");
         assert!(popup.is_open());
+    }
+
+    #[test]
+    fn hints_and_descriptions_use_readable_explicit_colors() {
+        let mut popup = SlashPopup::new();
+        popup.sync("/mo");
+        let area = Rect::new(0, 0, 100, 6);
+        let mut buffer = Buffer::empty(area);
+        popup.render(area, &mut buffer);
+        assert_eq!(buffer[(2, 1)].fg, theme::ACTIVE_FG);
+        assert_eq!(buffer[(16, 1)].fg, theme::SELECTED_FG);
+        assert_eq!(buffer[(16, 2)].fg, theme::MUTED);
+    }
+
+    #[test]
+    fn navigation_hint_stays_visible_when_scrolling_commands() {
+        let mut popup = SlashPopup::new();
+        popup.sync("/");
+        popup.selected = popup.items().len() - 1;
+        let area = Rect::new(0, 0, 100, u16::try_from(popup.height() + 2).unwrap());
+        let mut buffer = Buffer::empty(area);
+        popup.render(area, &mut buffer);
+        let last = (0..area.width)
+            .map(|x| buffer[(x, area.height - 1)].symbol())
+            .collect::<String>();
+        assert!(last.contains("Esc close"));
     }
 
     #[test]

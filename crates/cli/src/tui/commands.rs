@@ -28,6 +28,7 @@ use super::bottom_pane::{
     model_picker::{ModelPicker, ReasoningPicker},
     secret_input::SecretInput,
     session_picker::SessionPicker,
+    session_rename::SessionRename,
     surface::{SurfaceItem, SurfaceView},
 };
 use super::catalog_refresh;
@@ -605,7 +606,8 @@ pub(super) fn open_session_picker(
     app: &mut App,
     pane: &mut BottomPane,
 ) -> Result<()> {
-    let sessions = state.store()?.list_sessions(50, 0)?;
+    state.register_project()?;
+    let sessions = sessions_across_projects(state, crate::session_projects::list()?)?;
     if sessions.is_empty() {
         app.push(TranscriptKind::Info, "No previous sessions");
     } else {
@@ -614,12 +616,45 @@ pub(super) fn open_session_picker(
     Ok(())
 }
 
+fn sessions_across_projects(
+    state: &mut ReplState,
+    projects: Vec<crate::session_projects::ProjectLocation>,
+) -> Result<Vec<(memory::Session, crate::session_projects::ProjectLocation)>> {
+    let mut sessions = Vec::new();
+    for project in projects {
+        let database = crate::database_path(&project.data_dir);
+        if !database.is_file() {
+            continue;
+        }
+        let listed = if project.id == state.project_id {
+            state.store()?.list_sessions(50, 0)?
+        } else {
+            memory::MemoryStore::open(&database)?.list_sessions(50, 0)?
+        };
+        sessions.extend(listed.into_iter().map(|session| (session, project.clone())));
+    }
+    sessions.sort_by(|a, b| b.0.updated_at.cmp(&a.0.updated_at));
+    sessions.truncate(100);
+    Ok(sessions)
+}
+
 fn open_session(
-    id: &str,
+    reference: &str,
     state: &mut ReplState,
     app: &mut App,
     selection: &ModelSelection,
 ) -> Result<()> {
+    let (project_id, id) = reference
+        .split_once('|')
+        .unwrap_or((&state.project_id, reference));
+    if project_id != state.project_id {
+        let project = crate::session_projects::list()?
+            .into_iter()
+            .find(|project| project.id == project_id)
+            .ok_or_else(|| anyhow::anyhow!("project not found: {project_id}"))?;
+        state.switch_project(&project)?;
+    }
+    app.directory = state.project_root.display().to_string();
     let budget = crate::context_budget(selection, &state.mcp_tools);
     if state.open_session(id, &budget)? {
         let history = state
@@ -681,14 +716,61 @@ pub(super) async fn apply_modal_action(
                 catalog_refresh::refresh_catalogs(refresh_data_dir, refresh_codex_auth).await;
             });
         }
-        ModalAction::SessionOpen(id) => open_session(&id, state, app, selection)?,
+        ModalAction::SessionOpen(id) => {
+            open_session(&id, state, app, selection)?;
+            pane.set_file_root(state.project_root.clone());
+        }
         ModalAction::SessionNew => {
             state.reset_new_session();
             app.reset_for_session("New Session", selection);
         }
         ModalAction::SessionDelete(id) => {
-            state.delete_session(&id)?;
-            app.push(TranscriptKind::Status, format!("Deleted session {id}"));
+            let (project_id, session_id) = id
+                .split_once('|')
+                .unwrap_or((&state.project_id, id.as_str()));
+            if project_id == state.project_id {
+                state.delete_session(session_id)?;
+            } else if let Some(project) = crate::session_projects::list()?
+                .into_iter()
+                .find(|project| project.id == project_id)
+            {
+                memory::MemoryStore::open(crate::database_path(&project.data_dir))?
+                    .delete_session(session_id)?;
+            }
+            app.push(
+                TranscriptKind::Status,
+                format!("Deleted session {session_id}"),
+            );
+            open_session_picker(state, app, pane)?;
+        }
+        ModalAction::SessionRenameStart { id, title } => {
+            pane.push_view(SessionRename::open(id, title));
+        }
+        ModalAction::SessionRenamed { id, title } => {
+            let (project_id, session_id) = id
+                .split_once('|')
+                .unwrap_or((&state.project_id, id.as_str()));
+            if project_id == state.project_id {
+                state.store()?.rename_session(session_id, &title)?;
+                if let Some(session) = state
+                    .current_session
+                    .as_mut()
+                    .filter(|session| session.id == session_id)
+                {
+                    session.title.clone_from(&title);
+                }
+            } else if let Some(project) = crate::session_projects::list()?
+                .into_iter()
+                .find(|project| project.id == project_id)
+            {
+                memory::MemoryStore::open(crate::database_path(&project.data_dir))?
+                    .rename_session(session_id, &title)?;
+            }
+            app.push(
+                TranscriptKind::Status,
+                format!("Renamed session to {title}"),
+            );
+            open_session_picker(state, app, pane)?;
         }
         ModalAction::SurfaceSelected { surface, id } => {
             if let Some(name) = surface.strip_prefix("memory-items:") {
@@ -983,4 +1065,56 @@ fn open_surface_detail(
         _ => SurfaceView::info("Details", vec![id.to_owned()]),
     };
     pane.push_view(view);
+}
+
+#[cfg(test)]
+mod session_picker_tests {
+    use super::*;
+    use std::fs;
+
+    #[test]
+    fn lists_sessions_from_two_project_databases() {
+        let root = std::env::temp_dir().join(format!("ax-project-picker-{}", uuid::Uuid::new_v4()));
+        let a = root.join("a");
+        let b = root.join("b");
+        fs::create_dir_all(a.join(".ax")).unwrap();
+        fs::create_dir_all(b.join(".ax")).unwrap();
+        let mut state =
+            ReplState::new_in_project(a.join(".ax"), a.join("skills"), None, &a).unwrap();
+        state.store().unwrap().create_session("Alpha").unwrap();
+        memory::MemoryStore::open(crate::database_path(&b.join(".ax")))
+            .unwrap()
+            .create_session("Beta")
+            .unwrap();
+        let make_location =
+            |id: String, root: &std::path::Path| crate::session_projects::ProjectLocation {
+                id,
+                root: root.to_path_buf(),
+                data_dir: root.join(".ax"),
+                skills_dir: root.join("skills"),
+                mcp_config: root.join(".ax/mcp.toml"),
+            };
+        let current_project_id = state.project_id.clone();
+        let listed = sessions_across_projects(
+            &mut state,
+            vec![
+                make_location(current_project_id, &a),
+                make_location("b".into(), &b),
+            ],
+        )
+        .unwrap();
+        assert_eq!(listed.len(), 2);
+        assert!(
+            listed
+                .iter()
+                .any(|(session, project)| session.title == "Alpha" && project.root == a)
+        );
+        assert!(
+            listed
+                .iter()
+                .any(|(session, project)| session.title == "Beta" && project.root == b)
+        );
+        drop(state);
+        fs::remove_dir_all(root).unwrap();
+    }
 }

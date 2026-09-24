@@ -183,7 +183,7 @@ impl PaneView for SurfaceView {
         if !self.filter.is_empty() {
             lines.push(Line::from(vec![
                 Span::styled("› ", theme::accent()),
-                Span::raw(&self.filter),
+                Span::styled(&self.filter, theme::body()),
             ]));
         }
         if !self.intro.is_empty() && !self.items.is_empty() {
@@ -242,9 +242,6 @@ impl PaneView for SurfaceView {
     }
     fn preferred_height(&self, _width: u16) -> u16 {
         u16::try_from((self.intro.len() + self.items.len() + 4).min(28)).unwrap_or(28)
-    }
-    fn title(&self) -> &'static str {
-        self.title
     }
     fn take_action(&mut self) -> Option<ModalAction> {
         self.action.take()

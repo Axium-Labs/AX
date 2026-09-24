@@ -21,11 +21,13 @@ use skill::SkillCatalog;
 use tool::{FilesystemTool, ShellTool, ToolRegistry};
 
 mod config;
+mod file_reference;
 mod memory_context;
 mod memory_tool;
 mod model_selection;
 mod project_identity;
 mod providers;
+mod session_projects;
 mod session_restore;
 mod skill_settings;
 mod tui;
@@ -146,6 +148,7 @@ impl ModelSelection {
 }
 
 struct ReplState {
+    project_root: PathBuf,
     data_dir: PathBuf,
     skills_dir: PathBuf,
     mcp_config: PathBuf,
@@ -155,6 +158,7 @@ struct ReplState {
     project_id: String,
     project_local_store: bool,
     skill_catalog: Option<SkillCatalog>,
+    file_index: Option<Vec<String>>,
     mcp_manager: Option<Arc<tokio::sync::Mutex<McpManager>>>,
     mcp_tools: Vec<McpToolProxy>,
     active_skills: HashSet<String>,
@@ -198,6 +202,7 @@ impl ReplState {
         }
         let project_local_store = data_dir == project_root.join(".ax");
         Ok(Self {
+            project_root: project_root.to_path_buf(),
             data_dir,
             skills_dir,
             mcp_config,
@@ -207,6 +212,7 @@ impl ReplState {
             project_id,
             project_local_store,
             skill_catalog: None,
+            file_index: None,
             mcp_manager: None,
             mcp_tools: Vec::new(),
             active_skills: HashSet::new(),
@@ -237,12 +243,52 @@ impl ReplState {
     }
 
     fn create_session(&mut self, title: &str) -> Result<()> {
+        #[cfg(not(test))]
+        self.register_project()?;
         let session = self.store()?.create_session(title)?;
         self.permissions.reset_session();
         self.current_session = Some(session);
         self.loaded_messages.clear();
         self.active_skills.clear();
         self.runtime = None;
+        Ok(())
+    }
+
+    fn project_location(&self) -> session_projects::ProjectLocation {
+        let cwd = std::env::current_dir().unwrap_or_else(|_| self.project_root.clone());
+        let absolute = |path: &Path| {
+            if path.is_absolute() {
+                path.to_path_buf()
+            } else {
+                cwd.join(path)
+            }
+        };
+        session_projects::ProjectLocation {
+            id: self.project_id.clone(),
+            root: self.project_root.clone(),
+            data_dir: absolute(&self.data_dir),
+            skills_dir: absolute(&self.skills_dir),
+            mcp_config: absolute(&self.mcp_config),
+        }
+    }
+
+    fn register_project(&self) -> Result<()> {
+        session_projects::register(self.project_location())
+    }
+
+    fn switch_project(&mut self, location: &session_projects::ProjectLocation) -> Result<()> {
+        if self.project_id == location.id {
+            return Ok(());
+        }
+        let mut next = Self::new_in_project(
+            location.data_dir.clone(),
+            location.skills_dir.clone(),
+            Some(location.mcp_config.clone()),
+            &location.root,
+        )?;
+        next.execution_budget = self.execution_budget;
+        std::env::set_current_dir(&location.root)?;
+        *self = next;
         Ok(())
     }
 
@@ -529,6 +575,33 @@ impl ReplState {
         Ok(())
     }
 
+    fn prepare_file_context(&mut self, prompt: &str, mut token_budget: usize) -> Result<usize> {
+        if !prompt.contains('@') || token_budget == 0 {
+            return Ok(token_budget);
+        }
+        if self.file_index.is_none() {
+            self.file_index = Some(file_reference::files(&self.project_root));
+        }
+        let paths = file_reference::references(prompt, self.file_index.as_deref().unwrap_or(&[]));
+        for path in paths {
+            let Some(content) = file_reference::read(&self.project_root, &path) else {
+                continue;
+            };
+            let message = Message::system(format!("[file-reference: {path}]\n{content}"));
+            let cost = runtime_core::estimate_tokens(std::slice::from_ref(&message));
+            if cost > token_budget {
+                continue;
+            }
+            token_budget -= cost;
+            self.persist_messages(std::slice::from_ref(&message))?;
+            self.runtime
+                .as_mut()
+                .expect("runtime initialized")
+                .push_context(message);
+        }
+        Ok(token_budget)
+    }
+
     fn mcp(&mut self) -> Result<Arc<tokio::sync::Mutex<McpManager>>> {
         if self.mcp_manager.is_none() {
             let config = McpConfig::load(&self.mcp_config).with_context(|| {
@@ -801,7 +874,7 @@ fn render_event(event: AgentEvent) {
             print!("{delta}");
             let _ = std::io::stdout().flush();
         }
-        AgentEvent::ToolStarted { name } => eprintln!("[tool:{name}] running..."),
+        AgentEvent::ToolStarted { name, detail } => eprintln!("[tool:{name}] {detail}..."),
         AgentEvent::ToolFinished { name, success } => {
             eprintln!("[tool:{name}] {}", if success { "done" } else { "failed" });
         }
@@ -1081,7 +1154,8 @@ where
         .as_mut()
         .expect("runtime initialized")
         .set_context("[retrieved-memory]", memory_context);
-    state.prepare_skill_context(prompt, budget.skills_budget_tokens())?;
+    let remaining = state.prepare_file_context(prompt, budget.skills_budget_tokens())?;
+    state.prepare_skill_context(prompt, remaining)?;
     drop(context_timer);
     let mut runtime = state.runtime.take().expect("runtime initialized");
     let mut saved = 0;
@@ -1180,12 +1254,106 @@ const fn memory_role(role: &Role) -> MessageRole {
 }
 
 fn title_from_prompt(prompt: &str) -> String {
-    let title = prompt.split_whitespace().collect::<Vec<_>>().join(" ");
-    let title = title.chars().take(40).collect::<String>();
+    let first_line = prompt
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or("");
+    let first_clause = first_line
+        .split(['。', '！', '？', '.', '!', '?', '\n'])
+        .next()
+        .unwrap_or("");
+    let title = first_clause
+        .split_whitespace()
+        .filter(|word| !word.starts_with('@'))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let title = title.chars().take(28).collect::<String>();
     if title.is_empty() {
         "Untitled session".to_owned()
     } else {
         title
+    }
+}
+
+#[cfg(test)]
+mod session_title_tests {
+    use super::title_from_prompt;
+    #[test]
+    fn first_task_becomes_short_title() {
+        assert_eq!(
+            title_from_prompt("检查 @README 中的安装说明。然后修复脚本"),
+            "检查 中的安装说明"
+        );
+        assert!(title_from_prompt("a".repeat(100).as_str()).chars().count() <= 28);
+    }
+}
+
+#[cfg(test)]
+mod file_context_tests {
+    use super::*;
+    use async_trait::async_trait;
+    use model::{ModelError, ModelRequest, ModelResponse};
+
+    struct MockProvider;
+    #[async_trait]
+    impl ModelProvider for MockProvider {
+        fn name(&self) -> &'static str {
+            "mock"
+        }
+        fn model_id(&self) -> &'static str {
+            "mock"
+        }
+        fn context_window(&self) -> usize {
+            10_000
+        }
+        async fn complete(
+            &self,
+            _: ModelRequest,
+        ) -> std::result::Result<ModelResponse, ModelError> {
+            Ok(ModelResponse {
+                content: String::new(),
+                tool_calls: Vec::new(),
+                finish_reason: None,
+            })
+        }
+    }
+
+    #[test]
+    fn referenced_file_enters_runtime_and_persisted_session() {
+        let root = std::env::temp_dir().join(format!("ax-file-context-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("README.md"), "Unique project instructions").unwrap();
+        let mut state =
+            ReplState::new_in_project(root.join(".ax"), root.join("skills"), None, &root).unwrap();
+        state.ensure_session("check @README").unwrap();
+        state.runtime = Some(AgentKernel::new(
+            Arc::new(MockProvider),
+            ToolRegistry::new(),
+            Arc::new(AllowAll),
+        ));
+        state.prepare_file_context("check @README", 1_000).unwrap();
+        assert!(
+            state
+                .runtime
+                .as_ref()
+                .unwrap()
+                .messages()
+                .iter()
+                .any(|message| message.content.contains("Unique project instructions"))
+        );
+        let session = state.current_session_id().unwrap().to_owned();
+        assert!(
+            state
+                .store()
+                .unwrap()
+                .load_messages(&session, None, 10)
+                .unwrap()
+                .iter()
+                .any(|message| message.kind == MessageKind::AgentState
+                    && message.content.contains("Unique project instructions"))
+        );
+        drop(state);
+        fs::remove_dir_all(root).unwrap();
     }
 }
 

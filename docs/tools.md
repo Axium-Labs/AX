@@ -33,6 +33,12 @@ permissions from tool-name strings (e.g. `mcp__`/`::`).
 The registry is assembled per composition root (`cli::tools`): the built-ins,
 then discovered MCP proxies.
 
+The TUI tool timeline shows a short description while each call runs (for
+example the search query and path, file operation and path, or shell command).
+After completion it keeps the detail visible briefly, then folds it into a
+single success or failure row.
+CLI `run` prints the same activity description to stderr.
+
 ### Web
 
 `web` accepts `operation: "search"` with `query` and optional `limit` (1–20),

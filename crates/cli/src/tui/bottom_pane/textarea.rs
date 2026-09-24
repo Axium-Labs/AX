@@ -28,10 +28,20 @@ impl TextArea {
         self.cursor
     }
 
-    #[allow(dead_code)]
     pub fn set(&mut self, value: impl Into<String>) {
         self.text = value.into();
         self.cursor = self.text.len();
+    }
+
+    pub fn replace_range(&mut self, start: usize, end: usize, replacement: &str) {
+        if start <= end
+            && self.text.is_char_boundary(start)
+            && self.text.is_char_boundary(end)
+            && end <= self.text.len()
+        {
+            self.text.replace_range(start..end, replacement);
+            self.cursor = start + replacement.len();
+        }
     }
 
     pub fn clear(&mut self) {

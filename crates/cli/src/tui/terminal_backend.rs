@@ -72,10 +72,11 @@ impl<B: Backend> Backend for WideCellBackend<B> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tui::theme;
     use ratatui::backend::CrosstermBackend;
     use ratatui::buffer::Buffer;
     use ratatui::layout::Rect;
-    use ratatui::style::{Color, Modifier, Style};
+    use ratatui::style::{Modifier, Style};
     use ratatui::text::{Line, Span};
     use ratatui::widgets::{Paragraph, Widget};
 
@@ -106,9 +107,7 @@ mod tests {
     #[test]
     fn history_and_live_ansi_render_identical_chinese_and_backgrounds() {
         let area = Rect::new(0, 0, 40, 4);
-        let style = Style::default()
-            .fg(Color::Rgb(212, 212, 212))
-            .bg(Color::Rgb(52, 52, 64));
+        let style = Style::default().fg(theme::BODY).bg(theme::USER_MESSAGE_BG);
         let mut buffer = Buffer::empty(area);
         Paragraph::new(vec![
             Line::styled("你可以帮我做什么？", style),
@@ -160,7 +159,7 @@ mod tests {
         {
             assert_eq!(
                 history.cell(0, column).unwrap().bgcolor(),
-                vt100::Color::Rgb(52, 52, 64)
+                vt100::Color::Rgb(36, 42, 54)
             );
         }
     }

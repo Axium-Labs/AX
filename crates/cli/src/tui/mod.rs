@@ -31,7 +31,7 @@ use std::{
     io::{self, Write},
     path::PathBuf,
     sync::Arc,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use anyhow::Result;
@@ -66,7 +66,9 @@ use crate::{
 };
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
-const ACTIVE_POLL: Duration = Duration::from_millis(80);
+const ACTIVE_POLL: Duration = Duration::from_millis(25);
+const STREAM_FRAME: Duration = Duration::from_millis(40);
+const SPINNER_FRAME: Duration = Duration::from_millis(80);
 const IDLE_POLL: Duration = Duration::from_secs(60);
 
 /// Messages sent from the worker task to the UI thread.
@@ -152,6 +154,8 @@ struct App {
     /// Whether the current turn has started emitting content (hides the
     /// center spinner once text streams in).
     streaming: bool,
+    unseen_output: bool,
+    loading_session: Option<Instant>,
 }
 
 impl App {
@@ -181,6 +185,8 @@ impl App {
             spin: 0,
             pending: VecDeque::new(),
             streaming: false,
+            unseen_output: false,
+            loading_session: None,
         }
     }
 
@@ -228,6 +234,9 @@ impl App {
         status.model.clone_from(&self.model);
         status.session.clone_from(&self.session);
         status.working = self.working;
+        status.streaming = self.transcript.streaming;
+        status.unseen_output = self.unseen_output;
+        status.loading_session = self.loading_session;
         status.directory.clone_from(&self.directory);
         status.context_percent = self.context_percent;
         status.context_window = self.context_window;
@@ -241,6 +250,7 @@ impl App {
             AgentEvent::TurnStarted => {
                 self.working = true;
                 self.streaming = false;
+                self.transcript.streaming = false;
             }
             AgentEvent::ModelStarted { provider, model } => {
                 let _ = (provider, model);
@@ -248,13 +258,18 @@ impl App {
             // Reasoning deltas are private model working text. Keep the compact
             // animated `Thinking` status instead of dumping chain-of-thought
             // into the transcript and consuming the whole viewport.
-            AgentEvent::ThinkingDelta { delta: _ } | AgentEvent::TurnFinished => {}
+            AgentEvent::ThinkingDelta { delta: _ } => {}
+            AgentEvent::TurnFinished => {
+                self.transcript.streaming = false;
+            }
             AgentEvent::ContentDelta { delta } => {
                 self.streaming = true;
+                self.unseen_output |= self.transcript.scroll_from_bottom > 0;
                 self.transcript.push_agent_delta(&delta);
             }
-            AgentEvent::ToolStarted { name } => {
-                self.transcript.tool_started(name);
+            AgentEvent::ToolStarted { name, detail } => {
+                self.transcript.streaming = false;
+                self.transcript.tool_started(name, detail);
             }
             AgentEvent::ToolFinished { name, success } => {
                 self.transcript.tool_finished(&name, success);
@@ -330,6 +345,13 @@ pub(super) async fn run_tui(
     };
     let mut app = App::new(&selection);
     let mut pane = BottomPane::new(selection.model.clone());
+    pane.set_file_root(
+        state
+            .as_ref()
+            .expect("state initialized")
+            .project_root
+            .clone(),
+    );
     app.sync_metadata(state.as_ref().expect("state initialized"), &selection);
     app.sync_status_line(&mut pane);
     match &resolution {
@@ -346,6 +368,8 @@ pub(super) async fn run_tui(
     let (login_tx, mut login_rx) = mpsc::unbounded_channel::<commands::LoginUpdate>();
     let mut active_turn: Option<ActiveTurn> = None;
     let mut force_redraw = true;
+    let mut pending_stream_frame = false;
+    let mut last_draw = Instant::now();
 
     drop(startup_timer);
     'outer: loop {
@@ -354,7 +378,6 @@ pub(super) async fn run_tui(
             .min(scroll_height)
             .saturating_sub(pane.composer_height(scroll_width).saturating_add(2))
             .max(1);
-        let height_before_updates = app.transcript.full_height(scroll_width);
         // ---- Phase 1: drain every queued key before drawing. ---------------
         // A burst of keystrokes is applied in one pass and rendered once, so
         // typing never waits behind repeated full redraws (the previous loop
@@ -372,6 +395,9 @@ pub(super) async fn run_tui(
                         _ => continue,
                     }
                     key_handled = true;
+                    if app.transcript.scroll_from_bottom == 0 {
+                        app.unseen_output = false;
+                    }
                     continue;
                 }
                 Event::Resize(_, _) => {
@@ -405,6 +431,13 @@ pub(super) async fn run_tui(
                             pane.pop_view();
                         }
                         action => {
+                            let opening_session =
+                                matches!(&action, bottom_pane::ModalAction::SessionOpen(_));
+                            if opening_session {
+                                app.loading_session = Some(Instant::now());
+                                app.sync_status_line(&mut pane);
+                                terminal.draw(|frame| render(frame, &app, &pane))?;
+                            }
                             commands::apply_modal_action(
                                 action,
                                 state.as_mut().expect("state available"),
@@ -414,9 +447,21 @@ pub(super) async fn run_tui(
                                 &login_tx,
                             )
                             .await?;
+                            app.loading_session = None;
                             app.sync_metadata(state.as_ref().expect("state available"), &selection);
                         }
                     }
+                }
+                continue;
+            }
+
+            // File references take priority while an @ token is being edited.
+            if pane.files().is_open()
+                && let Some(result) = pane.files_mut().handle_key(key)
+            {
+                if let bottom_pane::file_popup::FileKeyOutcome::Selected(start, path) = result {
+                    pane.composer_mut().insert_file_reference(start, &path);
+                    pane.sync_files();
                 }
                 continue;
             }
@@ -459,10 +504,14 @@ pub(super) async fn run_tui(
                 KeyCode::PageDown => {
                     app.transcript
                         .scroll_down(usize::from(visible_rows.saturating_sub(1).max(1)));
+                    if app.transcript.scroll_from_bottom == 0 {
+                        app.unseen_output = false;
+                    }
                     continue;
                 }
                 KeyCode::End if key.modifiers.contains(KeyModifiers::CONTROL) => {
                     app.transcript.scroll_from_bottom = 0;
+                    app.unseen_output = false;
                     continue;
                 }
                 _ => {}
@@ -474,6 +523,7 @@ pub(super) async fn run_tui(
             match key_outcome {
                 bottom_pane::ComposerKey::Ignored => {}
                 bottom_pane::ComposerKey::Edited => {
+                    pane.sync_files();
                     pane.slash_mut().unsuppress();
                     let composer_text = pane.composer().text().to_owned();
                     pane.slash_mut().sync(&composer_text);
@@ -481,11 +531,13 @@ pub(super) async fn run_tui(
                 bottom_pane::ComposerKey::Submit => {
                     let submitted = pane.composer().text().trim().to_owned();
                     pane.composer_mut().clear();
+                    pane.sync_files();
                     pane.slash_mut().sync("");
                     if submitted.is_empty() {
                         continue;
                     }
                     app.transcript.scroll_from_bottom = 0;
+                    app.unseen_output = false;
                     // While a turn is running, queue the input; it is dispatched
                     // once the agent frees up.
                     if app.working {
@@ -526,6 +578,11 @@ pub(super) async fn run_tui(
             }
         }
 
+        // Only measure the full transcript when preserving a scrolled reading
+        // position; an idle live view should not parse old Markdown every tick.
+        let height_before_updates = (app.transcript.scroll_from_bottom > 0)
+            .then(|| app.transcript.full_height(scroll_width));
+
         // ---- Phase 2: drain background updates. -----------------------------
         let mut updated = false;
 
@@ -562,6 +619,7 @@ pub(super) async fn run_tui(
         }
 
         // Drain worker messages (streaming events, approval requests).
+        let was_streaming = app.streaming;
         while let Ok(message) = worker_rx.try_recv() {
             updated = true;
             match message {
@@ -589,9 +647,11 @@ pub(super) async fn run_tui(
                     }
                     state = Some(returned_state);
                     app.working = false;
+                    app.transcript.streaming = false;
                     app.sync_metadata(state.as_ref().expect("state returned"), &selection);
                     // The agent is free: run any input queued while it was busy.
                     if let Some(next) = app.pending.pop_front() {
+                        app.transcript.mark_next_queued_running();
                         if next.starts_with('/') {
                             let keep = commands::execute_slash(
                                 &next,
@@ -625,23 +685,41 @@ pub(super) async fn run_tui(
                     updated = true;
                     app.push(TranscriptKind::Error, "agent task terminated unexpectedly");
                     app.working = false;
+                    app.transcript.streaming = false;
                 }
             }
         }
 
-        // ---- Phase 3: redraw only when something changed or the spinner
-        // animation is running. Skipping the idle redraw keeps the loop cheap,
-        // so a large transcript never throttles input.
-        if key_handled || updated || force_redraw || app.working || pane.has_view() {
-            if app.transcript.scroll_from_bottom > 0 {
-                let added_rows = app
-                    .transcript
-                    .full_height(scroll_width)
-                    .saturating_sub(height_before_updates);
-                app.transcript.scroll_from_bottom =
-                    app.transcript.scroll_from_bottom.saturating_add(added_rows);
-            }
+        updated |= app.transcript.settle_transitions();
+
+        // Preserve the reader's position even when a dense stream skips a frame.
+        if let Some(height_before_updates) = height_before_updates {
+            let added_rows = app
+                .transcript
+                .full_height(scroll_width)
+                .saturating_sub(height_before_updates);
+            app.transcript.scroll_from_bottom =
+                app.transcript.scroll_from_bottom.saturating_add(added_rows);
+        }
+
+        // Draw the first token immediately, then coalesce dense deltas into
+        // short frames. Timer-only redraws stop when visual motion ends.
+        if updated && app.streaming {
+            pending_stream_frame = true;
+        }
+        let motion_due = ((app.working && !app.transcript.streaming)
+            || pane.is_animating()
+            || app.transcript.is_animating())
+            && last_draw.elapsed() >= SPINNER_FRAME;
+        let stream_due = pending_stream_frame && last_draw.elapsed() >= STREAM_FRAME;
+        if key_handled
+            || force_redraw
+            || motion_due
+            || (updated && (!app.streaming || !was_streaming))
+            || stream_due
+        {
             force_redraw = false;
+            pending_stream_frame = false;
             app.spin = app.spin.wrapping_add(1);
             app.sync_status_line(&mut pane);
             // Pi's main-screen renderer grows the real terminal buffer. Commit
@@ -674,10 +752,16 @@ pub(super) async fn run_tui(
                 })?;
             }
             terminal.draw(|frame| render(frame, &app, &pane))?;
+            last_draw = Instant::now();
         }
 
         // ---- Phase 4: wait for the next terminal event. ----------------------
-        let poll = if app.working || pane.has_view() {
+        let poll = if app.working
+            || pane.has_view()
+            || pane.is_animating()
+            || app.transcript.is_animating()
+            || pending_stream_frame
+        {
             ACTIVE_POLL
         } else {
             IDLE_POLL
@@ -1194,7 +1278,13 @@ mod tests {
         let mut terminal = Terminal::new(backend).expect("test terminal");
         let app = App::new(&selection());
         let mut pane = BottomPane::new("deepseek-chat");
-        pane.composer_mut().set("/mo");
+        for c in "/mo".chars() {
+            assert_eq!(
+                pane.composer_mut()
+                    .handle_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)),
+                bottom_pane::ComposerKey::Edited
+            );
+        }
         pane.slash_mut().unsuppress();
         let composer_text = pane.composer().text().to_owned();
         pane.slash_mut().sync(&composer_text);

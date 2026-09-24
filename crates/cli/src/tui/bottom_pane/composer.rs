@@ -50,13 +50,22 @@ impl Composer {
         self.area.text()
     }
 
-    pub fn clear(&mut self) {
-        self.area.clear();
+    pub fn cursor(&self) -> usize {
+        self.area.cursor()
     }
 
-    #[allow(dead_code)]
-    pub fn set(&mut self, value: impl Into<String>) {
-        self.area.set(value);
+    pub fn insert_file_reference(&mut self, start: usize, path: &str) {
+        let reference = if path.contains(char::is_whitespace) {
+            format!("@\"{path}\" ")
+        } else {
+            format!("@{path} ")
+        };
+        self.area
+            .replace_range(start, self.area.cursor(), &reference);
+    }
+
+    pub fn clear(&mut self) {
+        self.area.clear();
     }
 
     /// Route a key to the editor.
@@ -201,7 +210,7 @@ impl Composer {
         let scroll = self.scroll_offset(width, content_height);
 
         let bg = theme::CANVAS_BG;
-        let base = Style::default().bg(bg).fg(ratatui::style::Color::Reset);
+        let base = theme::body().bg(bg);
         let border = if enabled {
             Style::default().fg(theme::BORDER_ACCENT).bg(bg)
         } else {
@@ -257,7 +266,12 @@ mod tests {
     fn grows_and_wraps() {
         let mut composer = Composer::new();
         assert_eq!(composer.height(40), 3);
-        composer.set("a".repeat(100));
+        for _ in 0..100 {
+            assert_eq!(
+                composer.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE)),
+                ComposerKey::Edited
+            );
+        }
         // 38 content columns per visual row at width 40.
         assert_eq!(composer.height(40), 5);
     }
@@ -265,7 +279,14 @@ mod tests {
     #[test]
     fn multiline_height_and_cursor() {
         let mut composer = Composer::new();
-        composer.set("one\ntwo\nthree");
+        for c in "one\ntwo\nthree".chars() {
+            let key = if c == '\n' {
+                KeyEvent::new(KeyCode::Enter, KeyModifiers::ALT)
+            } else {
+                KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)
+            };
+            assert_eq!(composer.handle_key(key), ComposerKey::Edited);
+        }
         assert_eq!(composer.height(40), 5);
         composer.area.move_line_start();
         let (row, _) = composer.cursor_xy(40);

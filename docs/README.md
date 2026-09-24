@@ -20,6 +20,40 @@ design decisions that shaped the code are recorded as ADRs in
 | [development.md](development.md) | Building, testing, extending and releasing AX |
 | [adr/README.md](adr/README.md) | Architecture Decision Records (index) |
 
+## TUI features
+
+- **Project file references** — Type `@README` to fuzzy-search project files.
+  Select one with Enter to include its text in the model context when sending
+  the message. See [context.md](context.md).
+- **Tool execution timeline** — Shows what a running tool is searching,
+  reading, editing, or executing, then collapses to a result row. See
+  [tools.md](tools.md).
+- **Session picker** — `/resume` searches sessions across registered projects.
+  Type to filter titles; use Ctrl+P to switch projects, Ctrl+R to rename,
+  Ctrl+D to delete, and Ctrl+N to start a new session. See
+  [context.md](context.md).
+- **Automatic session titles** — New sessions get a short title from the first
+  task. Titles can be changed in `/resume`. See [context.md](context.md).
+
+## TUI interaction feedback
+
+Streaming replies show new text promptly while combining dense updates into
+short redraw frames. Completed Markdown blocks and messages are cached at the
+current terminal width; only the active tail is re-rendered. The active reply
+has a cursor until it ends. When reading earlier transcript lines, the footer
+reports new output and End returns to the latest text. Tool details remain
+visible briefly after completion before they
+collapse. Pickers reveal their contents quickly, file and slash suggestions
+highlight keyboard movement, and session restoration displays a loading state
+while it reads history. Slash command hints, descriptions, and selected text use
+fixed high-contrast colors so they remain legible across terminal themes; the
+slash popup keeps its navigation hint visible while scrolling.
+
+The terminal palette uses a black canvas with quiet slate surfaces, teal for
+focus, and separate green, amber, and coral status colors. Text colors remain
+explicit so terminal theme defaults cannot make command hints or tool output
+disappear.
+
 ## How to read
 
 - **New users** — start with the repository [README](../README.md):

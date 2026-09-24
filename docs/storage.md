@@ -24,6 +24,7 @@ project-root/
 ~/.ax/
 ├── auth.json                   # provider credentials (0600 on Unix / icacls on Windows)
 ├── config.json                 # last model selection (legacy config.toml auto-migrated)
+├── session-projects.json       # known project paths for the cross-project picker
 └── models/                     # model catalog cache
     ├── deepseek.json
     ├── openai.json

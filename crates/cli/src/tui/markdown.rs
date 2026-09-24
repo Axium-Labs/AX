@@ -21,6 +21,39 @@ pub fn agent_lines(text: &str, width: u16) -> Vec<Line<'static>> {
     renderer.lines
 }
 
+/// Byte boundary after the last complete top-level block. The trailing block
+/// may still change as a stream grows; earlier blocks can be rendered once.
+pub fn stable_prefix_end(text: &str) -> usize {
+    let mut depth = 0usize;
+    let mut boundary = 0;
+    for (event, range) in Parser::new_ext(
+        text,
+        Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS | Options::ENABLE_TABLES,
+    )
+    .into_offset_iter()
+    {
+        match event {
+            Event::Start(_) => depth += 1,
+            Event::End(_) => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 && range.end < text.len() {
+                    let rest = &text[range.end..];
+                    let newlines = rest
+                        .bytes()
+                        .take_while(|byte| *byte == b'\n' || *byte == b'\r')
+                        .count();
+                    let ended_on_newline = text.as_bytes()[range.end.saturating_sub(1)] == b'\n';
+                    if (newlines > 0 || ended_on_newline) && range.end + newlines < text.len() {
+                        boundary = range.end + newlines;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    boundary
+}
+
 struct Renderer {
     lines: Vec<Line<'static>>,
     spans: Vec<Span<'static>>,
@@ -263,6 +296,14 @@ mod tests {
                     .contains(Modifier::BOLD | Modifier::ITALIC)
         }));
         assert!(text.contains("文档"));
+    }
+
+    #[test]
+    fn streaming_boundary_only_commits_closed_blocks() {
+        assert!(stable_prefix_end("First.\n\nSecond") > 0);
+        assert!(stable_prefix_end("- first\n- second\n\nAfter list") > 0);
+        assert!(stable_prefix_end("```rust\nlet x = 1;\n```\n\nAfter code") > 0);
+        assert_eq!(stable_prefix_end("An unfinished paragraph"), 0);
     }
 
     #[test]
