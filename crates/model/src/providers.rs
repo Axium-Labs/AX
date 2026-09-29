@@ -216,22 +216,41 @@ pub fn provider(id: &str) -> Option<&'static ProviderSpec> {
 /// Pi provider base URLs for adapters whose public API follows the `OpenAI`
 /// compatibility shape. AX uses these only to perform authenticated live
 /// discovery; model ids still come from each provider's `/models` response.
+///
+/// Every entry here is the catalog's own endpoint for that provider, minus the
+/// `/chat/completions` suffix, and each one has been checked against the live
+/// host: a supported path answers 401/405 without a key, never 404.
+///
+/// `cloudflare-workers-ai` is account-scoped, so its path is stored with the
+/// catalog's own `${CLOUDFLARE_ACCOUNT_ID}` placeholder and expanded at read
+/// time. While that variable is unset the provider stays unsupported rather
+/// than resolving to a URL that cannot work. Three catalog entries still have
+/// no base URL at all — `azure-openai-responses` (per-resource endpoint),
+/// `cloudflare-ai-gateway` (account *and* gateway in the path) and `radius`
+/// (no models in the catalog) — see [`provider_unsupported_reason`].
 #[must_use]
-pub fn provider_base_url(id: &str) -> Option<&'static str> {
-    Some(match id {
+pub fn provider_base_url(id: &str) -> Option<String> {
+    let template = match id {
         "ant-ling" => "https://api.ant-ling.com/v1",
         "baseten" => "https://inference.baseten.co/v1",
         "cerebras" => "https://api.cerebras.ai/v1",
+        "cloudflare-workers-ai" => {
+            "https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/ai/v1"
+        }
         "deepseek" => DEEPSEEK_BASE_URL,
-        "fireworks" => "https://api.fireworks.ai/inference",
+        "fireworks" => "https://api.fireworks.ai/inference/v1",
         "groq" => "https://api.groq.com/openai/v1",
         "huggingface" => "https://router.huggingface.co/v1",
         "kimi-coding" => "https://api.kimi.com/coding",
         "meta" => "https://api.meta.ai/v1",
+        "minimax" => "https://api.minimax.io/v1",
+        "minimax-cn" => "https://api.minimax.cn/v1",
         "mistral" => "https://api.mistral.ai/v1",
         "moonshotai" => "https://api.moonshot.ai/v1",
         "moonshotai-cn" => "https://api.moonshot.cn/v1",
         "nvidia" => "https://integrate.api.nvidia.com/v1",
+        "opencode" => "https://opencode.ai/zen/v1",
+        "opencode-go" => "https://opencode.ai/zen/go/v1",
         "openrouter" => "https://openrouter.ai/api/v1",
         "qwen-token-plan" | "qwen-token-plan-individual" => {
             "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1"
@@ -240,6 +259,7 @@ pub fn provider_base_url(id: &str) -> Option<&'static str> {
             "https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1"
         }
         "together" => "https://api.together.ai/v1",
+        "vercel-ai-gateway" => "https://ai-gateway.vercel.sh/v1",
         "xai" => "https://api.x.ai/v1",
         "xiaomi" => "https://api.xiaomimimo.com/v1",
         "xiaomi-token-plan-ams" => "https://token-plan-ams.xiaomimimo.com/v1",
@@ -248,6 +268,65 @@ pub fn provider_base_url(id: &str) -> Option<&'static str> {
         "zai" => "https://api.z.ai/api/coding/paas/v4",
         "zai-coding-cn" => "https://open.bigmodel.cn/api/coding/paas/v4",
         _ => return None,
+    };
+    expand_environment(template)
+}
+
+/// Substitutes every `${VAR}` in an endpoint template. Returns `None` when a
+/// referenced variable is unset or empty, so an account-scoped provider reads
+/// as unsupported instead of as a broken URL.
+fn expand_environment(template: &str) -> Option<String> {
+    let mut expanded = String::with_capacity(template.len());
+    let mut rest = template;
+    while let Some(start) = rest.find("${") {
+        expanded.push_str(&rest[..start]);
+        let after = &rest[start + 2..];
+        let end = after.find('}')?;
+        let name = &after[..end];
+        let value = std::env::var(name).ok().filter(|value| !value.is_empty())?;
+        expanded.push_str(&value);
+        rest = &after[end + 1..];
+    }
+    expanded.push_str(rest);
+    Some(expanded)
+}
+
+/// The one definition of "AX can drive this provider".
+///
+/// A provider qualifies when its wire protocol has a runtime adapter *and* AX
+/// can form a request URL for it. The CLI filter and the Crew status surface
+/// both read this, so a catalog entry can never look usable in one place and
+/// unsupported in another.
+#[must_use]
+pub fn provider_supported(id: &str) -> bool {
+    provider(id).is_some_and(|spec| {
+        matches!(
+            spec.protocol,
+            ProviderProtocol::OpenAiCompatible | ProviderProtocol::OpenAiResponses
+        ) && (matches!(spec.id, "openai" | "openai-codex") || provider_base_url(spec.id).is_some())
+    })
+}
+
+/// Why a catalog provider cannot be driven, for surfaces that must not offer
+/// a credential dialog which would silently do nothing. `None` means AX can
+/// drive it.
+#[must_use]
+pub fn provider_unsupported_reason(id: &str) -> Option<&'static str> {
+    if provider_supported(id) {
+        return None;
+    }
+    Some(match id {
+        "azure-openai-responses" => {
+            "endpoint is per Azure resource, and AX has no resource configuration"
+        }
+        "cloudflare-ai-gateway" => "endpoint needs an account id and a gateway name in the path",
+        "radius" => "no endpoint and no models in the catalog",
+        "amazon-bedrock" | "anthropic" | "google" | "google-vertex" => {
+            "protocol has no runtime adapter in AX"
+        }
+        "github-copilot" => "hosted OAuth only, with no runtime adapter in AX",
+        "cloudflare-workers-ai" => "CLOUDFLARE_ACCOUNT_ID is not set",
+        _ => "no OpenAI-compatible base URL in the catalog",
     })
 }
 
@@ -308,9 +387,42 @@ impl OpenAiCompatibleConfig {
     }
 }
 
+/// Model ids that name something other than a chat completion. Discovery gets
+/// whatever a vendor lists, and providers ship ASR, TTS, embedding and reranker
+/// entries beside their chat models. Marking those as tool-capable would offer
+/// an agent a model that cannot call a tool.
+///
+/// The markers are the ones the bundled catalog itself uses: every id
+/// containing one of them is `supports_tools: false` there, and no
+/// tool-capable catalog id contains any of them.
+fn supports_tool_calls(id: &str) -> bool {
+    const NON_CHAT: &[&str] = &[
+        "tts",
+        "asr",
+        "speech",
+        "image-generation",
+        "whisper",
+        "embed",
+        "rerank",
+        "voiceclone",
+        "voicedesign",
+        "video",
+    ];
+    let lower = id.to_ascii_lowercase();
+    !NON_CHAT.iter().any(|marker| lower.contains(marker))
+}
+
 pub(crate) fn compatible_model_info(id: String, provider: &str, endpoint: &str) -> ModelInfo {
+    if let Some(mut known) = builtin_models(provider)
+        .into_iter()
+        .find(|item| item.id == id)
+    {
+        known.endpoint = (provider != "deepseek").then(|| endpoint.to_owned());
+        return known;
+    }
     let deepseek = provider == "deepseek";
     let reasoning = deepseek && id.to_ascii_lowercase().contains("reason");
+    let supports_tools = supports_tool_calls(&id);
     ModelInfo {
         display_name: id.clone(),
         id,
@@ -331,7 +443,7 @@ pub(crate) fn compatible_model_info(id: String, provider: &str, endpoint: &str) 
             Vec::new()
         },
         default_reasoning_effort: reasoning.then_some(ReasoningEffort::High),
-        supports_tools: true,
+        supports_tools,
         endpoint: (!deepseek).then(|| endpoint.to_owned()),
     }
 }
@@ -351,6 +463,23 @@ pub fn provider_supports_oauth(id: &str) -> bool {
             | "radius"
             | "xai"
     )
+}
+
+/// Offline bootstrap catalog shipped with AX. These entries are not proof of access.
+#[must_use]
+pub fn builtin_models(provider_id: &str) -> Vec<ModelInfo> {
+    static CATALOG: std::sync::LazyLock<Vec<ModelInfo>> = std::sync::LazyLock::new(|| {
+        serde_json::from_str(include_str!("catalog.json")).expect("valid bundled model catalog")
+    });
+    CATALOG
+        .iter()
+        .filter(|item| item.provider == provider_id && item.supports_tools)
+        .cloned()
+        .map(|mut item| {
+            item.endpoint = provider_chat_endpoint(provider_id);
+            item
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -432,5 +561,173 @@ mod tests {
             128_000,
         );
         assert_eq!(crate::DeepSeekProvider::new(compatible).name(), "groq");
+    }
+
+    /// Regression: Fireworks serves its OpenAI-compatible surface under
+    /// `/inference/v1`. Without the `/v1` segment both paths AX derives from
+    /// the base URL were dead: discovery hit `/inference/models` (404) and
+    /// chat hit `/inference/chat/completions` instead of the documented
+    /// `https://api.fireworks.ai/inference/v1/chat/completions`.
+    #[test]
+    fn fireworks_endpoints_keep_the_v1_segment() {
+        assert_eq!(
+            provider_base_url("fireworks").as_deref(),
+            Some("https://api.fireworks.ai/inference/v1")
+        );
+        assert_eq!(
+            provider_chat_endpoint("fireworks").as_deref(),
+            Some("https://api.fireworks.ai/inference/v1/chat/completions")
+        );
+    }
+
+    /// The catalog lists these providers and their models but `provider_base_url`
+    /// used to return `None` for all of them, so `is_supported_provider` dropped
+    /// them and a saved key silently did nothing. Each URL below is the
+    /// catalog's own endpoint for that provider, verified against the live host.
+    #[test]
+    fn catalog_providers_with_known_endpoints_are_drivable() {
+        for (id, base) in [
+            ("minimax", "https://api.minimax.io/v1"),
+            ("minimax-cn", "https://api.minimax.cn/v1"),
+            ("opencode", "https://opencode.ai/zen/v1"),
+            ("opencode-go", "https://opencode.ai/zen/go/v1"),
+            ("vercel-ai-gateway", "https://ai-gateway.vercel.sh/v1"),
+        ] {
+            assert_eq!(provider_base_url(id).as_deref(), Some(base), "{id}");
+            assert!(provider_supported(id), "{id} should be drivable");
+            assert_eq!(provider_unsupported_reason(id), None, "{id}");
+            assert_eq!(
+                provider_chat_endpoint(id).unwrap(),
+                format!("{base}/chat/completions"),
+                "{id}"
+            );
+        }
+    }
+
+    /// Xiaomi's token-plan regions share model ids with the plain entry, so a
+    /// selection that names a region must reach that region's host — the plain
+    /// `api.xiaomimimo.com` host cannot serve a token-plan key.
+    #[test]
+    fn xiaomi_token_plan_regions_have_their_own_endpoints() {
+        for (id, host) in [
+            (
+                "xiaomi-token-plan-cn",
+                "https://token-plan-cn.xiaomimimo.com",
+            ),
+            (
+                "xiaomi-token-plan-sgp",
+                "https://token-plan-sgp.xiaomimimo.com",
+            ),
+            (
+                "xiaomi-token-plan-ams",
+                "https://token-plan-ams.xiaomimimo.com",
+            ),
+        ] {
+            assert_eq!(
+                provider_chat_endpoint(id).as_deref(),
+                Some(format!("{host}/v1/chat/completions").as_str()),
+                "{id}"
+            );
+            assert!(provider_supported(id), "{id}");
+            assert!(
+                !provider_chat_endpoint("xiaomi")
+                    .unwrap()
+                    .contains(host.trim_start_matches("https://"))
+            );
+        }
+    }
+
+    /// An account-scoped endpoint must read as unsupported while its variable is
+    /// missing, rather than resolving to a URL containing a literal `${...}`.
+    #[test]
+    fn account_scoped_endpoints_require_their_variable() {
+        if std::env::var("CLOUDFLARE_ACCOUNT_ID").is_ok_and(|value| !value.is_empty()) {
+            return;
+        }
+        assert_eq!(provider_base_url("cloudflare-workers-ai"), None);
+        assert!(!provider_supported("cloudflare-workers-ai"));
+        assert_eq!(
+            provider_unsupported_reason("cloudflare-workers-ai"),
+            Some("CLOUDFLARE_ACCOUNT_ID is not set")
+        );
+    }
+
+    #[test]
+    fn environment_placeholders_expand_or_fail_closed() {
+        let expanded = expand_environment("https://x/${PATH}/v1").unwrap();
+        assert!(expanded.starts_with("https://x/"), "{expanded}");
+        assert!(expanded.ends_with("/v1"), "{expanded}");
+        assert!(!expanded.contains("${"), "{expanded}");
+
+        assert_eq!(
+            expand_environment("https://x/${AX_TESTS_UNSET_VAR}/v1"),
+            None
+        );
+        assert_eq!(
+            expand_environment("https://x/v1").as_deref(),
+            Some("https://x/v1")
+        );
+    }
+
+    /// Every provider either yields a request URL or explains why it does not,
+    /// and no excluded provider can be re-enabled by saving a credential.
+    #[test]
+    fn support_and_explanations_cover_the_whole_catalog() {
+        let mut supported = 0;
+        for spec in PROVIDERS {
+            if provider_supported(spec.id) {
+                supported += 1;
+                assert_eq!(
+                    provider_unsupported_reason(spec.id),
+                    None,
+                    "{} is supported",
+                    spec.id
+                );
+                assert!(
+                    matches!(spec.id, "openai" | "openai-codex")
+                        || provider_chat_endpoint(spec.id).is_some(),
+                    "{} is supported but has no endpoint",
+                    spec.id
+                );
+            } else {
+                let reason = provider_unsupported_reason(spec.id)
+                    .unwrap_or_else(|| panic!("{} is unsupported with no reason", spec.id));
+                assert!(!reason.is_empty(), "{}", spec.id);
+            }
+        }
+        assert_eq!(
+            supported,
+            PROVIDERS.len() - 9 + account_scoped_available(),
+            "the unsupported set changed; update provider_unsupported_reason"
+        );
+    }
+
+    /// Discovery used to label every remote model as tool-capable, so an ASR or
+    /// TTS entry was offered to the agent as if it could call a tool. The
+    /// examples below are catalog entries whose own `supports_tools` flag
+    /// agrees with this rule from both directions.
+    #[test]
+    fn discovered_non_chat_models_are_not_tool_capable() {
+        const ENDPOINT: &str = "https://example.test/v1/chat/completions";
+        for id in [
+            "mimo-v2-tts",
+            "mimo-v2.5-tts-voiceclone",
+            "voyage/rerank-2.5",
+            "text-embedding-3-large",
+            "grok-imagine-video",
+        ] {
+            let info = compatible_model_info(id.to_owned(), "xiaomi", ENDPOINT);
+            assert!(!info.supports_tools, "{id} should not be tool-capable");
+        }
+        for id in ["mimo-v2.5", "glm-4.6v", "grok-4.5"] {
+            let info = compatible_model_info(id.to_owned(), "xiaomi", ENDPOINT);
+            assert!(info.supports_tools, "{id} should stay tool-capable");
+        }
+    }
+
+    /// `cloudflare-workers-ai` joins the supported set only once its account
+    /// variable is present, so the expected count depends on the environment.
+    fn account_scoped_available() -> usize {
+        usize::from(std::env::var("CLOUDFLARE_ACCOUNT_ID").is_ok_and(|value| !value.is_empty()))
     }
 }

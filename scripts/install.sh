@@ -7,9 +7,12 @@
 # Environment:
 #   AX_VERSION       release tag to install (default: latest, e.g. v0.1.0)
 #   AX_INSTALL_DIR   install directory (default: ~/.local/bin)
+#   AX_HOME          AX state directory (default: ~/.ax)
 #
 # The downloaded archive is verified against the release's SHA256SUMS before
-# anything is written to disk.
+# anything is written to disk. The archive also carries the bundled skill
+# packages and an example MCP config, which are placed in AX_HOME. Existing
+# skills and an existing mcp.toml are never overwritten.
 
 set -eu
 
@@ -90,6 +93,40 @@ fi
 tar -xzf "${tmp_dir}/ax.tar.gz" -C "${tmp_dir}"
 install -m 0755 "${tmp_dir}/ax" "${install_dir}/ax"
 echo "AX: installed to ${install_dir}/ax"
+
+# --- bundled skills and MCP template -------------------------------------------
+# The archive ships the repository's skill packages and an example MCP config.
+# Skill packages that already exist are left untouched so local edits survive an
+# upgrade; the MCP template is only written when no config exists yet, and every
+# server in it is disabled so nothing tries to launch a missing command.
+ax_home="${AX_HOME:-${HOME}/.ax}"
+
+if [ -d "${tmp_dir}/skills" ]; then
+    skills_dir="${ax_home}/skills"
+    mkdir -p "${skills_dir}"
+    for bundle in "${tmp_dir}"/skills/*/; do
+        [ -d "${bundle}" ] || continue
+        name="$(basename "${bundle}")"
+        if [ -e "${skills_dir}/${name}" ]; then
+            echo "AX: keeping existing skill ${name}"
+        else
+            mkdir -p "${skills_dir}/${name}"
+            cp -R "${bundle}." "${skills_dir}/${name}/"
+            echo "AX: installed skill ${name} to ${skills_dir}/${name}"
+        fi
+    done
+fi
+
+if [ -f "${tmp_dir}/mcp.example.toml" ]; then
+    mcp_config="${ax_home}/mcp.toml"
+    if [ -e "${mcp_config}" ]; then
+        echo "AX: keeping existing MCP config ${mcp_config}"
+    else
+        mkdir -p "${ax_home}"
+        cp "${tmp_dir}/mcp.example.toml" "${mcp_config}"
+        echo "AX: wrote example MCP config to ${mcp_config} (all servers disabled)"
+    fi
+fi
 
 # --- PATH hint -----------------------------------------------------------------
 case ":${PATH}:" in

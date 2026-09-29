@@ -604,10 +604,42 @@ pub(super) async fn run_tui(
                         .data_dir
                         .clone();
                     let refresh_codex_auth = selection.codex_auth.clone();
+                    let tx = login_tx.clone();
                     tokio::spawn(async move {
+                        // Same reasoning as the API-key path: discover the
+                        // provider that was just authorized and say what
+                        // happened, instead of silently writing no cache.
+                        let report = |message: String| {
+                            let _ = tx.send(commands::LoginUpdate::Notice(message));
+                        };
+                        match catalog_refresh::refresh_provider(
+                            &refresh_data_dir,
+                            refresh_codex_auth.clone(),
+                            "openai-codex",
+                        )
+                        .await
+                        {
+                            Some(catalog) if catalog.models.is_empty() => report(format!(
+                                "openai-codex: no models discovered — {}",
+                                catalog
+                                    .warning
+                                    .unwrap_or_else(|| "empty catalog".to_owned())
+                            )),
+                            Some(catalog) => report(format!(
+                                "openai-codex: discovered {} model(s), cached for the model picker",
+                                catalog.models.len()
+                            )),
+                            None => report(
+                                "openai-codex: credential stored, but credentials could not be resolved for discovery"
+                                    .to_owned(),
+                            ),
+                        }
                         catalog_refresh::refresh_catalogs(refresh_data_dir, refresh_codex_auth)
                             .await;
                     });
+                }
+                commands::LoginUpdate::Notice(message) => {
+                    app.push(TranscriptKind::Status, message);
                 }
                 commands::LoginUpdate::Failed(error) => {
                     app.push(

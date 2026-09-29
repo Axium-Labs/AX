@@ -9,6 +9,7 @@ design decisions that shaped the code are recorded as ADRs in
 | Document | Topic |
 |---|---|
 | [architecture.md](architecture.md) | System architecture: crate responsibilities, agent loop, cold-start path |
+| [acp-crew.md](acp-crew.md) | ACP adapter and AX Crew device bridge |
 | [memory.md](memory.md) | Memory: scopes, project identity, retrieval, persistence |
 | [context.md](context.md) | Context budgeting, compression, session resume |
 | [storage.md](storage.md) | Storage: SQLite schema, JSONL event streams, data directories, migration |

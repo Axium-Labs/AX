@@ -11,7 +11,7 @@ service to sign up for, no remote telemetry.
 
 - **Rust native** — one binary, no runtime, no Node, no Docker.
 - **Fast startup** — providers, skills, MCP servers and memory load on demand.
-- **Standard skills and focused tools** — Agent Skills `SKILL.md` packages with lazy instructions and optional resources, read-only web search/fetch, LSP through configurable MCP servers, and native image input on supported vision models.
+- **Standard skills and focused tools** — Agent Skills `SKILL.md` packages with lazy instructions and optional resources, read-only web search/fetch that batches concurrent queries and page fetches and deduplicates their results, LSP through configurable MCP servers, and native image input on supported vision models.
 - **Small binary** — a compact workspace of focused crates, not a framework.
 - **Simple workflow** — type, get an answer, switch models, move on.
 - **Local-first** — everything lives in `~/.ax` and your project's `.ax`.
@@ -78,9 +78,12 @@ Both installers accept two environment variables:
 
 To update the executable you are currently running to the latest GitHub
 Release, run `ax --update`. AX checks the release version, verifies the
-download against `SHA256SUMS`, and replaces only that executable. On Windows,
+download against `SHA256SUMS`, and replaces that executable; it also refreshes
+the bundled payload from the same archive, installing any missing skill package
+into `~/.ax/skills` and writing `~/.ax/mcp.toml` only when no config exists
+yet (existing skills and configs are left alone). On Windows,
 the verified update is scheduled for replacement after the command exits;
-restart AX before using the new version. The command does not change your
+restart AX before using the new version. The command does not otherwise change your
 `~/.ax` user data or
 any project's `.ax` directory. If you installed a separate copy using
 `AX_INSTALL_DIR`, run that copy's `ax --update` to update it. A push to `main`
@@ -157,6 +160,15 @@ ax --provider openai-codex --model <model-id>
 ax run "explain this repo" --provider deepseek
 ```
 
+`--provider` takes a provider id from the catalog, not only the `deepseek` /
+`openai` / `codex` / `compatible` aliases. Name the id whenever a vendor is
+listed more than once — Xiaomi's plain entry and its CN/SGP/AMS token-plan
+regions share model ids but not endpoints:
+
+```bash
+ax run "explain this repo" --provider xiaomi-token-plan-cn --model mimo-v2.5
+```
+
 ## Usage
 
 Start the UI (default):
@@ -176,6 +188,10 @@ Run independent tasks with bounded concurrency:
 ```bash
 ax agents "review pr #12" "write changelog" --concurrency 2
 ```
+
+To expose AX's existing runtime to an ACP client, run `ax acp`. To connect this
+machine to an AX Crew backend, run `ax crew pair <code> --gateway <https-url>`
+once, then `ax crew connect <https-url>`. See [ACP and Crew integration](docs/acp-crew.md).
 
 ## Design
 

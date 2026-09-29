@@ -1,0 +1,12 @@
+[package]
+name = "lexical"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+unicode-normalization = "0.1"
+
+[lints]
+workspace = true

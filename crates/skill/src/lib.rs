@@ -10,10 +10,30 @@ use std::{
 use serde::Deserialize;
 use thiserror::Error;
 
+pub use lexical::{LexicalFeatures, MAX_FEATURE_CHARS};
+
 const STANDARD: &str = "SKILL.md";
 const LEGACY_MANIFEST: &str = "skill.toml";
 const LEGACY_BODY: &str = "instructions.md";
 const MAX_FRONTMATTER_BYTES: usize = 64_000;
+
+/// Confidence at or above which a routed skill body is loaded automatically.
+///
+/// Calibrated against a mixed-language fixture set: the strongest unrelated
+/// input ("Summarize this code" sharing one common word) scores 0.29, while
+/// the weakest input that should inject ("please review my changes") scores
+/// 0.47. Everything in between stays a candidate for the metadata catalog.
+pub const AUTO_ROUTE_THRESHOLD: f64 = 0.40;
+/// Confidence a skill needs to be reported as a candidate at all. Unrelated
+/// English prose tops out near 0.11, so this keeps incidental n-gram overlap
+/// out while still ranking partial cross-script matches.
+pub const CANDIDATE_THRESHOLD: f64 = 0.12;
+/// Weight of the skill name in the combined score; the description carries
+/// the rest. Names are short, so n-gram-similar names alone stay below the
+/// automatic threshold.
+const NAME_WEIGHT: f64 = 0.40;
+/// Weight of the skill description in the combined score.
+const DESCRIPTION_WEIGHT: f64 = 0.60;
 
 #[derive(Debug, Error)]
 pub enum SkillError {
@@ -80,10 +100,11 @@ impl SkillStatus {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct SkillMatch {
     pub name: String,
-    pub score: usize,
+    /// Normalized routing confidence in `0.0..=1.0`.
+    pub score: f64,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -114,6 +135,23 @@ struct IndexedSkill {
     metadata: SkillMetadata,
     directory: PathBuf,
     standard: bool,
+    /// Precomputed once at index time; routing never re-derives these.
+    name_features: LexicalFeatures,
+    description_features: LexicalFeatures,
+}
+
+impl IndexedSkill {
+    /// Confidence that this skill answers `query`, in `0.0..=1.0`.
+    ///
+    /// The name and description are two independent statements about the same
+    /// skill, so they are combined rather than compared separately.
+    fn score(&self, query: &LexicalFeatures) -> f64 {
+        let name = self.name_features.similarity(query);
+        let description = self.description_features.similarity(query);
+        NAME_WEIGHT
+            .mul_add(name, DESCRIPTION_WEIGHT * description)
+            .min(1.0)
+    }
 }
 
 #[derive(Debug, Default)]
@@ -229,10 +267,14 @@ impl SkillCatalog {
         } else {
             return Ok(None);
         };
+        let name_features = LexicalFeatures::from_text(&metadata.name);
+        let description_features = LexicalFeatures::from_text(&metadata.description);
         Ok(Some(IndexedSkill {
             metadata,
             directory: directory.to_owned(),
             standard,
+            name_features,
+            description_features,
         }))
     }
 
@@ -283,7 +325,10 @@ impl SkillCatalog {
             .collect()
     }
 
-    /// Rank by name and description. Legacy triggers and allowed-tools do not affect routing.
+    /// Ranks skills by language-independent lexical similarity. Explicitly
+    /// naming a skill always scores `1.0`; legacy triggers and allowed-tools
+    /// never affect routing. Candidates below [`CANDIDATE_THRESHOLD`] are
+    /// dropped so the caller can fall back to the metadata catalog.
     #[must_use]
     pub fn route_candidates<'a>(
         &self,
@@ -291,8 +336,10 @@ impl SkillCatalog {
         available_tools: impl IntoIterator<Item = &'a str>,
     ) -> Vec<SkillMatch> {
         let available = available_tools.into_iter().collect::<HashSet<_>>();
-        let input_terms = terms(input);
-        let lowered_input = input.to_lowercase();
+        let query = LexicalFeatures::from_text(input);
+        // The explicit-name check shares the normalization of the features, so
+        // a full-width or differently cased name still counts as explicit.
+        let normalized_input = lexical::normalize(input);
         let mut matches = self
             .skills
             .values()
@@ -305,55 +352,39 @@ impl SkillCatalog {
             })
             .filter_map(|skill| {
                 let name = &skill.metadata.name;
-                let name_overlap = terms(name).intersection(&input_terms).count();
-                let description_overlap = terms(&skill.metadata.description)
-                    .intersection(&input_terms)
-                    .count();
-                let explicit_name = mentions_name(&lowered_input, name);
-                let score =
-                    usize::from(explicit_name) * 12 + name_overlap * 5 + description_overlap * 2;
-                (explicit_name || name_overlap > 0 || description_overlap >= 2).then(|| {
-                    SkillMatch {
-                        name: name.clone(),
-                        score,
-                    }
+                let score = if mentions_name(&normalized_input, name) {
+                    1.0
+                } else {
+                    skill.score(&query)
+                };
+                (score >= CANDIDATE_THRESHOLD).then(|| SkillMatch {
+                    name: name.clone(),
+                    score,
                 })
             })
             .collect::<Vec<_>>();
-        matches.sort_by(|a, b| b.score.cmp(&a.score).then_with(|| a.name.cmp(&b.name)));
+        matches.sort_by(|a, b| {
+            b.score
+                .total_cmp(&a.score)
+                .then_with(|| a.name.cmp(&b.name))
+        });
         matches
     }
 
-    /// Restrict automatic body loading to explicit names or strong metadata
-    /// matches. Weaker candidates remain visible in the metadata catalog.
+    /// Restricts automatic body loading to explicit names or high-confidence
+    /// similarity. Weaker candidates remain visible in the metadata catalog.
     #[must_use]
     pub fn auto_route_candidates<'a>(
         &self,
         input: &str,
         available_tools: impl IntoIterator<Item = &'a str>,
     ) -> Vec<SkillMatch> {
-        let input_terms = terms(input);
-        let lowered_input = input.to_lowercase();
         self.route_candidates(input, available_tools)
             .into_iter()
-            .filter(|matched| {
-                let Some(skill) = self.skills.get(&matched.name) else {
-                    return false;
-                };
-                let name_overlap = terms(&skill.metadata.name)
-                    .intersection(&input_terms)
-                    .count();
-                let description_overlap = terms(&skill.metadata.description)
-                    .intersection(&input_terms)
-                    .count();
-                mentions_name(&lowered_input, &skill.metadata.name)
-                    || description_overlap >= 3
-                    || (name_overlap > 0 && description_overlap >= 2)
-                    || ((2..=3).contains(&input_terms.len())
-                        && description_overlap == input_terms.len())
-            })
+            .filter(|matched| matched.score >= AUTO_ROUTE_THRESHOLD)
             .collect()
     }
+
     #[must_use]
     pub fn route<'a>(
         &self,
@@ -815,26 +846,9 @@ fn validate_standard_metadata(
     Ok(())
 }
 
-fn terms(input: &str) -> HashSet<String> {
-    const STOP: &[&str] = &[
-        "a", "an", "and", "the", "to", "for", "of", "on", "in", "or", "with", "when", "use",
-        "using", "this", "that", "from", "into", "can", "is", "are", "do", "does", "user", "users",
-        "skill", "please", "could", "would", "you", "me", "my",
-    ];
-    input
-        .to_lowercase()
-        .split(|c: char| !c.is_alphanumeric())
-        .filter_map(|word| {
-            let stem = if word.len() > 5 && word.ends_with("ing") {
-                word.trim_end_matches("ing")
-            } else {
-                word.trim_end_matches('s')
-            };
-            (stem.chars().count() >= 2 && !STOP.contains(&stem)).then(|| stem.to_owned())
-        })
-        .collect()
-}
-
+/// Whether `input` names the skill explicitly. The only routing rule that is
+/// not a similarity score, and it stays language-independent: the check is a
+/// character-boundary match on the name itself.
 fn mentions_name(input: &str, name: &str) -> bool {
     input.match_indices(name).any(|(start, _)| {
         let before = input[..start].chars().next_back();

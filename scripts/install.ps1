@@ -6,10 +6,13 @@
 # Environment:
 #   AX_VERSION       release tag to install (default: latest, e.g. v0.1.0)
 #   AX_INSTALL_DIR   install directory (default: $env:LOCALAPPDATA\Programs\AX\bin)
+#   AX_HOME          AX state directory (default: $env:USERPROFILE\.ax)
 #
 # The downloaded archive is verified against the release's SHA256SUMS before
 # anything is written to disk. The install directory is added to the current
-# user's PATH only if it is not already there.
+# user's PATH only if it is not already there. The archive also carries the
+# bundled skill packages and an example MCP config, which are placed in
+# AX_HOME; existing skills and an existing mcp.toml are never overwritten.
 
 $ErrorActionPreference = "Stop"
 
@@ -86,6 +89,42 @@ try {
     Expand-Archive -Path $zipPath -DestinationPath $tmpDir -Force
     Copy-Item -Path (Join-Path $tmpDir "ax.exe") -Destination $axPath -Force
     Write-Host "AX: installed to $axPath"
+
+    # --- bundled skills and MCP template --------------------------------------------
+    # The archive ships the repository's skill packages and an example MCP config.
+    # Skill packages that already exist are left untouched so local edits survive an
+    # upgrade; the MCP template is only written when no config exists yet, and every
+    # server in it is disabled so nothing tries to launch a missing command.
+    $axHome = if ($env:AX_HOME) { $env:AX_HOME } else { Join-Path $env:USERPROFILE ".ax" }
+
+    $bundledSkills = Join-Path $tmpDir "skills"
+    if (Test-Path -Path $bundledSkills) {
+        $skillsDir = Join-Path $axHome "skills"
+        New-Item -ItemType Directory -Force -Path $skillsDir | Out-Null
+        Get-ChildItem -Path $bundledSkills -Directory | ForEach-Object {
+            $target = Join-Path $skillsDir $_.Name
+            if (Test-Path -Path $target) {
+                Write-Host "AX: keeping existing skill $($_.Name)"
+            }
+            else {
+                Copy-Item -Path $_.FullName -Destination $target -Recurse
+                Write-Host "AX: installed skill $($_.Name) to $target"
+            }
+        }
+    }
+
+    $bundledConfig = Join-Path $tmpDir "mcp.example.toml"
+    if (Test-Path -Path $bundledConfig) {
+        $mcpConfig = Join-Path $axHome "mcp.toml"
+        if (Test-Path -Path $mcpConfig) {
+            Write-Host "AX: keeping existing MCP config $mcpConfig"
+        }
+        else {
+            New-Item -ItemType Directory -Force -Path $axHome | Out-Null
+            Copy-Item -Path $bundledConfig -Destination $mcpConfig
+            Write-Host "AX: wrote example MCP config to $mcpConfig (all servers disabled)"
+        }
+    }
 }
 finally {
     Remove-Item -Recurse -Force $tmpDir -ErrorAction SilentlyContinue

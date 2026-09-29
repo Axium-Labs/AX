@@ -39,6 +39,10 @@ pub fn record(label: &str, elapsed: Duration) {
         entry.max_micros = entry.max_micros.max(elapsed.as_micros());
     }
 }
+/// Counts an event that has no meaningful latency, such as a failed request.
+pub fn increment(label: &str) {
+    record(label, Duration::ZERO);
+}
 pub fn snapshot() -> BTreeMap<String, Metric> {
     METRICS
         .get_or_init(|| Mutex::new(BTreeMap::new()))

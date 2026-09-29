@@ -20,8 +20,8 @@ use std::{
 };
 
 use model::{
-    AuthStorage, ModelInfo, ModelRegistry, OpenAiCompatibleConfig, OpenAiCompatibleProvider,
-    OpenAiConfig, OpenAiProvider, ProviderProtocol,
+    AuthStorage, ModelCatalog, ModelInfo, ModelRegistry, OpenAiCompatibleConfig,
+    OpenAiCompatibleProvider, OpenAiConfig, OpenAiProvider, ProviderProtocol,
 };
 
 /// Overall deadline for a full catalog refresh, mirroring pi's 15s timeout.
@@ -35,8 +35,26 @@ pub struct CatalogRefreshResult {
 }
 
 struct SharedRefresh {
+    /// Configured providers this refresh was built from.
+    ///
+    /// A refresh only ever discovers the providers that were configured when it
+    /// started. A caller that needs a provider missing from this list must not
+    /// join it: that is exactly what made a freshly stored API key produce no
+    /// cache file — the post-login refresh joined a refresh that had started
+    /// before the credential existed.
+    providers: Vec<String>,
     notify: tokio::sync::Notify,
     outcome: Mutex<Option<Arc<CatalogRefreshResult>>>,
+}
+
+impl SharedRefresh {
+    /// Whether an in-flight refresh already discovers everything `needed`
+    /// wants. Anything else must start its own refresh instead of joining.
+    fn covers(&self, needed: &[String]) -> bool {
+        needed
+            .iter()
+            .all(|provider| self.providers.contains(provider))
+    }
 }
 
 /// In-flight refreshes keyed by data directory.
@@ -45,22 +63,29 @@ static ACTIVE: LazyLock<Mutex<HashMap<String, Arc<SharedRefresh>>>> =
 
 /// Start or join a full catalog refresh for `data_dir`.
 ///
-/// Callers share the in-flight refresh for the same data directory; each
-/// caller waits on the same result bounded by [`REFRESH_TIMEOUT`]. On timeout
-/// the cached snapshot is returned so the UI keeps working with local data.
+/// Callers share the in-flight refresh for the same data directory *only when
+/// it already covers every provider they need*; each caller waits on the same
+/// result bounded by [`REFRESH_TIMEOUT`]. On timeout the cached snapshot is
+/// returned so the UI keeps working with local data.
 pub async fn refresh_catalogs(
     data_dir: PathBuf,
     codex_auth: Option<PathBuf>,
 ) -> Arc<CatalogRefreshResult> {
     let key = data_dir.to_string_lossy().into_owned();
+    let needed = configured_providers(&data_dir, codex_auth.as_ref());
     let shared = {
         let mut active = ACTIVE
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(existing) = active.get(&key) {
-            Arc::clone(existing)
+        let joinable = active
+            .get(&key)
+            .filter(|existing| existing.covers(&needed))
+            .map(Arc::clone);
+        if let Some(existing) = joinable {
+            existing
         } else {
             let shared = Arc::new(SharedRefresh {
+                providers: needed,
                 notify: tokio::sync::Notify::new(),
                 outcome: Mutex::new(None),
             });
@@ -103,11 +128,77 @@ fn spawn_refresh(
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::clone(&outcome));
         shared.notify.notify_waiters();
-        ACTIVE
+        // A newer refresh may have replaced this entry while this one ran (a
+        // credential stored mid-flight makes the next caller start its own);
+        // only retire the entry when it is still ours.
+        let mut active = ACTIVE
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(&key);
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if active
+            .get(&key)
+            .is_some_and(|current| Arc::ptr_eq(current, &shared))
+        {
+            active.remove(&key);
+        }
     });
+}
+
+/// Discovers and caches a single provider's catalog.
+///
+/// Called immediately after a credential is stored. [`refresh_catalogs`] cannot
+/// be relied on for that: it refreshes the providers that were configured when
+/// it started, so a key saved while a refresh was already in flight (or right
+/// before the process exits) used to leave `~/.ax/models/<provider>.json`
+/// missing even though the login itself succeeded.
+///
+/// Returns `None` when the provider is not configured or has no usable
+/// adapter. A returned catalog always reflects AX's own cache write, so a
+/// `models` list that is empty means discovery failed and `warning` says why.
+pub async fn refresh_provider(
+    data_dir: &Path,
+    codex_auth: Option<PathBuf>,
+    provider_id: &str,
+) -> Option<ModelCatalog> {
+    let registry = ModelRegistry::new(crate::ax_models_dir());
+    let auth = AuthStorage::new(crate::ax_auth_path());
+    // Refuse to probe a provider that has no usable credential: discovery would
+    // fail with an authentication error that hides the real problem.
+    if !configured_providers(data_dir, codex_auth.as_ref())
+        .iter()
+        .any(|provider| provider == provider_id)
+    {
+        return None;
+    }
+    if provider_id == "openai-codex" {
+        let provider = codex_provider(&auth, codex_auth, None)?;
+        return Some(registry.discover(&provider).await);
+    }
+    if provider_id == "deepseek" {
+        let key = auth
+            .resolve_api_key("deepseek", "DEEPSEEK_API_KEY")
+            .ok()
+            .flatten()?;
+        return Some(
+            registry
+                .discover(&OpenAiCompatibleProvider::new(
+                    model::deepseek_compatible_config(None, key),
+                ))
+                .await,
+        );
+    }
+    if provider_id == "openai" {
+        let key = auth
+            .resolve_api_key("openai", "OPENAI_API_KEY")
+            .ok()
+            .flatten()?;
+        return Some(
+            registry
+                .discover(&OpenAiProvider::new(OpenAiConfig::from_api_key(None, key)))
+                .await,
+        );
+    }
+    let provider = compatible_provider(&auth, provider_id)?;
+    Some(registry.discover(&provider).await)
 }
 
 /// Providers AX considers configured for the picker. Delegates to
@@ -301,6 +392,7 @@ fn compatible_provider(auth: &AuthStorage, provider_id: &str) -> Option<OpenAiCo
 }
 
 fn sort_models(models: &mut Vec<ModelInfo>) {
+    models.retain(|item| item.supports_tools);
     models.sort_by(|a, b| a.provider.cmp(&b.provider).then(a.id.cmp(&b.id)));
     models.dedup_by(|a, b| a.provider == b.provider && a.id == b.id);
 }
@@ -315,6 +407,20 @@ mod tests {
     use std::fs;
 
     use super::*;
+
+    #[test]
+    fn refresh_that_predates_a_credential_is_not_joined() {
+        let shared = SharedRefresh {
+            providers: vec!["deepseek".to_owned()],
+            notify: tokio::sync::Notify::new(),
+            outcome: Mutex::new(None),
+        };
+        // The exact case that left `<provider>.json` missing after a login:
+        // a refresh already in flight had been built without the new provider.
+        assert!(shared.covers(&["deepseek".to_owned()]));
+        assert!(!shared.covers(&["deepseek".to_owned(), "minimax".to_owned()]));
+        assert!(!shared.covers(&["minimax".to_owned()]));
+    }
 
     #[test]
     fn explicit_codex_auth_is_available_without_ax_auth_entry() {

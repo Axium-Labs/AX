@@ -189,22 +189,23 @@ impl ModelProvider for OpenAiCompatibleProvider {
     }
 
     async fn complete(&self, request: ModelRequest) -> Result<ModelResponse, ModelError> {
-        let response = self
-            .client
-            .post(&self.config.endpoint)
-            .bearer_auth(&self.config.api_key)
-            .json(&ChatRequest {
-                model: &self.config.model,
-                messages: chat_messages(&request.messages),
-                tools: &request.tools,
-                stream: false,
-                reasoning_effort: self.config.reasoning_effort,
-            })
-            .send()
-            .await?
-            .error_for_status()?
-            .json::<ChatResponse>()
-            .await?;
+        let response = ensure_success(
+            self.client
+                .post(&self.config.endpoint)
+                .bearer_auth(&self.config.api_key)
+                .json(&ChatRequest {
+                    model: &self.config.model,
+                    messages: chat_messages(&request.messages),
+                    tools: &request.tools,
+                    stream: false,
+                    reasoning_effort: self.config.reasoning_effort,
+                })
+                .send()
+                .await?,
+        )
+        .await?
+        .json::<ChatResponse>()
+        .await?;
 
         let choice = response.choices.into_iter().next().ok_or_else(|| {
             ModelError::InvalidResponse("response contains no choices".to_owned())
@@ -222,20 +223,21 @@ impl ModelProvider for OpenAiCompatibleProvider {
         on_delta: &mut (dyn FnMut(String) + Send),
         on_thinking: &mut (dyn FnMut(String) + Send),
     ) -> Result<ModelResponse, ModelError> {
-        let response = self
-            .client
-            .post(&self.config.endpoint)
-            .bearer_auth(&self.config.api_key)
-            .json(&ChatRequest {
-                model: &self.config.model,
-                messages: chat_messages(&request.messages),
-                tools: &request.tools,
-                stream: true,
-                reasoning_effort: self.config.reasoning_effort,
-            })
-            .send()
-            .await?
-            .error_for_status()?;
+        let response = ensure_success(
+            self.client
+                .post(&self.config.endpoint)
+                .bearer_auth(&self.config.api_key)
+                .json(&ChatRequest {
+                    model: &self.config.model,
+                    messages: chat_messages(&request.messages),
+                    tools: &request.tools,
+                    stream: true,
+                    reasoning_effort: self.config.reasoning_effort,
+                })
+                .send()
+                .await?,
+        )
+        .await?;
         let mut stream = response.bytes_stream();
         let mut buffer = Vec::new();
         let mut content = String::new();
@@ -292,16 +294,17 @@ impl ModelProvider for OpenAiCompatibleProvider {
             .trim_end_matches('/')
             .to_owned()
             + "/models";
-        let response = self
-            .client
-            .get(endpoint)
-            .timeout(Duration::from_secs(10))
-            .bearer_auth(&self.config.api_key)
-            .send()
-            .await?
-            .error_for_status()?
-            .json::<ModelsResponse>()
-            .await?;
+        let response = ensure_success(
+            self.client
+                .get(endpoint)
+                .timeout(Duration::from_secs(10))
+                .bearer_auth(&self.config.api_key)
+                .send()
+                .await?,
+        )
+        .await?
+        .json::<ModelsResponse>()
+        .await?;
         Ok(response
             .data
             .into_iter()
@@ -316,8 +319,39 @@ impl ModelProvider for OpenAiCompatibleProvider {
     }
 
     fn fallback_models(&self) -> Vec<ModelInfo> {
-        Vec::new()
+        crate::builtin_models(&self.config.provider_id)
     }
+}
+
+/// Replaces `error_for_status`, which throws the response body away.
+///
+/// A vendor's own message is the only thing that separates "invalid key" from
+/// "insufficient balance" or "model not found", and it is what the CLI, the
+/// TUI and Crew show the user, so it has to survive the error path.
+async fn ensure_success(response: reqwest::Response) -> Result<reqwest::Response, ModelError> {
+    if response.status().is_success() {
+        return Ok(response);
+    }
+    let status = response.status();
+    let body = response.text().await.unwrap_or_default();
+    Err(ModelError::HttpStatus {
+        status: status.as_u16(),
+        message: summarize_error_body(&body),
+    })
+}
+
+fn summarize_error_body(body: &str) -> String {
+    const LIMIT: usize = 400;
+    let trimmed = body.trim();
+    if trimmed.is_empty() {
+        return "response had no body".to_owned();
+    }
+    if trimmed.chars().count() <= LIMIT {
+        return trimmed.to_owned();
+    }
+    let mut summary: String = trimmed.chars().take(LIMIT).collect();
+    summary.push('…');
+    summary
 }
 
 fn find_event_end(buffer: &[u8]) -> Option<(usize, usize)> {
@@ -390,6 +424,26 @@ fn process_event(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `error_for_status` used to discard the body, so a vendor's own
+    /// explanation never reached the user. Keep it, and keep it bounded.
+    #[test]
+    fn vendor_error_bodies_survive_and_stay_bounded() {
+        assert_eq!(summarize_error_body("   "), "response had no body");
+        assert_eq!(
+            summarize_error_body(r#"{"error":{"message":"insufficient balance"}}"#),
+            r#"{"error":{"message":"insufficient balance"}}"#
+        );
+
+        let long = "x".repeat(1_000);
+        let summary = summarize_error_body(&long);
+        assert_eq!(
+            summary.chars().count(),
+            401,
+            "should cap at 400 plus ellipsis"
+        );
+        assert!(summary.ends_with('…'));
+    }
 
     #[test]
     fn combines_streamed_text_and_tool_arguments() {

@@ -1,6 +1,6 @@
 use skill::{
-    ResourceKind, SkillCatalog, create_skill_directory, install_skill_directory,
-    validate_skill_directory,
+    AUTO_ROUTE_THRESHOLD, ResourceKind, SkillCatalog, create_skill_directory,
+    install_skill_directory, validate_skill_directory,
 };
 use std::{
     fs,
@@ -120,6 +120,90 @@ fn description_routes_without_private_triggers() {
     assert_eq!(
         catalog.auto_route_candidates("Use code-review", [])[0].name,
         "code-review"
+    );
+}
+
+#[test]
+fn routes_across_scripts_with_one_language_independent_metric() {
+    let fixture = Fixture::new();
+    fixture.skill("code-review", "---\nname: code-review\ndescription: Review diffs and commits for regressions when inspecting modified code.\n---\nBody.");
+    fixture.skill("web-research", "---\nname: web-research\ndescription: Fast web research for current facts, comparisons, documentation, news, and source-backed answers.\n---\nBody.");
+    fixture.skill("spec-review", "---\nname: spec-review\ndescription: 代码评审：检查变更与提交，发现回归，给出改进建议。\n---\nBody.");
+    fixture.skill("doc-shadow", "---\nname: doc-shadow\ndescription: 文档图像阴影去除：处理扫描件阴影，提升 OCR 识别质量。\n---\nBody.");
+    fixture.skill(
+        "video-cut",
+        "---\nname: video-cut\ndescription: 長文動画の自動切り抜きと字幕生成を行う。\n---\nBody.",
+    );
+    let catalog = SkillCatalog::index(&fixture.0).unwrap();
+
+    // English, mixed, Chinese, Japanese and full-width input all rank through
+    // the same normalized similarity, with no per-language rules.
+    for (input, expected) in [
+        ("Inspect modified code for regressions", "code-review"),
+        ("review the diff and check for regressions", "code-review"),
+        ("research the latest rust release notes", "web-research"),
+        ("review 这份 spec 的 diff", "code-review"),
+        ("代码评审", "spec-review"),
+        ("ＣＯＤＥ　ＲＥＶＩＥＷ", "code-review"),
+    ] {
+        let auto = catalog.auto_route_candidates(input, []);
+        assert_eq!(
+            auto.first().map(|matched| matched.name.as_str()),
+            Some(expected),
+            "auto route for {input:?}: {auto:?}"
+        );
+        assert!(auto[0].score >= AUTO_ROUTE_THRESHOLD);
+        assert!(auto[0].score <= 1.0);
+    }
+
+    // Partial cross-script matches stay ranked candidates instead of
+    // injecting a body the model did not ask for.
+    for (input, expected) in [
+        ("長文の動画を切り抜きたい", "video-cut"),
+        ("文档阴影去除怎么做", "doc-shadow"),
+    ] {
+        assert_eq!(
+            catalog.route(input, []).map(|matched| matched.name),
+            Some(expected.to_owned()),
+            "candidate ranking for {input:?}"
+        );
+        assert!(
+            catalog.auto_route_candidates(input, []).is_empty(),
+            "{input:?} must not inject"
+        );
+    }
+
+    // Naming a skill is the one non-similarity rule, and it also works when
+    // the name is surrounded by another script.
+    let named = catalog.auto_route_candidates("帮我用 code-review 检查一下", []);
+    assert_eq!(named[0].name, "code-review");
+    assert!((named[0].score - 1.0).abs() < 1e-9, "{}", named[0].score);
+    let full_width = catalog.auto_route_candidates("用　ＣＯＤＥ－ＲＥＶＩＥＷ　看看", []);
+    assert_eq!(full_width[0].name, "code-review");
+    assert!(
+        (full_width[0].score - 1.0).abs() < 1e-9,
+        "{}",
+        full_width[0].score
+    );
+
+    // Unrelated input and a lexically close but unintended request stay quiet.
+    for input in [
+        "What time is it?",
+        "把 k8s 部署到生产环境",
+        "Write a haiku about rain",
+    ] {
+        assert!(catalog.route(input, []).is_none(), "{input:?} matched");
+        assert!(catalog.auto_route_candidates(input, []).is_empty());
+    }
+    assert!(
+        catalog
+            .auto_route_candidates("Summarize this code", [])
+            .is_empty()
+    );
+    assert!(
+        catalog
+            .auto_route_candidates("encoding format", [])
+            .is_empty()
     );
 }
 
@@ -253,9 +337,15 @@ fn creator_emits_valid_standard_package_and_rejects_invalid_names() {
 fn bundled_creator_and_installer_describe_standard_output() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../skills");
     let catalog = SkillCatalog::index(root).unwrap();
-    assert_eq!(catalog.len(), 4);
+    assert_eq!(catalog.len(), 5);
     assert!(catalog.issues().is_empty());
-    for name in ["coding", "code-review", "skill-creator", "skill-installer"] {
+    for name in [
+        "coding",
+        "code-review",
+        "skill-creator",
+        "skill-installer",
+        "web-research",
+    ] {
         validate_skill_directory(catalog.directory(name).unwrap()).unwrap();
     }
     let creator = catalog.load("skill-creator").unwrap().instructions;

@@ -5,7 +5,9 @@
 
 pub mod backup;
 mod scoped;
-pub use scoped::{MemoryRecord, MemoryScope, extract_user_memories, retrieve, validate_fact};
+pub use scoped::{
+    MIN_RELEVANCE, MemoryRecord, MemoryScope, extract_user_memories, retrieve, validate_fact,
+};
 
 use std::{
     collections::HashMap,

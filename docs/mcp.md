@@ -14,8 +14,19 @@ cleanup.
 
 ## Configuration
 
-MCP servers are configured in `mcp.toml` — by default `<data-dir>/mcp.toml`
-(the project's `.ax/mcp.toml`), or any path passed with `--mcp-config`.
+MCP servers are configured in `mcp.toml`. Resolution order:
+
+1. the path passed with `--mcp-config`;
+2. `<data-dir>/mcp.toml` (by default the project's `.ax/mcp.toml`);
+3. `$AX_HOME/mcp.toml` (usually `~/.ax/mcp.toml`), used when the project has no
+   config of its own.
+
+A missing file is an empty registry, not an error, so a fresh install simply
+has no servers configured. The release archive ships `mcp.example.toml`, and the
+installer copies it to `$AX_HOME/mcp.toml` only when no config exists yet — every
+server in it is disabled, and MCP servers themselves are external programs you
+install separately (AX ships the client, never a server).
+
 See `mcp.example.toml` at the repository root:
 
 ```toml
@@ -27,6 +38,7 @@ description = "Local filesystem indexer and search"
 capabilities = ["search", "read"]
 protocol_version = "2026-07-28"
 request_timeout_secs = 30
+enabled = false
 
 [servers.remote]
 transport = "http"

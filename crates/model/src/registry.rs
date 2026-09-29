@@ -76,9 +76,24 @@ impl ModelRegistry {
         }
         ModelCatalog {
             provider: provider.name().to_owned(),
-            models: provider.fallback_models(),
+            models: self.bootstrap_models(provider),
             source: CatalogSource::Fallback,
             warning: Some(warning.to_owned()),
+        }
+    }
+
+    fn bootstrap_models(&self, provider: &dyn ModelProvider) -> Vec<ModelInfo> {
+        let local = fs::read(self.cache_dir.join("pi-catalog.json"))
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<Vec<ModelInfo>>(&bytes).ok())
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|item| item.provider == provider.name() && item.supports_tools)
+            .collect::<Vec<_>>();
+        if local.is_empty() {
+            provider.fallback_models()
+        } else {
+            local
         }
     }
 
@@ -112,5 +127,46 @@ impl ModelRegistry {
         serde_json::from_slice::<CacheFile>(&contents)
             .map(|cache| cache.models)
             .map_err(|error| ModelError::InvalidResponse(format!("invalid model cache: {error}")))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{ModelRequest, ModelResponse};
+    struct RejectedProvider;
+    #[async_trait::async_trait]
+    impl ModelProvider for RejectedProvider {
+        fn name(&self) -> &'static str {
+            "minimax"
+        }
+        fn model_id(&self) -> &'static str {
+            "catalog-only"
+        }
+        fn context_window(&self) -> usize {
+            128_000
+        }
+        async fn complete(&self, _: ModelRequest) -> Result<ModelResponse, ModelError> {
+            unreachable!()
+        }
+        async fn list_models(&self) -> Result<Vec<ModelInfo>, ModelError> {
+            Err(ModelError::HttpStatus {
+                status: 401,
+                message: "invalid key".into(),
+            })
+        }
+        fn fallback_models(&self) -> Vec<ModelInfo> {
+            crate::builtin_models("minimax")
+        }
+    }
+    #[tokio::test]
+    async fn failed_discovery_retains_error_and_offline_models() {
+        let registry = ModelRegistry::new(
+            std::env::temp_dir().join(format!("ax-discovery-test-{}", std::process::id())),
+        );
+        let result = registry.discover(&RejectedProvider).await;
+        assert_eq!(result.source, CatalogSource::Fallback);
+        assert!(!result.models.is_empty());
+        assert!(result.warning.unwrap().contains("401"));
     }
 }

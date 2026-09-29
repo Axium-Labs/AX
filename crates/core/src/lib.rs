@@ -726,15 +726,28 @@ fn tool_activity(name: &str, input: &Value) -> String {
         "filesystem" => format!("{} {}", field("operation"), field("path")),
         "patch" => format!("editing {}", field("path")),
         "shell" => format!("running {}", field("command").lines().next().unwrap_or("")),
-        "web" => format!(
-            "{} {}",
-            field("operation"),
-            if field("url").is_empty() {
-                field("query")
+        "web" => {
+            // `queries`/`urls` drive batched calls; the singular keys remain as
+            // legacy aliases and also name the unit in the description.
+            let (list_key, unit) = if field("operation") == "search" {
+                ("queries", "query")
             } else {
-                field("url")
-            }
-        ),
+                ("urls", "url")
+            };
+            let list = input.get(list_key).and_then(Value::as_array);
+            let count = list
+                .map_or(0, Vec::len)
+                .max(usize::from(!field(unit).is_empty()));
+            let first = list
+                .and_then(|items| items.first())
+                .and_then(Value::as_str)
+                .unwrap_or_else(|| field(unit));
+            format!(
+                "{} {count} {}: {first}",
+                field("operation"),
+                if count == 1 { unit } else { list_key }
+            )
+        }
         "mcp" => format!("{} {} {}", field("action"), field("server"), field("tool")),
         _ if name.starts_with("mcp__") => format!("calling {name}"),
         _ => format!("calling {name}"),
@@ -765,6 +778,25 @@ mod tool_activity_tests {
         assert!(
             tool_activity("shell", &json!({"command":"cargo test\nother"}))
                 .contains("running cargo test")
+        );
+    }
+
+    #[test]
+    fn describes_batched_web_calls() {
+        assert_eq!(
+            tool_activity(
+                "web",
+                &json!({"operation":"search","queries":["rust 1.94","rust notes"]})
+            ),
+            "search 2 queries: rust 1.94"
+        );
+        assert_eq!(
+            tool_activity("web", &json!({"operation":"fetch","url":"https://ax.test"})),
+            "fetch 1 url: https://ax.test"
+        );
+        assert_eq!(
+            tool_activity("web", &json!({"operation":"search","query":"legacy"})),
+            "search 1 query: legacy"
         );
     }
 }

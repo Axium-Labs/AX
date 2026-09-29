@@ -1,4 +1,12 @@
-# Copy this file to .ax/mcp.toml, or pass --mcp-config <path>.
+# Example MCP configuration. The installer copies this file to
+# $AX_HOME/mcp.toml (usually ~/.ax/mcp.toml) when no config exists yet; you can
+# also copy it there yourself, or pass --mcp-config <path>. A user-level
+# mcp.toml applies to every project until that project has its own
+# .ax/mcp.toml. Every server below ships disabled: fill in a real command or
+# URL and flip `enabled = true`.
+#
+# MCP servers are external programs or endpoints that you install yourself —
+# AX only connects to them. The archive ships this template, not a server.
 #
 # `description` and `capabilities` are shown to the model through the
 # always-on MCP capability catalog *without* connecting to the server, so
@@ -13,6 +21,7 @@ description = "Local filesystem indexer and search"
 capabilities = ["search", "read"]
 protocol_version = "2026-07-28"
 request_timeout_secs = 30
+enabled = false
 
 [servers.remote]
 transport = "http"

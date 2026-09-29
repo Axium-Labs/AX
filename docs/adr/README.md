@@ -11,6 +11,7 @@ discoverable.
 | [0001-memory-scopes.md](0001-memory-scopes.md) | Scoped memory with portable project identity | Accepted |
 | [0002-session-event-log.md](0002-session-event-log.md) | SQLite index + JSONL session event log | Accepted |
 | [0003-portable-axpack.md](0003-portable-axpack.md) | Versioned portable AX data packages | Accepted |
+| [0004-acp-control-plane.md](0004-acp-control-plane.md) | ACP adapter at the AX CLI boundary | Accepted |
 
 ## Adding an ADR
 

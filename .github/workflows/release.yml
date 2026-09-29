@@ -94,15 +94,26 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          Compress-Archive -Path "target/${{ matrix.target }}/release/ax.exe" -DestinationPath "$env:RUNNER_TEMP/${{ matrix.asset }}" -Force
+          # The archive carries the binary plus the bundled skills and the MCP
+          # example so the installer can place them in AX_HOME.
+          $package = Join-Path $env:RUNNER_TEMP "package"
+          New-Item -ItemType Directory -Force -Path $package | Out-Null
+          Copy-Item "target/${{ matrix.target }}/release/ax.exe" $package
+          Copy-Item "skills" $package -Recurse
+          Copy-Item "mcp.example.toml" $package
+          Compress-Archive -Path "$package/*" -DestinationPath "$env:RUNNER_TEMP/${{ matrix.asset }}" -Force
 
       - name: Package asset (Unix)
         if: runner.os != 'Windows'
         shell: bash
         run: |
           set -euo pipefail
-          cd "target/${{ matrix.target }}/release"
-          tar -czf "$RUNNER_TEMP/${{ matrix.asset }}" ax
+          package="${RUNNER_TEMP}/package"
+          rm -rf "${package}"
+          mkdir -p "${package}"
+          cp "target/${{ matrix.target }}/release/ax" "${package}/"
+          cp -R skills mcp.example.toml "${package}/"
+          tar -czf "${{ runner.temp }}/${{ matrix.asset }}" -C "${package}" ax skills mcp.example.toml
 
       - name: Upload asset
         uses: actions/upload-artifact@v4

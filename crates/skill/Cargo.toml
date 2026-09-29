@@ -6,6 +6,7 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+lexical = { path = "../lexical" }
 serde.workspace = true
 serde_yaml = "0.9"
 thiserror.workspace = true

@@ -21,6 +21,9 @@ pub enum LoginUpdate {
     Success,
     /// Login failed (network, auth server, or file write).
     Failed(String),
+    /// Plain progress line from a background task (for example the outcome of
+    /// the model discovery that runs right after a credential is stored).
+    Notice(String),
 }
 
 use super::bottom_pane::{
@@ -712,7 +715,36 @@ pub(super) async fn apply_modal_action(
             );
             let refresh_data_dir = state.data_dir.clone();
             let refresh_codex_auth = selection.codex_auth.clone();
+            let tx = login_tx.clone();
             tokio::spawn(async move {
+                // Discover this provider first and report the outcome. A full
+                // refresh alone used to be silent: when discovery failed, or
+                // when it joined a refresh that started before the key existed,
+                // no `~/.ax/models/<provider>.json` appeared and nothing said so.
+                let report = |message: String| {
+                    let _ = tx.send(LoginUpdate::Notice(message));
+                };
+                match catalog_refresh::refresh_provider(
+                    &refresh_data_dir,
+                    refresh_codex_auth.clone(),
+                    &provider,
+                )
+                .await
+                {
+                    Some(catalog) if catalog.models.is_empty() => report(format!(
+                        "{provider}: no models discovered — {}",
+                        catalog
+                            .warning
+                            .unwrap_or_else(|| "provider returned an empty catalog".to_owned())
+                    )),
+                    Some(catalog) => report(format!(
+                        "{provider}: discovered {} model(s), cached for the model picker",
+                        catalog.models.len()
+                    )),
+                    None => report(format!(
+                        "{provider}: credential stored, but AX has no usable adapter for it yet"
+                    )),
+                }
                 catalog_refresh::refresh_catalogs(refresh_data_dir, refresh_codex_auth).await;
             });
         }

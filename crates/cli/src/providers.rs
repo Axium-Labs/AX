@@ -12,41 +12,50 @@
 
 use std::path::PathBuf;
 
-use model::{AuthStorage, OpenAiConfig, PROVIDERS, ProviderProtocol, provider, provider_base_url};
+use model::{AuthStorage, OpenAiConfig, PROVIDERS, provider_supported};
 
 /// Providers AX's built-in adapters can actually drive.
+///
+/// Delegates to [`model::provider_supported`] so the "can AX drive this" rule
+/// has exactly one definition; this module used to re-derive it from the
+/// protocol table and the base-URL table on its own.
 pub(crate) fn is_supported_provider(provider_id: &str) -> bool {
-    provider(provider_id).is_some_and(|spec| {
-        matches!(
-            spec.protocol,
-            ProviderProtocol::OpenAiCompatible | ProviderProtocol::OpenAiResponses
-        ) && (matches!(spec.id, "openai" | "openai-codex") || provider_base_url(spec.id).is_some())
-    })
+    provider_supported(provider_id)
 }
 
 /// Providers with usable credentials, discovered purely locally: AX auth
 /// storage, conventional environment variables, and an explicit legacy Codex
 /// auth path. No network request is ever made here.
-pub(crate) fn configured_providers(codex_auth: Option<&PathBuf>) -> Vec<String> {
+///
+/// This is the unfiltered set. Credentials that belong to a provider AX cannot
+/// drive are included on purpose, so the ACP surface can report them as
+/// unsupported instead of dropping a saved key without a word.
+pub(crate) fn credentialed_providers(codex_auth: Option<&PathBuf>) -> Vec<String> {
     let auth = AuthStorage::new(crate::ax_auth_path());
-    let mut configured = Vec::new();
+    let mut credentialed = Vec::new();
     for id in auth.provider_ids().unwrap_or_default() {
-        if is_supported_provider(&id) {
-            push_unique(&mut configured, &id);
-        }
+        push_unique(&mut credentialed, &id);
     }
     for spec in PROVIDERS {
         if let Some(environment) = spec.environment
             && std::env::var(environment).is_ok_and(|value| !value.is_empty())
-            && is_supported_provider(spec.id)
         {
-            push_unique(&mut configured, spec.id);
+            push_unique(&mut credentialed, spec.id);
         }
     }
     if codex_auth.is_some() && OpenAiConfig::from_codex_auth(None, codex_auth.cloned()).is_ok() {
-        push_unique(&mut configured, "openai-codex");
+        push_unique(&mut credentialed, "openai-codex");
     }
-    configured
+    credentialed
+}
+
+/// The credentialed subset AX can actually drive. This is what model
+/// selection and the model catalog are allowed to offer.
+pub(crate) fn configured_providers(codex_auth: Option<&PathBuf>) -> Vec<String> {
+    credentialed_providers(codex_auth)
+        .into_iter()
+        .filter(|id| is_supported_provider(id))
+        .collect()
 }
 
 fn push_unique(configured: &mut Vec<String>, provider_id: &str) {

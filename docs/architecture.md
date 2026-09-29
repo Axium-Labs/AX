@@ -14,8 +14,8 @@ one-directional and modules can be replaced independently.
 ```text
 cli ───────────────┬──> runtime-core ──> model
                    │         └─────────> tool
-                   ├──> skill
-                   ├──> memory
+                   ├──> skill ────┐
+                   ├──> memory ───┴──> lexical
                    └──> mcp ───────────> tool (proxy implementation)
 ```
 
@@ -27,7 +27,8 @@ cli ───────────────┬──> runtime-core ──>
 | `tool` | `Tool`, `ToolRegistry`, JSON Schema, `SafetyLevel`, plus built-ins: `shell`, `filesystem`, `patch`, `search`, `web`, `view_image`. Owns the `PermissionStore`. |
 | `runtime-core` | The model → tool → model agent loop, `AgentEvent` stream, context selection, `ContextBudget`, compaction, and `AgentSupervisor` for bounded-concurrency tasks. |
 | `mcp` | MCP client for stdio / Streamable HTTP / WebSocket, lazy connection, capability catalog, `McpToolProxy` and `McpGateway`. |
-| `skill` | `SKILL.md` frontmatter indexing and dependency-aware routing; Markdown body is loaded only when a route hits. Legacy packages remain supported. |
+| `skill` | `SKILL.md` frontmatter indexing, precomputed Unicode routing features, and language-independent similarity routing; Markdown body is loaded only when a route hits. Legacy packages remain supported. |
+| `lexical` | Language-independent lexical features (NFKC, case fold, word tokens, character n-grams) and normalized similarity, shared by skill routing and memory retrieval so the two cannot drift apart. Leaf crate: no dependency on other AX crates. |
 | `memory` | SQLite session/message repository, effective-context snapshots, scoped facts, JSONL event streams, resume and compaction state. |
 | `cli` | The only composition root: clap arguments, provider selection, lazy SQLite/Skill/MCP initialization, REPL, ratatui TUI, session commands, permission dialogs. |
 
@@ -127,8 +128,12 @@ name, description and declared capabilities are visible to the model via
 ### `skill`
 
 On first use, indexes only standard `SKILL.md` YAML frontmatter (or a legacy
-`skill.toml`). The name and description drive metadata routing. After
-activation, the selected Markdown body is read and injected within the
+`skill.toml`), and derives each skill's Unicode routing features once at index
+time. Routing compares the task text with the name and description by
+normalized lexical similarity (words plus character n-grams, from the shared
+`lexical` crate), with no language
+detection, stemming or stopwords, so every script ranks through one code path.
+After activation, the selected Markdown body is read and injected within the
 `ContextBudget` skill reserve; optional resources remain on demand. Project
 skills take precedence over global skills and malformed packages are isolated.
 A compact metadata-only catalog lets the model select a skill by meaning through
@@ -147,9 +152,10 @@ selected project database. Project ownership is a UUID persisted in
 Explicit `remember key=value` declarations default to Session scope. Natural
 language intent is handled by the main model through a session-bound `memory`
 tool; code validates scope ownership, quoted user provenance, credential
-patterns, and optimistic-update preconditions. Retrieval uses lexical
-relevance, update time, explicit Global inclusion settings and the shared
-token budget.
+patterns, and optimistic-update preconditions. Retrieval ranks facts by a
+composite of the shared `lexical` similarity (computed once per turn for the
+query, precomputed and cached per fact), scope priority, recency and
+importance, then applies the shared token budget — with no per-language rules.
 
 Every complete conversation message is checkpointed before execution
 advances. Resume queries pages after the snapshot watermark and marks

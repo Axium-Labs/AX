@@ -1,6 +1,7 @@
 //! Explicit self-update. Nothing here runs during ordinary startup.
 
 use std::{
+    collections::HashSet,
     fs::{self, File, OpenOptions},
     io::{self, Write},
     path::{Path, PathBuf},
@@ -10,6 +11,8 @@ use std::{
 use anyhow::{Context, Result, anyhow, bail};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
+
+use crate::config;
 
 const RELEASE_API: &str = "https://api.github.com/repos/Axium-Labs/AX/releases/latest";
 
@@ -80,6 +83,30 @@ pub async fn run() -> Result<()> {
         {
             use std::os::unix::fs::PermissionsExt;
             fs::set_permissions(&staged, fs::Permissions::from_mode(0o755))?;
+        }
+        // Refresh the bundled payload that ships alongside the executable
+        // (skills plus the example MCP config). Archives from before those
+        // were packaged simply have nothing to install.
+        let home = config::ax_home();
+        match install_bundled_assets(&archive, &asset_name, &home) {
+            Ok(report) => {
+                if !report.skills.is_empty() {
+                    println!(
+                        "AX: installed {} bundled skill package(s) into {}",
+                        report.skills.len(),
+                        home.join("skills").display()
+                    );
+                }
+                if report.mcp {
+                    println!(
+                        "AX: wrote example MCP config to {} (all servers disabled)",
+                        home.join("mcp.toml").display()
+                    );
+                }
+            }
+            Err(error) => {
+                eprintln!("AX: could not refresh bundled skills/MCP config: {error:#}");
+            }
         }
         replace_after_download(&staged, &target)
     })();
@@ -176,6 +203,114 @@ fn extract_executable(archive: &[u8], asset_name: &str, staged: &mut File) -> Re
         bail!("release archive contains an empty AX executable");
     }
     Ok(())
+}
+
+/// What `install_bundled_assets` actually wrote, so the update can report it.
+#[derive(Debug, Default)]
+struct BundleReport {
+    /// Names of the skill packages that were newly installed.
+    skills: HashSet<String>,
+    /// Whether the example MCP config was written.
+    mcp: bool,
+}
+
+/// Where an archive entry lands inside `AX_HOME`, if it is part of the bundled
+/// payload. Everything else — the executable above all — is ignored, and so is
+/// anything that tries to escape `AX_HOME` with `..`.
+#[must_use]
+fn bundled_destination(home: &Path, name: &str) -> Option<PathBuf> {
+    let normalized = name.replace('\\', "/");
+    let parts: Vec<&str> = normalized
+        .split('/')
+        .filter(|part| !part.is_empty())
+        .collect();
+    let (first, rest) = parts.split_first()?;
+    if rest.iter().any(|part| *part == "." || *part == "..") {
+        return None;
+    }
+    match *first {
+        "skills" if !rest.is_empty() => {
+            let mut destination = home.join("skills");
+            for part in rest {
+                destination.push(part);
+            }
+            Some(destination)
+        }
+        "mcp.example.toml" if rest.is_empty() => Some(home.join("mcp.toml")),
+        _ => None,
+    }
+}
+
+fn record_installed(report: &mut BundleReport, name: &str) {
+    let normalized = name.replace('\\', "/");
+    let mut parts = normalized.split('/').filter(|part| !part.is_empty());
+    if parts.next() == Some("skills") {
+        if let Some(package) = parts.next() {
+            report.skills.insert(package.to_string());
+        }
+    } else {
+        report.mcp = true;
+    }
+}
+
+/// Writes one bundled entry, skipping anything already present so local edits
+/// to a skill package survive an update. Returns whether a file was created.
+fn write_bundled(destination: &Path, reader: &mut impl io::Read) -> Result<bool> {
+    if destination.exists() {
+        return Ok(false);
+    }
+    if let Some(parent) = destination.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("could not create {}", parent.display()))?;
+    }
+    let mut file = File::create(destination)
+        .with_context(|| format!("could not create {}", destination.display()))?;
+    io::copy(reader, &mut file)?;
+    file.sync_all()?;
+    Ok(true)
+}
+
+/// Unpacks `skills/` and `mcp.example.toml` from a verified release archive
+/// into `AX_HOME`, the same layout the install scripts produce. Archives that
+/// predate the bundled payload yield an empty report rather than an error.
+fn install_bundled_assets(archive: &[u8], asset_name: &str, home: &Path) -> Result<BundleReport> {
+    let mut report = BundleReport::default();
+    if Path::new(asset_name)
+        .extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("zip"))
+    {
+        let mut zip = zip::ZipArchive::new(io::Cursor::new(archive))?;
+        for index in 0..zip.len() {
+            let mut entry = zip.by_index(index)?;
+            if !entry.is_file() {
+                continue;
+            }
+            let name = entry.name().to_string();
+            let Some(destination) = bundled_destination(home, &name) else {
+                continue;
+            };
+            if write_bundled(&destination, &mut entry)? {
+                record_installed(&mut report, &name);
+            }
+        }
+    } else {
+        let decoder = flate2::read::GzDecoder::new(archive);
+        let mut tar = tar::Archive::new(decoder);
+        for entry in tar.entries()? {
+            let mut entry = entry?;
+            if !entry.header().entry_type().is_file() {
+                continue;
+            }
+            let name = entry.path()?.to_string_lossy().into_owned();
+            let Some(destination) = bundled_destination(home, &name) else {
+                continue;
+            };
+            if write_bundled(&destination, &mut entry)? {
+                record_installed(&mut report, &name);
+            }
+        }
+    }
+    Ok(report)
 }
 
 #[cfg(unix)]
@@ -278,6 +413,107 @@ mod tests {
         assert!(checksum_for(sums.as_bytes(), "other.zip").is_err());
         assert!(checksum_for(format!("{sums}{sums}").as_bytes(), "ax-x.zip").is_err());
         assert!(checksum_for(b"bad  ax-x.zip", "ax-x.zip").is_err());
+    }
+
+    #[test]
+    fn bundled_entries_map_into_ax_home() {
+        let home = Path::new("/home/tester/.ax");
+        assert_eq!(
+            bundled_destination(home, "skills/demo/SKILL.md").as_deref(),
+            Some(Path::new("/home/tester/.ax/skills/demo/SKILL.md"))
+        );
+        assert_eq!(
+            bundled_destination(home, "skills\\demo\\SKILL.md").as_deref(),
+            Some(Path::new("/home/tester/.ax/skills/demo/SKILL.md"))
+        );
+        assert_eq!(
+            bundled_destination(home, "mcp.example.toml").as_deref(),
+            Some(Path::new("/home/tester/.ax/mcp.toml"))
+        );
+        assert_eq!(bundled_destination(home, "ax").as_deref(), None);
+        assert_eq!(bundled_destination(home, "skills").as_deref(), None);
+        assert_eq!(
+            bundled_destination(home, "skills/../../evil").as_deref(),
+            None
+        );
+    }
+
+    /// Builds an archive with the real release layout: the executable plus the
+    /// bundled payload.
+    fn sample_tar() -> Vec<u8> {
+        let encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        let mut builder = tar::Builder::new(encoder);
+        let mut header = tar::Header::new_gnu();
+        header.set_size(3);
+        header.set_mode(0o755);
+        header.set_cksum();
+        builder
+            .append_data(&mut header, "ax", b"ax\n".as_slice())
+            .unwrap();
+        let mut skill = tar::Header::new_gnu();
+        skill.set_size(5);
+        skill.set_mode(0o644);
+        skill.set_cksum();
+        builder
+            .append_data(&mut skill, "skills/demo/SKILL.md", b"demo\n".as_slice())
+            .unwrap();
+        let mut config = tar::Header::new_gnu();
+        config.set_size(4);
+        config.set_mode(0o644);
+        config.set_cksum();
+        builder
+            .append_data(&mut config, "mcp.example.toml", b"#ax\n".as_slice())
+            .unwrap();
+        builder.into_inner().unwrap().finish().unwrap()
+    }
+
+    fn sample_zip() -> Vec<u8> {
+        use io::Cursor;
+        use zip::{CompressionMethod, ZipWriter, write::FileOptions};
+
+        let mut writer = ZipWriter::new(Cursor::new(Vec::new()));
+        let options = FileOptions::default().compression_method(CompressionMethod::Deflated);
+        writer.start_file("ax.exe", options).unwrap();
+        io::Write::write_all(&mut writer, b"ax\n").unwrap();
+        writer.start_file("skills/demo/SKILL.md", options).unwrap();
+        io::Write::write_all(&mut writer, b"demo\n").unwrap();
+        writer.start_file("mcp.example.toml", options).unwrap();
+        io::Write::write_all(&mut writer, b"#ax\n").unwrap();
+        writer.finish().unwrap().into_inner()
+    }
+
+    #[test]
+    fn installs_bundled_skills_and_mcp_template() {
+        for (asset, archive) in [
+            ("ax-x86_64-apple-darwin.tar.gz", sample_tar()),
+            ("ax-x86_64-pc-windows-msvc.zip", sample_zip()),
+        ] {
+            let home =
+                std::env::temp_dir().join(format!("ax-update-test-{}", uuid::Uuid::new_v4()));
+            let report = install_bundled_assets(&archive, asset, &home).unwrap();
+            assert_eq!(report.skills.len(), 1, "{asset}: {report:?}");
+            assert!(report.skills.contains("demo"), "{asset}: {report:?}");
+            assert!(report.mcp, "{asset}: {report:?}");
+            assert_eq!(
+                fs::read_to_string(home.join("skills/demo/SKILL.md")).unwrap(),
+                "demo\n"
+            );
+            assert_eq!(fs::read_to_string(home.join("mcp.toml")).unwrap(), "#ax\n");
+
+            // A second pass must not clobber what is already installed.
+            fs::write(home.join("skills/demo/SKILL.md"), b"edited\n").unwrap();
+            let report = install_bundled_assets(&archive, asset, &home).unwrap();
+            assert!(
+                report.skills.is_empty() && !report.mcp,
+                "{asset}: {report:?}"
+            );
+            assert_eq!(
+                fs::read_to_string(home.join("skills/demo/SKILL.md")).unwrap(),
+                "edited\n"
+            );
+
+            fs::remove_dir_all(&home).unwrap();
+        }
     }
 
     #[test]

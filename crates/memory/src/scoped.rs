@@ -1,6 +1,22 @@
 //! Explicit storage scopes and conservative user-authored memory extraction.
 use crate::{MemoryError, MemoryStore};
+use lexical::LexicalFeatures;
 use rusqlite::params;
+use std::{
+    collections::HashMap,
+    sync::{Mutex, OnceLock},
+};
+
+/// Minimum normalized similarity for a non-pinned fact to be retrieved.
+///
+/// This is a **noise floor, not a confidence gate**: it drops facts whose only
+/// overlap is an incidental n-gram (an unrelated query measures `0.00`–`0.03`
+/// against a fact in the same language), and keeps every fact that shares a
+/// real word or term (measured `0.05`–`1.00` across English, Chinese, Japanese
+/// and mixed queries). Ranking then orders what survives, and the injected
+/// block tells the model to use a fact only when it is actually relevant — the
+/// semantic decision stays with the model rather than with a lexical score.
+pub const MIN_RELEVANCE: f64 = 0.05;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -141,6 +157,7 @@ impl MemoryStore {
         self.connection.execute("INSERT INTO scoped_memories(scope, owner, key, value, source, always_include) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
             ON CONFLICT(scope, owner, key) DO UPDATE SET value=excluded.value, source=excluded.source, always_include=excluded.always_include, updated_at=unixepoch()",
             params![memory.scope.key(), memory.owner, memory.key, memory.value, memory.source, memory.always_include])?;
+        warm_fact_features(&memory.key, &memory.value);
         Ok(())
     }
     /// Read facts from exactly one scope and owner.
@@ -277,44 +294,157 @@ pub fn extract_user_memories(input: &str) -> Vec<(MemoryScope, String, String)> 
         .collect()
 }
 
-/// Rank relevant facts by lexical matches, breaking ties by update time.
+/// Weights of the final memory ranking. Lexical relevance dominates so a fact
+/// that actually answers the request outranks a merely recent or local one;
+/// the other three terms order facts whose relevance is close or equal.
+const RELEVANCE_WEIGHT: f64 = 0.60;
+/// Weight of the scope term (Session > Project > Global, matching the
+/// same-key precedence documented in `docs/memory.md`).
+const SCOPE_WEIGHT: f64 = 0.15;
+/// Weight of the recency term.
+const RECENCY_WEIGHT: f64 = 0.15;
+/// Weight of the importance term.
+const IMPORTANCE_WEIGHT: f64 = 0.10;
+/// Age at which the recency term halves (14 days), in seconds.
+const RECENCY_HALF_LIFE_SECS: f64 = 14.0 * 24.0 * 60.0 * 60.0;
+
+/// Rank facts for injection. Candidates come from lexical relevance —
+/// [`MIN_RELEVANCE`] only rejects incidental overlap and never decides
+/// meaning — and the final order combines four signals:
+///
+/// ```text
+/// score = 0.60 · relevance        # shared lexical similarity, 0.0..=1.0
+///       + 0.15 · scope priority   # Session 1.0, Project 0.7, Global 0.4
+///       + 0.15 · recency          # halves every 14 days behind the newest candidate
+///       + 0.10 · importance       # 1.0 pinned, 0.6 user-stated, 0.4 migrated/other
+/// ```
+///
+/// Explicitly pinned global preferences bypass the relevance floor and rank
+/// first; they still have to pass [`validate_fact`].
+///
+/// Ranking is language-independent: the query and every fact are compared with
+/// the shared [`LexicalFeatures`] similarity, so a Chinese or Japanese request
+/// is ranked by the same code path as an English one and no language produces
+/// a systematically lower score.
 #[must_use]
-pub fn retrieve(mut records: Vec<MemoryRecord>, query: &str) -> Vec<MemoryRecord> {
-    let terms = terms(query);
-    records.sort_by_key(|record| std::cmp::Reverse((score(record, &terms), record.updated_at)));
-    records
+pub fn retrieve(records: Vec<MemoryRecord>, query: &str) -> Vec<MemoryRecord> {
+    let features = LexicalFeatures::from_text(query);
+    let newest = records.iter().map(|record| record.updated_at).max();
+    let mut ranked = records
         .into_iter()
-        .filter(|record| {
-            score(record, &terms) > 0 && validate_fact(&record.key, &record.value).is_ok()
+        .filter(|record| validate_fact(&record.key, &record.value).is_ok())
+        .map(|record| {
+            let pinned = record.always_include && record.scope == MemoryScope::Global;
+            let relevance = fact_features(&record.key, &record.value).similarity(&features);
+            (pinned, relevance, record)
         })
+        .filter(|(pinned, relevance, _)| *pinned || *relevance >= MIN_RELEVANCE)
+        .map(|(pinned, relevance, record)| {
+            let importance = if pinned {
+                1.0
+            } else {
+                provenance_importance(&record.source)
+            };
+            let score = RELEVANCE_WEIGHT * relevance
+                + SCOPE_WEIGHT * scope_priority(record.scope)
+                + RECENCY_WEIGHT * recency(record.updated_at, newest)
+                + IMPORTANCE_WEIGHT * importance;
+            (pinned, score, record)
+        })
+        .collect::<Vec<_>>();
+    ranked.sort_by(|left, right| {
+        right
+            .0
+            .cmp(&left.0)
+            .then_with(|| right.1.total_cmp(&left.1))
+            .then_with(|| right.2.updated_at.cmp(&left.2.updated_at))
+            .then_with(|| left.2.key.cmp(&right.2.key))
+    });
+    ranked
+        .into_iter()
         .take(32)
+        .map(|(_, _, record)| record)
         .collect()
 }
-fn score(record: &MemoryRecord, terms: &[String]) -> usize {
-    let haystack = format!("{} {}", record.key, record.value).to_lowercase();
-    usize::from(record.scope == MemoryScope::Global && record.always_include)
-        + terms
-            .iter()
-            .filter(|term| haystack.contains(term.as_str()))
-            .count()
+
+/// More specific scopes win, matching the same-key precedence.
+const fn scope_priority(scope: MemoryScope) -> f64 {
+    match scope {
+        MemoryScope::Session => 1.0,
+        MemoryScope::Project => 0.7,
+        MemoryScope::Global => 0.4,
+    }
 }
-fn terms(query: &str) -> Vec<String> {
-    let lower = query.to_lowercase();
-    let mut terms = lower
-        .split(|c: char| !c.is_alphanumeric())
-        .filter(|term| term.len() > 1)
-        .map(str::to_owned)
-        .collect::<Vec<_>>();
-    let chars = lower.chars().collect::<Vec<_>>();
-    terms.extend(
-        chars
-            .windows(2)
-            .filter(|pair| pair.iter().all(|c| !c.is_ascii() && !c.is_whitespace()))
-            .map(|pair| pair.iter().collect()),
-    );
-    terms.sort();
-    terms.dedup();
-    terms
+
+/// Freshness relative to the newest candidate, halving every 14 days. Relative
+/// rather than wall-clock keeps ranking deterministic for a given input set.
+fn recency(updated_at: i64, newest: Option<i64>) -> f64 {
+    let Some(newest) = newest else {
+        return 0.0;
+    };
+    0.5_f64.powf(seconds_between(newest, updated_at) / RECENCY_HALF_LIFE_SECS)
+}
+
+/// A second count stays exactly representable in `f64` up to 2^53 (about 285
+/// million years), so the cast cannot lose meaningful precision.
+#[allow(clippy::cast_precision_loss)]
+fn seconds_between(newest: i64, updated_at: i64) -> f64 {
+    newest.saturating_sub(updated_at) as f64
+}
+
+/// Facts the user stated rank above facts carried over from older storage.
+fn provenance_importance(source: &str) -> f64 {
+    if source.starts_with("user/") {
+        0.6
+    } else {
+        0.4
+    }
+}
+
+/// Features of stored facts, keyed by the exact text they were derived from.
+///
+/// Facts are written rarely and compared on every turn, so their features are
+/// derived once — when the fact is written, or on first use for facts that were
+/// already stored — and reused. Keying on the text means an edited fact simply
+/// misses and is recomputed. The cache is bounded: on overflow it is cleared
+/// rather than grown.
+static FACT_FEATURES: OnceLock<Mutex<HashMap<String, LexicalFeatures>>> = OnceLock::new();
+/// Upper bound on cached fact features before the cache is cleared.
+const MAX_CACHED_FACTS: usize = 1_024;
+
+fn fact_features(key: &str, value: &str) -> LexicalFeatures {
+    let text = fact_text(key, value);
+    let cache = FACT_FEATURES.get_or_init(|| Mutex::new(HashMap::new()));
+    let Ok(mut entries) = cache.lock() else {
+        return LexicalFeatures::from_text(&text);
+    };
+    if let Some(features) = entries.get(&text) {
+        return features.clone();
+    }
+    let features = LexicalFeatures::from_text(&text);
+    if entries.len() >= MAX_CACHED_FACTS {
+        entries.clear();
+    }
+    entries.insert(text, features.clone());
+    features
+}
+
+/// Derives a fact's features ahead of the next query, so a write pays the cost
+/// once instead of every following turn.
+fn warm_fact_features(key: &str, value: &str) {
+    fact_features(key, value);
+}
+
+fn fact_text(key: &str, value: &str) -> String {
+    format!("{key} {value}")
+}
+
+#[cfg(test)]
+fn cached_fact_count() -> usize {
+    FACT_FEATURES
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .map_or(0, |entries| entries.len())
 }
 #[cfg(test)]
 mod tests {
@@ -502,5 +632,170 @@ mod tests {
             always_include: false,
         });
         assert_eq!(retrieve(records.to_vec(), "build")[0].key, "build");
+    }
+
+    fn mixed_language_facts() -> Vec<MemoryRecord> {
+        [
+            ("project.language", "Rust"),
+            ("build", "cargo test -p runtime-core"),
+            ("回答偏好", "回答用简体中文"),
+            ("doc.shadow", "文档图像阴影去除，处理扫描件阴影"),
+            ("video", "長文動画の自動切り抜きと字幕生成"),
+            ("deploy", "deploy the service to production"),
+            ("lang", "C"),
+        ]
+        .map(|(key, value)| fact(MemoryScope::Project, "p", key, value))
+        .to_vec()
+    }
+
+    #[test]
+    fn retrieval_ranks_every_script_by_one_metric() {
+        let records = mixed_language_facts();
+        for (query, expected) in [
+            ("cargo test", "build"),
+            ("build", "build"),
+            ("deploying the service", "deploy"),
+            ("deploy to prod", "deploy"),
+            ("回答偏好怎么设置", "回答偏好"),
+            ("文档阴影怎么处理", "doc.shadow"),
+            ("扫描件有阴影", "doc.shadow"),
+            ("shadow removal for scanned pages", "doc.shadow"),
+            ("長文の動画を切り抜きたい", "video"),
+        ] {
+            let ranked = retrieve(records.clone(), query);
+            assert_eq!(
+                ranked.first().map(|record| record.key.as_str()),
+                Some(expected),
+                "query {query:?} ranked {:?}",
+                ranked.iter().map(|r| &r.key).collect::<Vec<_>>()
+            );
+        }
+    }
+
+    #[test]
+    fn retrieval_is_not_biased_by_query_length() {
+        let records = mixed_language_facts();
+        for query in ["文档阴影", "这个扫描件有阴影，帮我处理一下"] {
+            assert_eq!(
+                retrieve(records.clone(), query)[0].key,
+                "doc.shadow",
+                "query {query:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn retrieval_ignores_unrelated_and_signal_free_queries() {
+        let records = mixed_language_facts();
+        for query in [
+            "项目用什么语言写的",
+            "帮我部署到生产环境",
+            "帮我写一个排序算法",
+            "...",
+            "   ",
+        ] {
+            assert!(
+                retrieve(records.clone(), query).is_empty(),
+                "query {query:?} retrieved {:?}",
+                retrieve(records.clone(), query)
+                    .iter()
+                    .map(|r| &r.key)
+                    .collect::<Vec<_>>()
+            );
+        }
+    }
+
+    #[test]
+    fn single_character_facts_are_reachable() {
+        let records = mixed_language_facts();
+        assert_eq!(retrieve(records, "c")[0].key, "lang");
+    }
+
+    fn scoped_fact(scope: MemoryScope, owner: &str, key: &str, updated_at: i64) -> MemoryRecord {
+        MemoryRecord {
+            updated_at,
+            ..fact(scope, owner, key, "cargo test")
+        }
+    }
+
+    #[test]
+    fn scope_priority_orders_equally_relevant_facts() {
+        let records = vec![
+            scoped_fact(MemoryScope::Global, "", "build", 0),
+            scoped_fact(MemoryScope::Project, "p", "build", 0),
+            scoped_fact(MemoryScope::Session, "s", "build", 0),
+        ];
+        let ranked = retrieve(records, "cargo test");
+        assert_eq!(
+            ranked.iter().map(|record| record.scope).collect::<Vec<_>>(),
+            vec![
+                MemoryScope::Session,
+                MemoryScope::Project,
+                MemoryScope::Global
+            ]
+        );
+    }
+
+    #[test]
+    fn recency_orders_equally_relevant_facts() {
+        let records = vec![
+            scoped_fact(MemoryScope::Project, "p", "build", 0),
+            scoped_fact(MemoryScope::Project, "p", "build", 86_400),
+        ];
+        let ranked = retrieve(records, "cargo test");
+        assert_eq!(ranked[0].updated_at, 86_400);
+    }
+
+    #[test]
+    fn pinned_global_facts_rank_first_and_ignore_relevance() {
+        let mut pinned = fact(MemoryScope::Global, "", "preference.answer", "English");
+        pinned.always_include = true;
+        let records = vec![
+            pinned,
+            fact(MemoryScope::Session, "s", "build", "cargo test"),
+        ];
+        let ranked = retrieve(records, "cargo test");
+        assert_eq!(ranked[0].key, "preference.answer");
+        assert_eq!(ranked.len(), 2);
+    }
+
+    #[test]
+    fn relevance_outweighs_scope_and_recency_for_weak_matches() {
+        // The strongest scope cannot lift a fact whose only overlap is
+        // incidental above a fact that actually answers the query.
+        let records = vec![
+            fact(MemoryScope::Session, "s", "project.language", "Rust"),
+            fact(
+                MemoryScope::Global,
+                "",
+                "build",
+                "cargo test -p runtime-core",
+            ),
+        ];
+        assert_eq!(retrieve(records, "cargo test")[0].key, "build");
+    }
+
+    #[test]
+    fn fact_features_are_cached_on_write_and_bounded() {
+        let store = MemoryStore::open_in_memory().unwrap();
+        let before = cached_fact_count();
+        store
+            .remember_scoped(&fact(
+                MemoryScope::Project,
+                "p",
+                "cache.probe",
+                "text unique to the feature cache test",
+            ))
+            .unwrap();
+        assert!(
+            cached_fact_count() > before,
+            "writing a fact must precompute its features"
+        );
+        for index in 0..(MAX_CACHED_FACTS + 16) {
+            fact_features("cache", &format!("probe value number {index}"));
+        }
+        // Other tests share this cache and run in parallel, so allow a small
+        // overshoot instead of asserting an exact bound.
+        assert!(cached_fact_count() <= MAX_CACHED_FACTS + 32);
     }
 }

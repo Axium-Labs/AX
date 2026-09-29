@@ -14,10 +14,11 @@ How to build, test and extend AX. For how the pieces fit together, start with
 ## Workspace layout
 
 ```text
-Cargo.toml               # workspace root: 7 crates, shared deps, lints, release profile
+Cargo.toml               # workspace root: 8 crates, shared deps, lints, release profile
 crates/
 ├── cli/                 # composition root: args, provider selection, TUI, sessions
 ├── core/                # runtime-core: agent loop, context, budget, compression
+├── lexical/             # shared language-independent lexical features + similarity
 ├── memory/              # SQLite + JSONL storage, scoped facts, resume
 ├── mcp/                 # MCP client, transports, gateway, proxies
 ├── model/               # provider abstraction, auth storage, catalogs
@@ -86,9 +87,11 @@ Quick smoke test of a local build:
 1. Create `skills/<name>/SKILL.md` with standard YAML frontmatter
    (`name`, `description`, optional `license`, `compatibility`, `metadata`,
    and `allowed-tools`) and a Markdown body. Describe both the task and its
-   use cases in `description`. See [skills.md](skills.md) for validation and
-   precedence. Legacy `skill.toml` plus `instructions.md` only supports
-   existing user data.
+   use cases in `description`, in the words and language your users will type:
+   routing is lexical similarity, so a description that shares no vocabulary
+   with a request only reaches the model through the metadata catalog. See
+   [skills.md](skills.md) for validation and precedence. Legacy `skill.toml`
+   plus `instructions.md` only supports existing user data.
 2. No code changes needed — indexing and routing are automatic.
 
 ### A new UI
@@ -119,13 +122,17 @@ The workflow:
    `cargo zigbuild`.
 2. Smoke-tests each binary (`ax --version`); the aarch64 musl target runs
    under qemu emulation on the x86_64 runner.
-3. Packages assets (`ax-<target>.tar.gz` / `.zip`), generates `SHA256SUMS`,
+3. Packages assets (`ax-<target>.tar.gz` / `.zip`) — the executable plus the
+   repository's `skills/` tree and `mcp.example.toml` — generates `SHA256SUMS`,
    and creates/updates the GitHub Release with generated release notes.
 
 Installers (`scripts/install.sh`, `scripts/install.ps1`) fetch the latest
-release from GitHub and verify the archive against `SHA256SUMS`.
+release from GitHub and verify the archive against `SHA256SUMS`, then place the
+bundled `skills/` in `$AX_HOME/skills` (skipping packages that already exist)
+and copy `mcp.example.toml` to `$AX_HOME/mcp.toml` only when no config exists.
 The explicit `ax --update` command uses the same release and checksum. It
-updates the running executable's path; on Windows a detached helper waits for
-AX to exit before replacing the verified binary. Update code lives in
+updates the running executable's path and refreshes that same bundled payload;
+on Windows a detached helper waits for AX to exit before replacing the verified
+binary. Update code lives in
 `crates/cli/src/update.rs` and does no work on ordinary startup. User and
-project data directories are untouched.
+project data directories are otherwise untouched.

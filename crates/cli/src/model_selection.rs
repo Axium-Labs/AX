@@ -17,9 +17,10 @@
 use std::{fs, path::Path, path::PathBuf};
 
 use anyhow::{Result, anyhow};
+use clap::ValueEnum;
 use model::{
     DEEPSEEK_FALLBACK_MODEL, ModelInfo, OPENAI_FALLBACK_MODEL, ProviderProtocol, ReasoningEffort,
-    provider, provider_chat_endpoint,
+    provider, provider_chat_endpoint, provider_unsupported_reason,
 };
 use serde::Deserialize;
 
@@ -51,9 +52,10 @@ pub enum ModelResolution {
 /// bare `--model`, ...).
 pub fn resolve_model_selection(cli: &Cli) -> Result<ModelResolution> {
     // 1. Explicit flags win.
-    if let Some(kind) = cli.provider {
-        let mut selection = selection_for_kind(kind, cli.model.clone(), cli.codex_auth.clone())?;
-        apply_cli_overrides(&mut selection, cli);
+    if let Some(provider) = cli.provider.as_deref() {
+        let mut selection =
+            selection_for_provider_arg(provider, cli.model.clone(), cli.codex_auth.clone())?;
+        apply_cli_overrides(&mut selection, cli)?;
         return Ok(ModelResolution::Resolved(selection));
     }
 
@@ -77,7 +79,7 @@ pub fn resolve_model_selection(cli: &Cli) -> Result<ModelResolution> {
             effort,
             cli.codex_auth.clone(),
         )?;
-        apply_cli_overrides(&mut selection, cli);
+        apply_cli_overrides(&mut selection, cli)?;
         return Ok(ModelResolution::Resolved(selection));
     }
 
@@ -97,7 +99,7 @@ pub fn resolve_model_selection(cli: &Cli) -> Result<ModelResolution> {
         1 => {
             let mut selection =
                 selection_for_provider_id(&configured[0], None, None, cli.codex_auth.clone())?;
-            apply_cli_overrides(&mut selection, cli);
+            apply_cli_overrides(&mut selection, cli)?;
             Ok(ModelResolution::Resolved(selection))
         }
         0 => Ok(ModelResolution::None),
@@ -174,7 +176,7 @@ fn local_catalog_models_in(models_dir: &Path, provider_id: &str) -> Vec<ModelInf
             return matched;
         }
     }
-    Vec::new()
+    model::builtin_models(provider_id)
 }
 
 /// A placeholder selection shown in the TUI while the user is being asked to
@@ -204,6 +206,32 @@ pub(crate) fn unconfigured_selection() -> ModelSelection {
 }
 
 // ---- helpers ---------------------------------------------------------------
+
+/// `--provider <value>`: one of the built-in aliases, or a concrete provider
+/// id from the catalog.
+///
+/// Vendors can appear several times in the catalog — Xiaomi lists a plain
+/// entry plus CN/SGP/AMS token-plan regions that share model ids but not
+/// endpoints — so the id has to be nameable; `compatible` alone cannot tell
+/// them apart once more than one is credentialed.
+fn selection_for_provider_arg(
+    value: &str,
+    model: Option<String>,
+    codex_auth: Option<PathBuf>,
+) -> Result<ModelSelection> {
+    if let Ok(kind) = ProviderKind::from_str(value, true) {
+        return selection_for_kind(kind, model, codex_auth);
+    }
+    let spec = provider(value).ok_or_else(|| {
+        anyhow!(
+            "unknown provider '{value}'; use one of deepseek, openai, codex, compatible or a provider id from the model catalog"
+        )
+    })?;
+    if let Some(reason) = provider_unsupported_reason(spec.id) {
+        return Err(anyhow!("provider '{}' cannot be used: {reason}", spec.id));
+    }
+    selection_for_provider_id(spec.id, model, None, codex_auth)
+}
 
 fn selection_for_kind(
     kind: ProviderKind,
@@ -256,9 +284,8 @@ fn selection_for_provider_id(
     let context_window =
         info.and_then(|model| (model.context_window > 0).then_some(model.context_window));
     let max_output_tokens = info.and_then(|model| model.max_output_tokens);
-    let endpoint = info
-        .and_then(|model| model.endpoint.clone())
-        .or_else(|| provider_chat_endpoint(provider_id));
+    let endpoint = provider_chat_endpoint(provider_id)
+        .or_else(|| info.and_then(|model| model.endpoint.clone()));
     let supports_tools = info.is_none_or(|model| model.supports_tools);
     let reasoning_effort = effort.or_else(|| info.and_then(|model| model.default_reasoning_effort));
     Ok(ModelSelection {
@@ -274,6 +301,38 @@ fn selection_for_provider_id(
     })
 }
 
+/// Catalog entries a bare model id could mean, narrowed to providers this
+/// machine has credentials for.
+///
+/// A bare id can match several providers: Xiaomi and its CN/SGP/AMS
+/// token-plan regions list the same model ids under different endpoints, so
+/// an unfiltered match would happily pick the plain `xiaomi` entry — and its
+/// endpoint — for a credential that only works on a token-plan host.
+fn bare_model_candidates(
+    model: &str,
+    catalog: &[ModelInfo],
+    configured: &[String],
+) -> Vec<ModelInfo> {
+    let candidates = catalog
+        .iter()
+        .filter(|info| info.id == model && is_supported_provider(&info.provider))
+        .cloned()
+        .collect::<Vec<_>>();
+    if candidates.len() < 2 {
+        return candidates;
+    }
+    let credentialed = candidates
+        .iter()
+        .filter(|info| configured.iter().any(|id| id == &info.provider))
+        .cloned()
+        .collect::<Vec<_>>();
+    if credentialed.is_empty() {
+        candidates
+    } else {
+        credentialed
+    }
+}
+
 /// Resolves a bare `--model` (no `--provider`) from the local catalog,
 /// falling back to the sole configured provider.
 fn selection_from_bare_model(
@@ -281,14 +340,11 @@ fn selection_from_bare_model(
     configured: &[String],
     cli: &Cli,
 ) -> Result<Option<ModelSelection>> {
-    let candidates = bundled_catalog()
-        .into_iter()
-        .filter(|info| info.id == model && is_supported_provider(&info.provider))
-        .collect::<Vec<_>>();
+    let candidates = bare_model_candidates(model, &bundled_catalog(), configured);
     if candidates.len() == 1 {
         let mut selection = selection_from_info(&candidates[0])?;
         selection.codex_auth.clone_from(&cli.codex_auth);
-        apply_cli_overrides(&mut selection, cli);
+        apply_cli_overrides(&mut selection, cli)?;
         return Ok(Some(selection));
     }
     if candidates.len() > 1 {
@@ -308,7 +364,7 @@ fn selection_from_bare_model(
             None,
             cli.codex_auth.clone(),
         )?;
-        apply_cli_overrides(&mut selection, cli);
+        apply_cli_overrides(&mut selection, cli)?;
         return Ok(Some(selection));
     }
     Err(anyhow!(
@@ -322,10 +378,7 @@ fn selection_from_info(info: &ModelInfo) -> Result<ModelSelection> {
     Ok(ModelSelection {
         provider: kind,
         provider_id: provider_id.clone(),
-        endpoint: info
-            .endpoint
-            .clone()
-            .or_else(|| provider_chat_endpoint(&provider_id)),
+        endpoint: provider_chat_endpoint(&provider_id).or_else(|| info.endpoint.clone()),
         model: info.id.clone(),
         codex_auth: None,
         context_window: (info.context_window > 0).then_some(info.context_window),
@@ -365,7 +418,7 @@ fn default_model_for(provider_id: &str, models: &[ModelInfo]) -> Result<String> 
         return Ok(fallback.to_owned());
     }
     Err(anyhow!(
-        "no cached model catalog for '{provider_id}'; open the TUI /model picker to discover its models"
+        "no cached model catalog for '{provider_id}'; pass --model <model-id>, or open the TUI /model picker to discover its models"
     ))
 }
 
@@ -383,10 +436,19 @@ fn is_configured(provider_id: &str, codex_auth: Option<&PathBuf>) -> bool {
         .any(|id| id == provider_id)
 }
 
-fn apply_cli_overrides(selection: &mut ModelSelection, cli: &Cli) {
+fn apply_cli_overrides(selection: &mut ModelSelection, cli: &Cli) -> Result<()> {
     if let Some(window) = cli.context_window {
         selection.context_window = Some(window.get());
     }
+    if let Some(value) = cli.reasoning_effort.as_deref() {
+        let effort = ReasoningEffort::parse(value).ok_or_else(|| {
+            anyhow!(
+                "invalid --reasoning-effort '{value}' (expected low, medium, high, xhigh or max)"
+            )
+        })?;
+        selection.reasoning_effort = Some(effort);
+    }
+    Ok(())
 }
 
 fn load_provider_cache(models_dir: &Path, provider_id: &str) -> Option<Vec<ModelInfo>> {
@@ -416,7 +478,99 @@ struct ProviderCache {
 mod tests {
     use std::fs;
 
+    use clap::Parser;
+
     use super::*;
+
+    /// `--provider` used to accept only `deepseek|openai|codex|compatible`,
+    /// which made a vendor's regional entries unreachable from the CLI: with
+    /// `xiaomi` and `xiaomi-token-plan-cn` both credentialed, `compatible` was
+    /// ambiguous and every run fell back to whichever the config had last.
+    #[test]
+    fn provider_flag_accepts_a_catalog_provider_id() {
+        for value in ["deepseek", "codex", "compatible", "xiaomi-token-plan-cn"] {
+            let cli = Cli::try_parse_from(["ax", "--provider", value, "tui"]).unwrap();
+            assert_eq!(cli.provider.as_deref(), Some(value));
+        }
+    }
+
+    fn info(id: &str, provider: &str) -> ModelInfo {
+        ModelInfo {
+            id: id.to_owned(),
+            display_name: id.to_owned(),
+            provider: provider.to_owned(),
+            context_window: 128_000,
+            max_output_tokens: None,
+            reasoning_efforts: Vec::new(),
+            default_reasoning_effort: None,
+            supports_tools: true,
+            endpoint: None,
+        }
+    }
+
+    #[test]
+    fn canonical_endpoint_overrides_stale_protocol_and_path() {
+        for (provider, stale) in [
+            (
+                "minimax",
+                "https://api.minimax.io/anthropic/v1/chat/completions",
+            ),
+            (
+                "fireworks",
+                "https://api.fireworks.ai/inference/chat/completions",
+            ),
+        ] {
+            let mut entry = info("test-model", provider);
+            entry.endpoint = Some(stale.to_owned());
+            let selected = selection_from_info(&entry).unwrap();
+            assert_eq!(selected.endpoint, provider_chat_endpoint(provider));
+            assert_ne!(selected.endpoint.as_deref(), Some(stale));
+        }
+    }
+
+    #[test]
+    fn clean_install_has_models_without_home_catalog() {
+        let missing = std::env::temp_dir().join("ax-no-catalog-installed");
+        let models = local_catalog_models_in(&missing, "minimax");
+        assert!(!models.is_empty());
+        assert!(
+            models
+                .iter()
+                .all(|item| item.provider == "minimax" && item.supports_tools)
+        );
+    }
+
+    /// The Xiaomi regions share model ids, so a bare id must be narrowed to a
+    /// provider AX can actually call instead of landing on the plain entry.
+    #[test]
+    fn bare_model_prefers_a_credentialed_provider() {
+        let catalog = vec![
+            info("mimo-v2.5", "xiaomi"),
+            info("mimo-v2.5", "xiaomi-token-plan-cn"),
+            info("mimo-v2.5", "xiaomi-token-plan-sgp"),
+        ];
+        let candidates =
+            bare_model_candidates("mimo-v2.5", &catalog, &["xiaomi-token-plan-cn".to_owned()]);
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].provider, "xiaomi-token-plan-cn");
+
+        // Without a credential the ambiguity stays visible to the caller.
+        assert_eq!(bare_model_candidates("mimo-v2.5", &catalog, &[]).len(), 3);
+        assert_eq!(
+            bare_model_candidates("mimo-v2.5", &catalog, &["groq".to_owned()]).len(),
+            3
+        );
+    }
+
+    #[test]
+    fn reasoning_effort_cli_flag_overrides_selection() {
+        let mut selection = unconfigured_selection();
+        let cli = Cli::try_parse_from(["ax", "--reasoning-effort", "high", "tui"]).unwrap();
+        apply_cli_overrides(&mut selection, &cli).unwrap();
+        assert_eq!(selection.reasoning_effort, Some(ReasoningEffort::High));
+        let cli = Cli::try_parse_from(["ax", "--reasoning-effort", "bogus", "tui"]).unwrap();
+        assert!(apply_cli_overrides(&mut selection, &cli).is_err());
+    }
 
     #[test]
     fn provider_cache_precedes_bundled_catalog() {

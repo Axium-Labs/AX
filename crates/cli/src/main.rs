@@ -20,7 +20,9 @@ use runtime_core::{AgentSupervisor, AgentTask};
 use skill::SkillCatalog;
 use tool::{FilesystemTool, ShellTool, ToolRegistry};
 
+mod acp;
 mod config;
+mod crew_device;
 mod file_reference;
 mod memory_context;
 mod memory_tool;
@@ -48,12 +50,19 @@ struct Cli {
     /// Update this AX executable from the latest GitHub Release.
     #[arg(long)]
     update: bool,
-    /// Provider, when chosen explicitly. Otherwise AX resolves the selection
-    /// from the persisted config, then local credential detection.
+    /// Provider, when chosen explicitly. Takes a provider id from the catalog
+    /// (`deepseek`, `xiaomi-token-plan-cn`, ...) or one of the aliases
+    /// `deepseek` | `openai` | `codex` | `compatible`. Naming the id matters
+    /// when a vendor is listed more than once — Xiaomi and its token-plan
+    /// regions share model ids but not endpoints. Otherwise AX resolves the
+    /// selection from the persisted config, then local credential detection.
     #[arg(long, global = true)]
-    provider: Option<ProviderKind>,
+    provider: Option<String>,
     #[arg(long, global = true)]
     model: Option<String>,
+    /// Override the model's thinking depth: low | medium | high | xhigh | max.
+    #[arg(long, global = true)]
+    reasoning_effort: Option<String>,
     #[arg(long, global = true)]
     codex_auth: Option<PathBuf>,
     /// Override the active model's context-window token capacity.
@@ -85,6 +94,13 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Run the Agent Client Protocol v1 adapter on stdio.
+    Acp,
+    /// Pair or connect this AX instance to an AX Crew gateway.
+    Crew {
+        #[command(subcommand)]
+        command: CrewCommand,
+    },
     /// Export portable user data to a new .axpack archive.
     Export {
         path: PathBuf,
@@ -110,6 +126,18 @@ enum Command {
     },
     /// Start the inline terminal UI while preserving native scrollback.
     Tui,
+}
+
+#[derive(Subcommand)]
+enum CrewCommand {
+    /// Pair this machine using a one-time code issued by Crew.
+    Pair {
+        code: String,
+        #[arg(long, default_value = "http://127.0.0.1:8765")]
+        gateway: String,
+    },
+    /// Maintain an outbound authenticated WebSocket connection to Crew.
+    Connect { gateway: String },
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -152,6 +180,7 @@ struct ReplState {
     data_dir: PathBuf,
     skills_dir: PathBuf,
     mcp_config: PathBuf,
+    mcp_override: Option<McpConfig>,
     store: Option<MemoryStore>,
     global_store: Option<MemoryStore>,
     memory_scopes_migrated: bool,
@@ -162,6 +191,7 @@ struct ReplState {
     mcp_manager: Option<Arc<tokio::sync::Mutex<McpManager>>>,
     mcp_tools: Vec<McpToolProxy>,
     active_skills: HashSet<String>,
+    allowed_skills: Option<HashSet<String>>,
     current_session: Option<Session>,
     loaded_messages: Vec<Message>,
     runtime: Option<AgentKernel>,
@@ -206,6 +236,7 @@ impl ReplState {
             data_dir,
             skills_dir,
             mcp_config,
+            mcp_override: None,
             store,
             global_store: None,
             memory_scopes_migrated: false,
@@ -216,6 +247,7 @@ impl ReplState {
             mcp_manager: None,
             mcp_tools: Vec::new(),
             active_skills: HashSet::new(),
+            allowed_skills: None,
             current_session: None,
             loaded_messages: Vec::new(),
             runtime: None,
@@ -342,7 +374,13 @@ impl ReplState {
         }
         self.loaded_messages.extend(recovered);
         self.loaded_messages.retain(|message| {
-            active_skill_name(message).is_none_or(|name| !disabled_skills.contains(&name))
+            active_skill_name(message).is_none_or(|name| {
+                !disabled_skills.contains(&name)
+                    && self
+                        .allowed_skills
+                        .as_ref()
+                        .is_none_or(|allowed| allowed.contains(&name))
+            })
         });
         self.loaded_messages = runtime_core::select_context(
             &self.loaded_messages,
@@ -479,6 +517,7 @@ impl ReplState {
         let available_tools = self.skill_tool_names();
         let disabled = self.disabled_skills()?;
         let active = self.active_skills.clone();
+        let allowed = self.allowed_skills.clone();
         let catalog = self.skills()?;
         let mut content = format!(
             "{SKILL_CATALOG_PREFIX}\nChoose a relevant skill by description; read its file with the filesystem tool. Tool permissions still apply.\n"
@@ -488,6 +527,9 @@ impl ReplState {
             if !status.available()
                 || disabled.contains(&status.metadata.name)
                 || active.contains(&status.metadata.name)
+                || allowed
+                    .as_ref()
+                    .is_some_and(|allowed| !allowed.contains(&status.metadata.name))
             {
                 continue;
             }
@@ -523,7 +565,12 @@ impl ReplState {
         let mut messages = Vec::new();
         let mut remaining_tokens = token_budget;
         for matched in candidates {
-            if disabled_skills.contains(&matched.name) || self.active_skills.contains(&matched.name)
+            if disabled_skills.contains(&matched.name)
+                || self.active_skills.contains(&matched.name)
+                || self
+                    .allowed_skills
+                    .as_ref()
+                    .is_some_and(|allowed| !allowed.contains(&matched.name))
             {
                 continue;
             }
@@ -602,11 +649,30 @@ impl ReplState {
         Ok(token_budget)
     }
 
+    /// The MCP config actually loaded: the project file, or the user-level
+    /// `$AX_HOME/mcp.toml` an installer (or a one-time `cp`) can provide, which
+    /// then applies to every project until a project file overrides it. Layers
+    /// the same way `<project>/skills` and `~/.ax/skills` do.
+    fn resolved_mcp_config(&self) -> PathBuf {
+        if self.mcp_config.exists() {
+            return self.mcp_config.clone();
+        }
+        let global = config::ax_home().join("mcp.toml");
+        if global.exists() {
+            return global;
+        }
+        self.mcp_config.clone()
+    }
+
     fn mcp(&mut self) -> Result<Arc<tokio::sync::Mutex<McpManager>>> {
         if self.mcp_manager.is_none() {
-            let config = McpConfig::load(&self.mcp_config).with_context(|| {
-                format!("failed to load MCP config {}", self.mcp_config.display())
-            })?;
+            let config = if let Some(config) = self.mcp_override.clone() {
+                config
+            } else {
+                let path = self.resolved_mcp_config();
+                McpConfig::load(&path)
+                    .with_context(|| format!("failed to load MCP config {}", path.display()))?
+            };
             self.mcp_manager = Some(Arc::new(tokio::sync::Mutex::new(McpManager::new(config))));
         }
         self.mcp_manager
@@ -918,7 +984,17 @@ async fn main() -> Result<()> {
         Arc::new(DenyDangerous)
     };
 
+    if matches!(cli.command, Some(Command::Acp)) {
+        return acp::run(&cli, data_dir, skills_dir).await;
+    }
+    if let Some(Command::Crew { ref command }) = cli.command {
+        return crew_device::run(command).await;
+    }
+
     match cli.command {
+        Some(Command::Acp | Command::Crew { .. }) => {
+            unreachable!("handled before command dispatch")
+        }
         Some(Command::Export {
             ref path,
             memory,

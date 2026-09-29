@@ -27,7 +27,7 @@ permissions from tool-name strings (e.g. `mcp__`/`::`).
 | `filesystem` | Read/write files | `FilesystemRead` / `FilesystemWrite` |
 | `patch` | Structured multi-hunk edits; any failing hunk aborts the whole write | `FilesystemWrite` |
 | `search` | Line-scoped text search | `FilesystemRead` |
-| `web` | `search` via a replaceable provider; `fetch` as bounded HTTP(S) GET and cleaned Markdown/text | `Network` |
+| `web` | `search` up to 4 concurrent queries via a replaceable provider; `fetch` up to 6 concurrent HTTP(S) GETs as cleaned Markdown/text; merged, deduplicated, partial failures tolerated | `Network` |
 | `view_image` | Native image content from a workspace file, when the model supports vision | `FilesystemRead` |
 
 The registry is assembled per composition root (`cli::tools`): the built-ins,
@@ -41,14 +41,52 @@ CLI `run` prints the same activity description to stderr.
 
 ### Web
 
-`web` accepts `operation: "search"` with `query` and optional `limit` (1–20),
-or `operation: "fetch"` with an HTTP(S) `url`. Search returns
-`title`/`url`/`snippet`/`source` records. The default search adapter uses Brave
-Search and needs `BRAVE_SEARCH_API_KEY`; embedders can provide another
-`SearchProvider`. Fetch sends only GET, follows up to five redirects, times out
-after 15 seconds, rejects non-text content, limits the body to 2 MB, and
-returns at most 100,000 characters of converted Markdown/text. It does not
-execute browser JavaScript.
+`web` accepts `operation: "search"` with `queries` (1–4 strings) and optional
+`limit` (1–20 per query), or `operation: "fetch"` with `urls` (1–6 HTTP(S)
+URLs). The legacy singular `query` and `url` keys remain as aliases and are
+normalized into the same lists, so a single-request call keeps working.
+
+Queries are executed concurrently against one `SearchProvider`, and URLs are
+fetched concurrently; a call takes about as long as its slowest request rather
+than the sum of all of them. A partial failure never cancels the successful
+requests: the response reports `succeeded`, `failed` and an `errors` array, and
+the call fails only when every query or URL fails.
+
+Search results from all queries are merged, canonicalized (fragment and known
+tracking parameters dropped, trailing slash trimmed) and deduplicated by URL.
+The first occurrence keeps its position in query order, so the highest-ranked
+copy of a URL is the one returned, and each record carries the
+`matched_queries` that surfaced it. Records are
+`title`/`url`/`snippet`/`source`/`matched_queries`; the default adapter uses
+Brave Search and needs `BRAVE_SEARCH_API_KEY`, and embedders can provide
+another `SearchProvider`.
+
+Fetch sends only GET, follows up to five redirects, times out after 15 seconds,
+rejects non-text content, limits each body to 2 MB, and removes comments and
+`script`/`style`/`nav`/`footer`/`aside` noise before converting HTML to
+Markdown. Every page returns `url`, `title` (when the page has one),
+`content_type`, `content` and `truncated`; a page returns at most 20,000
+characters and one call at most 60,000 characters, always reported through
+`truncated: true` instead of silently cutting content. It does not execute
+browser JavaScript.
+
+```json
+{
+  "operation": "search",
+  "queries": ["Rust 1.94 release", "Rust 1.94 changes"],
+  "limit": 5
+}
+```
+
+```json
+{
+  "operation": "fetch",
+  "urls": ["https://example.com/a", "https://example.com/b"]
+}
+```
+
+`queries` are executed concurrently, URLs are fetched concurrently, results are
+deduplicated by URL, and partial failures do not cancel successful results.
 
 ### LSP through MCP
 
@@ -111,8 +149,19 @@ change on either side takes effect immediately on the other.
 ## Telemetry
 
 `tool::telemetry` provides in-process, no-sensitive-data latency metrics
-(`Timer` / `snapshot`) for the `/status` panel. Every model step and tool call
-records a timer.
+(`Timer` / `snapshot` / `increment`) for the `/status` panel. Every model step
+and tool call records a timer. Batched `web` calls add `web.search` and
+`web.fetch` totals, per-item `web.search.query.N` and `web.fetch.url.N`
+latencies, and `web.search.ok` / `web.search.failed` / `web.fetch.ok` /
+`web.fetch.failed` counters.
+
+## Concurrency
+
+Parallel tool execution lives inside each tool, never in the agent loop. Tools
+that may depend on each other (`shell`, `filesystem`, `patch`, `view_image`)
+keep running one call at a time; the read-only network tool batches its own
+requests. `web` is the only built-in that runs independent requests
+concurrently.
 
 ## Reference
 

@@ -4,7 +4,10 @@ mod filesystem;
 mod patch;
 mod search;
 mod web;
-pub use web::{SearchProvider, SearchResult, WebTool};
+pub use web::{
+    MAX_FETCH_URLS, MAX_PAGE_CHARS, MAX_QUERIES, MAX_TOTAL_CHARS, SearchProvider, SearchResult,
+    WebTool,
+};
 mod view_image;
 pub use patch::PatchTool;
 pub use search::SearchTool;

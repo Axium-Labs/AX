@@ -17,5 +17,15 @@ html2md = "0.2"
 base64 = "0.22"
 uuid.workspace = true
 
-[lints]
-workspace = true
+# Opts out of the workspace lint table instead of inheriting it: decoding
+# Windows console output (`src/shell.rs::native_decode`) needs
+# `MultiByteToWideChar`, and the dependency tree has no safe binding for it, so
+# this crate cannot keep `unsafe_code = "forbid"`. That FFI is the only `unsafe`
+# here, and it is confined to one `#[cfg(windows)]` function; every other lint
+# below mirrors the workspace.
+[lints.rust]
+unsafe_code = "allow"
+
+[lints.clippy]
+all = "warn"
+pedantic = "warn"

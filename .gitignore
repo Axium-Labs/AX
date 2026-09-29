@@ -1,6 +1,7 @@
 /target/
 /.ax/
 /.ax-smoke-*/
+/.workbuddy/
 .env
 *.db
 *.db-shm

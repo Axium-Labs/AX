@@ -98,6 +98,15 @@ timeout.
 - CLI overrides (`--provider`, `--model`, `--codex-auth`,
   `--context-window`) take precedence over the persisted selection, which
   itself precedes local provider detection.
+- `--provider` accepts a catalog provider id as well as the
+  `deepseek` / `openai` / `codex` / `compatible` aliases, so vendors that
+  appear several times can be addressed exactly — `xiaomi-token-plan-cn`,
+  `xiaomi-token-plan-sgp` and `xiaomi-token-plan-ams` share model ids with
+  `xiaomi` but not its endpoint. `compatible` alone is ambiguous once more
+  than one OpenAI-compatible provider is credentialed.
+- A bare `--model` that several providers list is narrowed to the ones with
+  local credentials before it is resolved; if more than one remains, AX asks
+  for `--provider` instead of guessing.
 
 ## Auth flows
 
@@ -123,3 +132,30 @@ timeout.
 | User config | `crates/cli/src/config.rs` |
 | Provider detection, CLI resolution | `crates/cli/src/providers.rs`, `crates/cli/src/model_selection.rs` |
 | `/login`, `/logout`, `/model` | `crates/cli/src/tui/commands.rs` |
+
+## Catalog and connection status in Crew
+
+AX ships an offline model catalog in `crates/model/src/catalog.json` (the existing
+public pi catalog metadata, without endpoint overrides). An empty AX home no
+longer needs a separately copied `pi-catalog.json`. Live discovery takes priority,
+then a provider cache, then the installed or shipped bootstrap catalog. A failed
+list request preserves its warning even when offline models remain selectable.
+Offline entries do not prove authentication, balance or model entitlement.
+
+Built-in provider endpoints take priority over model-cache endpoints. In
+particular, old MiniMax Anthropic paths and Fireworks paths lacking `/v1` cannot
+redirect the Chat Completions adapter. Provider, region and subscription remain
+part of model identity; AX never silently sends a key to a different provider.
+
+Crew reads the complete credential/support/model metadata from the `catalog`
+field of `_ax/models`, instead of maintaining its own provider list or reading
+provider caches. Older AX versions without this field produce an update message.
+`_ax/refresh-models` returns `source` (`live`, `cache`, `fallback`) and `warning`.
+Saving an API key discovers that provider; explicit refresh refreshes every
+configured, supported provider, including providers with existing caches. Only
+tool-capable models are offered. UI labels distinguish saved credentials and
+local catalog models from successful online discovery; discovery is not an
+inference test. Unsupported protocols remain explicitly disabled.
+
+Endpoint references: [MiniMax OpenAI SDK](https://platform.minimax.io/docs/api-reference/text-openai-api)
+and [Fireworks Chat Completions](https://docs.fireworks.ai/api-reference/post-chatcompletions).

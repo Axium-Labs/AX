@@ -70,11 +70,32 @@ shared custom database require explicit migration.
 
 ## Retrieval and context budget
 
-Same-key scope precedence is Session, then Project, then Global. Within the
-selected facts, lexical relevance determines ordering and update time breaks
-ties. Only explicitly marked `always_include` Global preferences may be
-selected without query relevance; a `preference.*` key alone does not grant
-that behavior.
+Same-key scope precedence is Session, then Project, then Global. Facts are
+first reduced to lexical candidates by relevance, then ordered by a composite
+score rather than by relevance alone:
+
+```text
+score = 0.60 · relevance        # shared lexical similarity, 0.0..=1.0
+      + 0.15 · scope priority   # Session 1.0, Project 0.7, Global 0.4
+      + 0.15 · recency          # halves every 14 days behind the newest candidate
+      + 0.10 · importance       # 1.0 pinned, 0.6 user-stated, 0.4 migrated/other
+```
+
+Relevance comes from the shared `lexical` crate: the query and every fact are
+NFKC-normalized, case-folded and compared as word tokens plus Unicode
+character n-grams, so Chinese, Japanese, English and mixed queries are ranked
+by one code path with no per-language rules. Fact features are computed when a
+fact is written (and on first use for facts stored earlier) and cached in a
+bounded in-process map; the query is measured once per turn. Recency is
+relative to the newest candidate rather than wall-clock, so a given fact set
+always ranks the same way.
+
+The lexical score only selects candidates: `MIN_RELEVANCE` drops facts whose
+sole overlap is an incidental n-gram, the composite score orders whatever
+survives, and the injected block tells the model to use a fact only when it is
+relevant — the semantic decision stays with the model. Only explicitly marked
+`always_include` Global preferences bypass relevance and rank first; a
+`preference.*` key alone does not grant that behavior.
 
 Up to 32 relevant candidates are considered for a compact injected message.
 Its total size, including the wrapper, must fit

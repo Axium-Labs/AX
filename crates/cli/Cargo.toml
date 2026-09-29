@@ -25,6 +25,10 @@ reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2 = "0.10"
+base64 = "0.22"
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+rand = "0.8"
+tokio-tungstenite.workspace = true
 skill = { path = "../skill" }
 tokio.workspace = true
 toml.workspace = true
