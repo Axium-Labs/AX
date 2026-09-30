@@ -38,10 +38,13 @@ pub enum TranscriptEntry {
     Rendered(Vec<Line<'static>>),
     Message(TranscriptKind, String),
     Tool {
+        id: String,
         name: String,
         detail: String,
         state: ToolState,
         finished_at: Option<Instant>,
+        diagnostics: Vec<tool::FetchError>,
+        expanded: bool,
     },
 }
 
@@ -62,6 +65,8 @@ pub struct Transcript {
     /// tail changes as content deltas arrive.
     rendered: RefCell<HashMap<(usize, u16), Vec<Line<'static>>>>,
     stream_prefix: RefCell<Option<StreamPrefix>>,
+    /// Retain the latest diagnostic even after its row enters terminal scrollback.
+    last_diagnostic: Option<TranscriptEntry>,
 }
 
 const TOOL_SETTLE: Duration = Duration::from_millis(150);
@@ -88,6 +93,7 @@ impl Transcript {
             streaming: false,
             rendered: RefCell::new(HashMap::new()),
             stream_prefix: RefCell::new(None),
+            last_diagnostic: None,
         }
     }
 
@@ -117,20 +123,35 @@ impl Transcript {
         self.streaming = false;
         self.rendered.borrow_mut().clear();
         self.stream_prefix.borrow_mut().take();
+        self.last_diagnostic = None;
     }
 
+    #[cfg(test)]
     pub fn tool_started(&mut self, name: impl Into<String>, detail: impl Into<String>) {
+        let name = name.into();
+        self.tool_started_with_id(name.clone(), name, detail);
+    }
+
+    pub fn tool_started_with_id(
+        &mut self,
+        id: impl Into<String>,
+        name: impl Into<String>,
+        detail: impl Into<String>,
+    ) {
         self.entries.push(TranscriptEntry::Tool {
+            id: id.into(),
             name: name.into(),
             detail: detail.into(),
             state: ToolState::Running,
             finished_at: None,
+            diagnostics: Vec::new(),
+            expanded: false,
         });
     }
 
     pub fn tool_finished(&mut self, name: &str, success: bool) {
         if let Some(TranscriptEntry::Tool { state, finished_at, .. }) = self.entries.iter_mut().rev().find(
-            |entry| matches!(entry, TranscriptEntry::Tool { name: found, state: ToolState::Running, .. } if found == name),
+            |entry| matches!(entry, TranscriptEntry::Tool { id: found, state: ToolState::Running, .. } if found == name),
         ) {
             *state = if success {
                 ToolState::Succeeded
@@ -140,6 +161,7 @@ impl Transcript {
             *finished_at = Some(Instant::now());
         } else {
             self.entries.push(TranscriptEntry::Tool {
+                id: name.to_owned(),
                 name: name.to_owned(),
                 detail: String::new(),
                 state: if success {
@@ -148,7 +170,37 @@ impl Transcript {
                     ToolState::Failed
                 },
                 finished_at: Some(Instant::now()),
+                diagnostics: Vec::new(),
+                expanded: false,
             });
+        }
+    }
+
+    pub fn tool_diagnostics(&mut self, name: &str, errors: Vec<tool::FetchError>) {
+        if let Some(entry) =
+            self.entries.iter_mut().rev().find(
+                |entry| matches!(entry, TranscriptEntry::Tool { id: found, .. } if found == name),
+            )
+            && let TranscriptEntry::Tool { diagnostics, .. } = entry
+        {
+            *diagnostics = errors;
+            if !diagnostics.is_empty() {
+                self.last_diagnostic = Some(entry.clone());
+            }
+        }
+    }
+
+    /// Expand/collapse the most recent retained fetch diagnostic (Ctrl+O).
+    pub fn toggle_tool_diagnostics(&mut self) {
+        if let Some(TranscriptEntry::Tool { expanded, .. }) = self.entries.iter_mut().rev().find(
+            |entry| matches!(entry, TranscriptEntry::Tool { diagnostics, .. } if !diagnostics.is_empty()),
+        ) {
+            *expanded = !*expanded;
+        } else if let Some(mut entry) = self.last_diagnostic.clone() {
+            if let TranscriptEntry::Tool { expanded, .. } = &mut entry {
+                *expanded = true;
+            }
+            self.entries.push(entry);
         }
     }
 
@@ -175,33 +227,7 @@ impl Transcript {
         match entry {
             TranscriptEntry::Card(info) => info.lines(width),
             TranscriptEntry::Rendered(lines) => lines.clone(),
-            TranscriptEntry::Tool {
-                name,
-                detail,
-                state,
-                finished_at,
-            } => {
-                let (marker, label, bg, marker_color) = match state {
-                    ToolState::Running => ("•", "running", theme::TOOL_PENDING_BG, theme::ACCENT),
-                    ToolState::Succeeded => ("✓", "done", theme::TOOL_SUCCESS_BG, theme::SUCCESS),
-                    ToolState::Failed => ("×", "failed", theme::TOOL_ERROR_BG, theme::ERROR),
-                };
-                let settling = finished_at.is_some_and(|at| at.elapsed() < TOOL_SETTLE);
-                let content = if *state == ToolState::Running || settling {
-                    detail.clone()
-                } else {
-                    format!("{name} · {label}")
-                };
-                let marker = format!(" {marker} ");
-                let used = marker.width() + content.width();
-                let padding = usize::from(width).saturating_sub(used);
-                let body = theme::body().bg(bg);
-                vec![Line::from(vec![
-                    Span::styled(marker, Style::default().fg(marker_color).bg(bg)),
-                    Span::styled(content, body),
-                    Span::styled(" ".repeat(padding), body),
-                ])]
-            }
+            TranscriptEntry::Tool { .. } => Self::tool_lines(entry, width),
             TranscriptEntry::Message(TranscriptKind::User, text) => {
                 let style = theme::body().bg(theme::USER_MESSAGE_BG);
                 let columns = usize::from(width.max(1));
@@ -273,6 +299,64 @@ impl Transcript {
                 lines
             }
         }
+    }
+
+    fn tool_lines(entry: &TranscriptEntry, width: u16) -> Vec<Line<'static>> {
+        let TranscriptEntry::Tool {
+            name,
+            detail,
+            state,
+            finished_at,
+            diagnostics,
+            expanded,
+            ..
+        } = entry
+        else {
+            unreachable!("tool_lines only renders tool entries")
+        };
+        let (marker, label, bg, marker_color) = match state {
+            ToolState::Running => ("•", "running", theme::TOOL_PENDING_BG, theme::ACCENT),
+            ToolState::Succeeded => ("✓", "done", theme::TOOL_SUCCESS_BG, theme::SUCCESS),
+            ToolState::Failed => ("×", "failed", theme::TOOL_ERROR_BG, theme::ERROR),
+        };
+        let settling = finished_at.is_some_and(|at| at.elapsed() < TOOL_SETTLE);
+        let content = if !diagnostics.is_empty() {
+            let reasons = diagnostics
+                .iter()
+                .map(|error| error.reason.as_str())
+                .collect::<Vec<_>>()
+                .join("; ");
+            let label = if *state == ToolState::Succeeded {
+                "done with errors"
+            } else {
+                label
+            };
+            format!("{name}.fetch · {label} ({reasons})")
+        } else if *state == ToolState::Running || settling {
+            detail.clone()
+        } else {
+            format!("{name} · {label}")
+        };
+        let marker = format!(" {marker} ");
+        let padding = usize::from(width).saturating_sub(marker.width() + content.width());
+        let body = theme::body().bg(bg);
+        let mut lines = vec![Line::from(vec![
+            Span::styled(marker, Style::default().fg(marker_color).bg(bg)),
+            Span::styled(content, body),
+            Span::styled(" ".repeat(padding), body),
+        ])];
+        if *expanded {
+            for error in diagnostics {
+                lines.push(Line::styled(
+                    format!("  URL: {}", error.url),
+                    theme::muted(),
+                ));
+                for (index, cause) in error.source_chain.iter().enumerate() {
+                    lines.push(Line::styled(format!("  [{index}] {cause}"), theme::error()));
+                }
+            }
+        }
+        lines
     }
 
     fn lines_for(&self, index: usize, width: u16) -> Vec<Line<'static>> {
@@ -406,6 +490,15 @@ impl Transcript {
         let mut total = self.height(width);
         let mut committed = Vec::new();
         while total > limit && !self.entries.is_empty() {
+            if matches!(
+                self.entries.first(),
+                Some(TranscriptEntry::Tool {
+                    state: ToolState::Running,
+                    ..
+                })
+            ) {
+                break;
+            }
             if matches!(self.entries.first(), Some(TranscriptEntry::Tool { finished_at: Some(at), .. }) if at.elapsed() < TOOL_SETTLE)
             {
                 break;
@@ -489,6 +582,87 @@ impl Transcript {
 mod tests {
     use super::*;
     use ratatui::{Terminal, backend::TestBackend};
+
+    #[test]
+    fn parallel_same_name_tools_finish_the_correct_transcript_rows() {
+        let mut transcript = Transcript::new();
+        transcript.tool_started_with_id("slow", "web", "slow request");
+        transcript.tool_started_with_id("fast", "web", "fast request");
+        transcript.tool_finished("fast", true);
+        assert!(matches!(
+            &transcript.entries[0],
+            TranscriptEntry::Tool {
+                state: ToolState::Running,
+                ..
+            }
+        ));
+        assert!(matches!(
+            &transcript.entries[1],
+            TranscriptEntry::Tool {
+                state: ToolState::Succeeded,
+                ..
+            }
+        ));
+        transcript.tool_finished("slow", false);
+        assert!(matches!(
+            &transcript.entries[0],
+            TranscriptEntry::Tool {
+                state: ToolState::Failed,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn fetch_diagnostic_is_short_by_default_and_expandable_after_scrollback() {
+        let url = "https://example.test/full/path?query=1";
+        let diagnostic = tool::FetchError {
+            url: url.into(),
+            error: "outer: tcp connect error: timed out".into(),
+            kind: tool::FetchErrorKind::Timeout,
+            reason: "connect timeout".into(),
+            source_chain: vec![
+                "outer".into(),
+                "tcp connect error".into(),
+                "timed out".into(),
+            ],
+            status_code: None,
+        };
+        let mut transcript = Transcript::new();
+        transcript.tool_started("web", format!("fetching {url}"));
+        transcript.tool_finished("web", false);
+        transcript.tool_diagnostics("web", vec![diagnostic]);
+        let text = |entry: &TranscriptEntry| {
+            Transcript::entry_lines(entry, 100)
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let collapsed = text(&transcript.entries[0]);
+        assert!(collapsed.contains("web.fetch · failed (connect timeout)"));
+        assert!(!collapsed.contains(url));
+        transcript.toggle_tool_diagnostics();
+        let expanded = text(&transcript.entries[0]);
+        assert!(expanded.contains(url));
+        assert!(expanded.contains("[0] outer"));
+        assert!(expanded.contains("[2] timed out"));
+        transcript.toggle_tool_diagnostics();
+        assert_eq!(text(&transcript.entries[0]), collapsed);
+        if let TranscriptEntry::Tool { finished_at, .. } = &mut transcript.entries[0] {
+            *finished_at = Instant::now().checked_sub(TOOL_SETTLE);
+        }
+        transcript.push(TranscriptKind::Agent, "many rows\n\n".repeat(20));
+        transcript.drain_overflow(100, 5, false);
+        assert!(
+            !transcript
+                .entries
+                .iter()
+                .any(|entry| matches!(entry, TranscriptEntry::Tool { .. }))
+        );
+        transcript.toggle_tool_diagnostics();
+        assert!(text(transcript.entries.last().unwrap()).contains(url));
+    }
 
     #[test]
     fn tool_detail_collapses_after_completion() {

@@ -12,6 +12,7 @@ discoverable.
 | [0002-session-event-log.md](0002-session-event-log.md) | SQLite index + JSONL session event log | Accepted |
 | [0003-portable-axpack.md](0003-portable-axpack.md) | Versioned portable AX data packages | Accepted |
 | [0004-acp-control-plane.md](0004-acp-control-plane.md) | ACP adapter at the AX CLI boundary | Accepted |
+| [0005-tool-round-scheduler.md](0005-tool-round-scheduler.md) | Dependency-aware tool-round scheduling | Accepted |
 
 ## Adding an ADR
 

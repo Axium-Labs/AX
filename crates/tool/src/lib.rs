@@ -5,14 +5,16 @@ mod patch;
 mod search;
 mod web;
 pub use web::{
-    MAX_FETCH_URLS, MAX_PAGE_CHARS, MAX_QUERIES, MAX_TOTAL_CHARS, SearchProvider, SearchResult,
-    WebTool,
+    FetchError, FetchErrorKind, MAX_FETCH_URLS, MAX_PAGE_CHARS, MAX_QUERIES, MAX_TOTAL_CHARS,
+    SearchConfig, SearchProvider, SearchResult, WebTool,
 };
 mod view_image;
 pub use patch::PatchTool;
 pub use search::SearchTool;
 pub use view_image::ViewImageTool;
 mod permission;
+mod resources;
+pub use resources::{Resource, ResourceAccess};
 mod shell;
 pub mod telemetry;
 pub use permission::{Capability, PermissionDecision, PermissionStore, ToolPermission};
@@ -40,6 +42,8 @@ pub enum ToolError {
     InvalidInput(String),
     #[error("tool execution failed: {0}")]
     Execution(String),
+    #[error("web fetch failed for every url: {}", serde_json::to_string(.0).unwrap_or_default())]
+    WebFetch(Vec<FetchError>),
     #[error("permission denied for tool: {0}")]
     PermissionDenied(String),
 }
@@ -73,6 +77,11 @@ pub trait Tool: Send + Sync {
             capability: self.capability(input),
             safety: self.safety(input),
         }
+    }
+    /// Explicit effects used by the runtime scheduler. Permissions and safety
+    /// do not imply independence: undeclared effects use a global write lock.
+    fn resources(&self, _input: &Value) -> Vec<ResourceAccess> {
+        vec![ResourceAccess::exclusive()]
     }
     async fn execute(&self, input: Value) -> Result<String, ToolError>;
     async fn execute_output(&self, input: Value) -> Result<ToolOutput, ToolError> {

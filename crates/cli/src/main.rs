@@ -940,8 +940,8 @@ fn render_event(event: AgentEvent) {
             print!("{delta}");
             let _ = std::io::stdout().flush();
         }
-        AgentEvent::ToolStarted { name, detail } => eprintln!("[tool:{name}] {detail}..."),
-        AgentEvent::ToolFinished { name, success } => {
+        AgentEvent::ToolStarted { name, detail, .. } => eprintln!("[tool:{name}] {detail}..."),
+        AgentEvent::ToolFinished { name, success, .. } => {
             eprintln!("[tool:{name}] {}", if success { "done" } else { "failed" });
         }
         AgentEvent::ContextCompressed {

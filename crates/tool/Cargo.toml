@@ -14,6 +14,9 @@ tokio.workspace = true
 reqwest.workspace = true
 futures-util.workspace = true
 html2md = "0.2"
+html5ever = "0.39"
+markup5ever_rcdom = "0.39"
+tower = "0.5"
 base64 = "0.22"
 uuid.workspace = true
 

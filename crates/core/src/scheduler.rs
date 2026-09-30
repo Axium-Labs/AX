@@ -1,0 +1,783 @@
+//! Dependency DAG, bounded in-task futures, and process-wide resource leases.
+use super::{AgentError, AgentEvent, ApprovalPolicy, fetch_diagnostics, tool_activity};
+use futures_util::{StreamExt, future::BoxFuture, stream::FuturesUnordered};
+use model::{Message, ToolCall};
+use serde_json::Value;
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex, OnceLock},
+};
+use tool::{ResourceAccess, Tool, ToolError, ToolOutput, ToolRegistry};
+
+pub(super) struct Job {
+    id: String,
+    name: String,
+    tool: Option<Arc<dyn Tool>>,
+    input: Value,
+    dependencies: Vec<usize>,
+    input_dependencies: Vec<usize>,
+    resources: Vec<ResourceAccess>,
+}
+
+/// Advertise typed result references as part of the tool protocol. Scheduling
+/// decisions still depend on declared effects and the runtime DAG, not prose.
+pub(super) fn input_schema(mut schema: Value) -> Value {
+    fn references(schema: &mut Value) {
+        if let Some(properties) = schema.get_mut("properties").and_then(Value::as_object_mut) {
+            for property in properties.values_mut() {
+                references(property);
+                let original = property.take();
+                *property = serde_json::json!({"anyOf":[original, {
+                    "type":"object","properties":{"$tool_result":{"type":"string"},"pointer":{"type":"string"}},
+                    "required":["$tool_result"],"additionalProperties":false
+                }]});
+            }
+        }
+        if let Some(items) = schema.get_mut("items") {
+            references(items);
+            let original = items.take();
+            *items = serde_json::json!({"anyOf":[original, {
+                "type":"object","properties":{"$tool_result":{"type":"string"},"pointer":{"type":"string"}},
+                "required":["$tool_result"],"additionalProperties":false
+            }]});
+        }
+    }
+    references(&mut schema);
+    if schema["type"] == "object" && schema.get("properties").is_none() {
+        schema["properties"] = serde_json::json!({});
+    }
+    if let Some(properties) = schema.get_mut("properties").and_then(Value::as_object_mut) {
+        properties.insert("_ax_depends_on".into(), serde_json::json!({"type":"array","items":{"type":"string"},"description":"Tool call IDs whose successful completion is required by this call."}));
+    }
+    schema
+}
+
+pub(super) fn prepare(calls: &[ToolCall], tools: &ToolRegistry) -> Result<Vec<Job>, AgentError> {
+    let ids: HashMap<_, _> = calls
+        .iter()
+        .enumerate()
+        .map(|(index, call)| (call.id.as_str(), index))
+        .collect();
+    if ids.len() != calls.len() {
+        return Err(invalid("duplicate tool_call_id in one round"));
+    }
+    let mut jobs = Vec::new();
+    for call in calls {
+        let mut input: Value =
+            serde_json::from_str(&call.function.arguments).map_err(|source| {
+                AgentError::InvalidToolArguments {
+                    tool: call.function.name.clone(),
+                    source,
+                }
+            })?;
+        let mut dependencies = Vec::new();
+        if let Some(object) = input.as_object_mut()
+            && let Some(explicit) = object.remove("_ax_depends_on")
+        {
+            let Some(array) = explicit.as_array() else {
+                return Err(invalid("_ax_depends_on must be an array of tool call IDs"));
+            };
+            for dependency in array {
+                dependencies.push(
+                    dependency
+                        .as_str()
+                        .ok_or_else(|| invalid("dependency ID must be a string"))?
+                        .to_owned(),
+                );
+            }
+        }
+        collect_references(&input, &mut dependencies)?;
+        let tool = tools.get(&call.function.name);
+        // Unresolved paths/effects are conservative until the producing calls
+        // finish. Execution reacquires concrete resources after substitution.
+        let resources = if dependencies.is_empty() {
+            tool.as_ref().map_or_else(
+                || vec![ResourceAccess::exclusive()],
+                |tool| tool.resources(&input),
+            )
+        } else {
+            vec![ResourceAccess::exclusive()]
+        };
+        let dependencies = dependencies
+            .iter()
+            .map(|id| {
+                ids.get(id.as_str())
+                    .copied()
+                    .ok_or_else(|| invalid(&format!("unknown tool result dependency: {id}")))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        jobs.push(Job {
+            id: call.id.clone(),
+            name: call.function.name.clone(),
+            tool,
+            input,
+            input_dependencies: dependencies.clone(),
+            dependencies,
+            resources,
+        });
+    }
+    check_acyclic(&jobs)?;
+    // Preserve model order for conflicting effects unless an explicit data
+    // dependency already requires the reverse order.
+    for left in 0..jobs.len() {
+        for right in left + 1..jobs.len() {
+            if conflict(&jobs[left].resources, &jobs[right].resources)
+                && !depends_on(&jobs, left, right)
+            {
+                jobs[right].dependencies.push(left);
+            }
+        }
+    }
+    check_acyclic(&jobs)?;
+    Ok(jobs)
+}
+
+fn invalid(message: &str) -> AgentError {
+    ToolError::InvalidInput(message.into()).into()
+}
+
+fn collect_references(input: &Value, dependencies: &mut Vec<String>) -> Result<(), AgentError> {
+    match input {
+        Value::Object(object) if object.contains_key("$tool_result") => {
+            let id = object["$tool_result"]
+                .as_str()
+                .ok_or_else(|| invalid("$tool_result must name a tool_call_id"))?;
+            if object
+                .keys()
+                .any(|key| key != "$tool_result" && key != "pointer")
+                || object
+                    .get("pointer")
+                    .is_some_and(|pointer| !pointer.is_string())
+            {
+                return Err(invalid("invalid tool result reference"));
+            }
+            dependencies.push(id.into());
+        }
+        Value::Object(object) => {
+            for value in object.values() {
+                collect_references(value, dependencies)?;
+            }
+        }
+        Value::Array(array) => {
+            for value in array {
+                collect_references(value, dependencies)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn depends_on(jobs: &[Job], job: usize, dependency: usize) -> bool {
+    let mut pending = jobs[job].dependencies.clone();
+    let mut visited = vec![false; jobs.len()];
+    while let Some(index) = pending.pop() {
+        if index == dependency {
+            return true;
+        }
+        if !visited[index] {
+            visited[index] = true;
+            pending.extend(&jobs[index].dependencies);
+        }
+    }
+    false
+}
+
+fn check_acyclic(jobs: &[Job]) -> Result<(), AgentError> {
+    for index in 0..jobs.len() {
+        if depends_on(jobs, index, index) {
+            return Err(invalid("cyclic tool call dependencies"));
+        }
+    }
+    Ok(())
+}
+
+fn conflict(left: &[ResourceAccess], right: &[ResourceAccess]) -> bool {
+    left.iter()
+        .any(|left| right.iter().any(|right| left.conflicts(right)))
+}
+
+fn resolve(input: &Value, jobs: &[Job], outputs: &[Option<Message>]) -> Result<Value, ToolError> {
+    match input {
+        Value::Object(object) if object.contains_key("$tool_result") => {
+            let id = object["$tool_result"].as_str().unwrap_or_default();
+            let output = jobs
+                .iter()
+                .position(|job| job.id == id)
+                .and_then(|index| outputs[index].as_ref())
+                .ok_or_else(|| ToolError::InvalidInput(format!("unresolved tool result: {id}")))?;
+            let value = serde_json::from_str(&output.content)
+                .unwrap_or_else(|_| Value::String(output.content.clone()));
+            if let Some(pointer) = object.get("pointer").and_then(Value::as_str) {
+                return value.pointer(pointer).cloned().ok_or_else(|| {
+                    ToolError::InvalidInput(format!(
+                        "tool result {id} has no JSON pointer {pointer}"
+                    ))
+                });
+            }
+            Ok(value)
+        }
+        Value::Object(object) => Ok(Value::Object(
+            object
+                .iter()
+                .map(|(key, value)| Ok((key.clone(), resolve(value, jobs, outputs)?)))
+                .collect::<Result<_, ToolError>>()?,
+        )),
+        Value::Array(array) => Ok(Value::Array(
+            array
+                .iter()
+                .map(|value| resolve(value, jobs, outputs))
+                .collect::<Result<_, _>>()?,
+        )),
+        value => Ok(value.clone()),
+    }
+}
+
+pub(super) async fn run<F, H>(
+    jobs: Vec<Job>,
+    approval: Arc<dyn ApprovalPolicy>,
+    concurrency: usize,
+    timeout_secs: u64,
+    emit: &Mutex<F>,
+    mut completed: H,
+) -> Result<Vec<Message>, AgentError>
+where
+    F: FnMut(AgentEvent) + Send,
+    H: FnMut(Message) -> Result<(), AgentError>,
+{
+    let mut outputs: Vec<Option<Message>> = vec![None; jobs.len()];
+    let mut succeeded = vec![false; jobs.len()];
+    let mut started = vec![false; jobs.len()];
+    let approval_gate = Arc::new(tokio::sync::Mutex::new(()));
+    let mut running: FuturesUnordered<BoxFuture<'_, (usize, bool, Message)>> =
+        FuturesUnordered::new();
+    loop {
+        for index in 0..jobs.len() {
+            if running.len() >= concurrency.max(1) {
+                break;
+            }
+            let job = &jobs[index];
+            if started[index]
+                || !job
+                    .dependencies
+                    .iter()
+                    .all(|index| outputs[*index].is_some())
+            {
+                continue;
+            }
+            started[index] = true;
+            let input = if job
+                .input_dependencies
+                .iter()
+                .any(|index| !succeeded[*index])
+            {
+                Err(ToolError::Execution(
+                    "tool input dependency failed; operation was not executed".into(),
+                ))
+            } else {
+                resolve(&job.input, &jobs, &outputs)
+            };
+            let approval = Arc::clone(&approval);
+            let approval_gate = Arc::clone(&approval_gate);
+            running.push(Box::pin(async move {
+                let result = execute(job, input, approval, approval_gate, timeout_secs, emit).await;
+                let success = result.is_ok();
+                (emit.lock().unwrap())(AgentEvent::ToolFinished {
+                    id: job.id.clone(),
+                    name: job.name.clone(),
+                    success,
+                    diagnostics: fetch_diagnostics(&job.name, &result),
+                });
+                (index, success, message(&job.id, result))
+            }));
+        }
+        let Some((index, success, message)) = running.next().await else {
+            break;
+        };
+        succeeded[index] = success;
+        outputs[index] = Some(message.clone());
+        completed(message)?;
+    }
+    Ok(outputs.into_iter().flatten().collect())
+}
+
+async fn execute<F: FnMut(AgentEvent) + Send>(
+    job: &Job,
+    input: Result<Value, ToolError>,
+    approval: Arc<dyn ApprovalPolicy>,
+    approval_gate: Arc<tokio::sync::Mutex<()>>,
+    timeout_secs: u64,
+    emit: &Mutex<F>,
+) -> Result<ToolOutput, ToolError> {
+    (emit.lock().unwrap())(AgentEvent::ToolStarted {
+        id: job.id.clone(),
+        name: job.name.clone(),
+        detail: tool_activity(&job.name, input.as_ref().unwrap_or(&job.input)),
+    });
+    let input = input?;
+    let tool = job
+        .tool
+        .as_ref()
+        .ok_or_else(|| ToolError::Unknown(job.name.clone()))?;
+    let approved = {
+        // Interactive permission dialogs have one active surface. Serialize
+        // approval decisions only; approved operations still run concurrently.
+        let _guard = approval_gate.lock().await;
+        approval
+            .approve(&job.name, &input, tool.permission(&input))
+            .await
+    };
+    if !approved {
+        return Err(ToolError::PermissionDenied(job.name.clone()));
+    }
+    let _lease = locks().acquire(tool.resources(&input)).await;
+    let _timer = tool::telemetry::Timer::new(format!("tool.{}", tool.name()));
+    if timeout_secs == 0 {
+        tool.execute_output(input).await
+    } else {
+        tokio::time::timeout(
+            std::time::Duration::from_secs(timeout_secs),
+            tool.execute_output(input),
+        )
+        .await
+        .unwrap_or_else(|_| Err(ToolError::Execution("tool timeout".into())))
+    }
+}
+
+fn message(id: &str, result: Result<ToolOutput, ToolError>) -> Message {
+    match result.unwrap_or_else(|error| ToolOutput::Text(error.to_string())) {
+        ToolOutput::Text(text) => Message::tool(id, text),
+        ToolOutput::Image {
+            description,
+            media_type,
+            data,
+        } => {
+            let mut message = Message::tool(id, description.clone());
+            message.parts = vec![
+                model::ContentPart::Text { text: description },
+                model::ContentPart::Image { media_type, data },
+            ];
+            message
+        }
+    }
+}
+
+#[derive(Default)]
+struct ResourceLocks {
+    active: Mutex<Vec<Arc<Vec<ResourceAccess>>>>,
+    changed: tokio::sync::Notify,
+}
+
+fn locks() -> &'static ResourceLocks {
+    static LOCKS: OnceLock<ResourceLocks> = OnceLock::new();
+    LOCKS.get_or_init(ResourceLocks::default)
+}
+
+impl ResourceLocks {
+    async fn acquire(&self, resources: Vec<ResourceAccess>) -> Lease<'_> {
+        let resources = Arc::new(resources);
+        loop {
+            let notified = self.changed.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            {
+                let mut active = self
+                    .active
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                if !active.iter().any(|held| conflict(held, &resources)) {
+                    active.push(Arc::clone(&resources));
+                    return Lease {
+                        locks: self,
+                        resources,
+                    };
+                }
+            }
+            notified.await;
+        }
+    }
+}
+
+struct Lease<'a> {
+    locks: &'a ResourceLocks,
+    resources: Arc<Vec<ResourceAccess>>,
+}
+impl Drop for Lease<'_> {
+    fn drop(&mut self) {
+        self.locks
+            .active
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .retain(|held| !Arc::ptr_eq(held, &self.resources));
+        self.locks.changed.notify_waiters();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use async_trait::async_trait;
+    use model::FunctionCall;
+    use serde_json::json;
+    use std::{
+        sync::atomic::{AtomicUsize, Ordering},
+        time::Duration,
+    };
+    use tool::{Capability, Resource, SafetyLevel};
+
+    #[derive(Default)]
+    struct State {
+        active: AtomicUsize,
+        peak: AtomicUsize,
+        trace: Mutex<Vec<String>>,
+    }
+    struct Active(Arc<State>);
+    impl Drop for Active {
+        fn drop(&mut self) {
+            self.0.active.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+
+    struct Probe(Arc<State>);
+    #[async_trait]
+    impl Tool for Probe {
+        fn name(&self) -> &'static str {
+            "probe"
+        }
+        fn description(&self) -> &'static str {
+            "scheduler test"
+        }
+        fn input_schema(&self) -> Value {
+            json!({"type":"object"})
+        }
+        fn safety(&self, _: &Value) -> SafetyLevel {
+            SafetyLevel::Safe
+        }
+        fn capability(&self, _: &Value) -> Capability {
+            Capability::Network
+        }
+        fn resources(&self, input: &Value) -> Vec<ResourceAccess> {
+            let resource = input.get("path").and_then(Value::as_str).map_or_else(
+                || Resource::Named(input["resource"].as_str().unwrap_or("fixture").into()),
+                Resource::path,
+            );
+            vec![if input["write"] == true {
+                ResourceAccess::write(resource)
+            } else {
+                ResourceAccess::read(resource)
+            }]
+        }
+        async fn execute(&self, input: Value) -> Result<String, ToolError> {
+            let id = input["label"].as_str().unwrap();
+            let active = self.0.active.fetch_add(1, Ordering::SeqCst) + 1;
+            self.0.peak.fetch_max(active, Ordering::SeqCst);
+            let _active = Active(Arc::clone(&self.0));
+            self.0.trace.lock().unwrap().push(format!("start:{id}"));
+            tokio::time::sleep(Duration::from_millis(input["delay"].as_u64().unwrap_or(20))).await;
+            self.0.trace.lock().unwrap().push(format!("end:{id}"));
+            if input["fail"] == true {
+                return Err(ToolError::Execution("fixture failed".into()));
+            }
+            Ok(json!({"value":input["value"],"label":id}).to_string())
+        }
+    }
+
+    struct Undeclared(Probe);
+    #[async_trait]
+    impl Tool for Undeclared {
+        fn name(&self) -> &'static str {
+            "unknown-effects"
+        }
+        fn description(&self) -> &'static str {
+            "undeclared effects fixture"
+        }
+        fn input_schema(&self) -> Value {
+            json!({"type":"object"})
+        }
+        fn safety(&self, _: &Value) -> SafetyLevel {
+            SafetyLevel::Safe
+        }
+        fn capability(&self, _: &Value) -> Capability {
+            Capability::Network
+        }
+        async fn execute(&self, input: Value) -> Result<String, ToolError> {
+            self.0.execute(input).await
+        }
+    }
+    fn call(id: &str, input: Value) -> ToolCall {
+        let arguments = input.to_string();
+        drop(input);
+        ToolCall {
+            id: id.into(),
+            kind: "function".into(),
+            function: FunctionCall {
+                name: "probe".into(),
+                arguments,
+            },
+        }
+    }
+    fn fixture() -> (ToolRegistry, Arc<State>) {
+        let state = Arc::new(State::default());
+        let mut tools = ToolRegistry::new();
+        tools.register(Probe(Arc::clone(&state)));
+        (tools, state)
+    }
+    async fn schedule(
+        calls: &[ToolCall],
+        tools: &ToolRegistry,
+        concurrency: usize,
+    ) -> Vec<Message> {
+        run(
+            prepare(calls, tools).unwrap(),
+            Arc::new(super::super::AllowAll),
+            concurrency,
+            0,
+            &Mutex::new(|_| {}),
+            |_| Ok(()),
+        )
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn independent_calls_are_bounded_and_keep_original_ids_despite_completion_order() {
+        let (tools, state) = fixture();
+        let calls: Vec<_> = (0..6).map(|i| call(&i.to_string(), json!({"label":i.to_string(),"resource":format!("r{i}"),"write":true,"delay":if i == 0 {100} else {20}}))).collect();
+        let results = schedule(&calls, &tools, 3).await;
+        assert_eq!(state.peak.load(Ordering::SeqCst), 3);
+        assert_eq!(
+            results
+                .iter()
+                .map(|message| message.tool_call_id.as_deref().unwrap())
+                .collect::<Vec<_>>(),
+            ["0", "1", "2", "3", "4", "5"]
+        );
+        let trace = state.trace.lock().unwrap();
+        assert!(
+            trace.iter().position(|event| event == "end:1")
+                < trace.iter().position(|event| event == "end:0")
+        );
+    }
+
+    #[tokio::test]
+    async fn conflicting_writes_and_reads_serialize_but_shared_reads_overlap() {
+        let (tools, state) = fixture();
+        schedule(
+            &[
+                call("a", json!({"label":"a","resource":"shared","write":true})),
+                call("b", json!({"label":"b","resource":"shared"})),
+                call("c", json!({"label":"c","resource":"shared","write":true})),
+            ],
+            &tools,
+            4,
+        )
+        .await;
+        assert_eq!(
+            *state.trace.lock().unwrap(),
+            ["start:a", "end:a", "start:b", "end:b", "start:c", "end:c"]
+        );
+        let (tools, state) = fixture();
+        schedule(
+            &[
+                call("a", json!({"label":"a"})),
+                call("b", json!({"label":"b"})),
+            ],
+            &tools,
+            4,
+        )
+        .await;
+        assert_eq!(state.peak.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn permissions_do_not_grant_concurrency_to_undeclared_effects() {
+        let state = Arc::new(State::default());
+        let mut tools = ToolRegistry::new();
+        tools.register(Undeclared(Probe(state.clone())));
+        let mut calls = [
+            call("a", json!({"label":"a","resource":"one"})),
+            call("b", json!({"label":"b","resource":"two"})),
+        ];
+        for call in &mut calls {
+            call.function.name = "unknown-effects".into();
+        }
+        schedule(&calls, &tools, 4).await;
+        assert_eq!(state.peak.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn tool_result_references_wait_and_substitute_typed_values_even_for_forward_ids() {
+        let (tools, state) = fixture();
+        let results = schedule(&[
+            call("consumer", json!({"label":"consumer","value":{"$tool_result":"producer","pointer":"/value"}})),
+            call("producer", json!({"label":"producer","value":42})),
+        ], &tools, 4).await;
+        assert_eq!(
+            serde_json::from_str::<Value>(&results[0].content).unwrap()["value"],
+            42
+        );
+        assert_eq!(
+            *state.trace.lock().unwrap(),
+            [
+                "start:producer",
+                "end:producer",
+                "start:consumer",
+                "end:consumer"
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_data_dependencies_block_consumers_but_failed_writes_do_not_block_unrelated_effects()
+     {
+        let (tools, state) = fixture();
+        let results = schedule(
+            &[
+                call("failed", json!({"label":"failed","fail":true,"write":true})),
+                call("next", json!({"label":"next","write":true})),
+                call(
+                    "dependent",
+                    json!({"label":"dependent","_ax_depends_on":["failed"]}),
+                ),
+            ],
+            &tools,
+            4,
+        )
+        .await;
+        assert!(results[2].content.contains("dependency failed"));
+        assert_eq!(
+            *state.trace.lock().unwrap(),
+            ["start:failed", "end:failed", "start:next", "end:next"]
+        );
+    }
+
+    #[tokio::test]
+    async fn resource_locks_work_across_rounds_and_release_on_cancellation() {
+        let (tools, state) = fixture();
+        let first = [call(
+            "a",
+            json!({"label":"a","resource":"cross-round","write":true,"delay":40}),
+        )];
+        let second = [call(
+            "b",
+            json!({"label":"b","resource":"cross-round","write":true,"delay":40}),
+        )];
+        tokio::join!(schedule(&first, &tools, 4), schedule(&second, &tools, 4));
+        assert_eq!(state.peak.load(Ordering::SeqCst), 1);
+        let hanging = [call(
+            "hang",
+            json!({"label":"hang","resource":"cross-round","write":true,"delay":1000}),
+        )];
+        assert!(
+            tokio::time::timeout(Duration::from_millis(30), schedule(&hanging, &tools, 4))
+                .await
+                .is_err()
+        );
+        assert_eq!(state.active.load(Ordering::SeqCst), 0);
+        tokio::time::timeout(Duration::from_millis(200), schedule(&second, &tools, 4))
+            .await
+            .unwrap();
+    }
+
+    #[test]
+    fn malformed_dependency_graphs_are_rejected_before_execution() {
+        let (tools, _) = fixture();
+        for calls in [
+            vec![call("a", json!({"_ax_depends_on":["missing"]}))],
+            vec![
+                call("a", json!({"_ax_depends_on":["b"]})),
+                call("b", json!({"_ax_depends_on":["a"]})),
+            ],
+            vec![call("same", json!({})), call("same", json!({}))],
+        ] {
+            assert!(prepare(&calls, &tools).is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn kernel_batches_parallel_results_in_call_order_and_checkpoints_completion_order() {
+        use model::{ModelError, ModelProvider, ModelRequest, ModelResponse};
+        struct Provider(AtomicUsize);
+        #[async_trait]
+        impl ModelProvider for Provider {
+            fn name(&self) -> &'static str {
+                "scheduler-fixture"
+            }
+            fn model_id(&self) -> &'static str {
+                "fixture"
+            }
+            fn context_window(&self) -> usize {
+                100_000
+            }
+            async fn complete(&self, request: ModelRequest) -> Result<ModelResponse, ModelError> {
+                if self.0.fetch_add(1, Ordering::SeqCst) == 0 {
+                    assert!(
+                        request.tools[0].function.parameters["properties"]["_ax_depends_on"]
+                            .is_object()
+                    );
+                    Ok(ModelResponse {
+                        content: String::new(),
+                        tool_calls: vec![
+                            call("slow", json!({"label":"slow","delay":100})),
+                            call("fast", json!({"label":"fast","delay":20})),
+                        ],
+                        finish_reason: None,
+                    })
+                } else {
+                    let results: Vec<_> = request
+                        .messages
+                        .iter()
+                        .filter_map(|message| message.tool_call_id.as_deref())
+                        .collect();
+                    assert_eq!(results, ["slow", "fast"]);
+                    Ok(ModelResponse {
+                        content: "done".into(),
+                        tool_calls: Vec::new(),
+                        finish_reason: None,
+                    })
+                }
+            }
+        }
+        let (tools, state) = fixture();
+        let mut kernel = super::super::AgentKernel::new(
+            Arc::new(Provider(AtomicUsize::new(0))),
+            tools,
+            Arc::new(super::super::AllowAll),
+        )
+        .with_tool_concurrency(2);
+        let mut saved = Vec::new();
+        let mut events = Vec::new();
+        assert_eq!(
+            kernel
+                .run_turn_checkpointed(
+                    "test",
+                    |event| events.push(event),
+                    |messages| {
+                        saved = messages.to_vec();
+                        Ok(())
+                    }
+                )
+                .await
+                .unwrap(),
+            "done"
+        );
+        assert_eq!(state.peak.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            saved
+                .iter()
+                .filter_map(|message| message.tool_call_id.as_deref())
+                .collect::<Vec<_>>(),
+            ["fast", "slow"]
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter_map(|event| match event {
+                    AgentEvent::ToolFinished { id, .. } => Some(id.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>(),
+            ["fast", "slow"]
+        );
+    }
+}

@@ -84,4 +84,16 @@ impl Tool for FilesystemTool {
             }
         }
     }
+
+    fn resources(&self, input: &Value) -> Vec<crate::ResourceAccess> {
+        let Some(path) = input["path"].as_str() else {
+            return vec![crate::ResourceAccess::exclusive()];
+        };
+        let resource = crate::Resource::path(path);
+        vec![if input["operation"] == "write" {
+            crate::ResourceAccess::write(resource)
+        } else {
+            crate::ResourceAccess::read(resource)
+        }]
+    }
 }

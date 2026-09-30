@@ -267,12 +267,18 @@ impl App {
                 self.unseen_output |= self.transcript.scroll_from_bottom > 0;
                 self.transcript.push_agent_delta(&delta);
             }
-            AgentEvent::ToolStarted { name, detail } => {
+            AgentEvent::ToolStarted { id, name, detail } => {
                 self.transcript.streaming = false;
-                self.transcript.tool_started(name, detail);
+                self.transcript.tool_started_with_id(id, name, detail);
             }
-            AgentEvent::ToolFinished { name, success } => {
-                self.transcript.tool_finished(&name, success);
+            AgentEvent::ToolFinished {
+                id,
+                success,
+                diagnostics,
+                ..
+            } => {
+                self.transcript.tool_finished(&id, success);
+                self.transcript.tool_diagnostics(&id, diagnostics);
             }
             AgentEvent::ContextCompressed {
                 removed_messages, ..
@@ -493,6 +499,10 @@ pub(super) async fn run_tui(
             }
 
             match key.code {
+                KeyCode::Char('o') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    app.transcript.toggle_tool_diagnostics();
+                    continue;
+                }
                 KeyCode::PageUp => {
                     app.transcript.scroll_up(
                         usize::from(visible_rows.saturating_sub(1).max(1)),

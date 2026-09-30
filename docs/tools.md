@@ -46,22 +46,48 @@ CLI `run` prints the same activity description to stderr.
 URLs). The legacy singular `query` and `url` keys remain as aliases and are
 normalized into the same lists, so a single-request call keeps working.
 
-Queries are executed concurrently against one `SearchProvider`, and URLs are
-fetched concurrently; a call takes about as long as its slowest request rather
-than the sum of all of them. A partial failure never cancels the successful
-requests: the response reports `succeeded`, `failed` and an `errors` array, and
-the call fails only when every query or URL fails.
+Queries are executed concurrently against one `SearchProvider`. The default
+total target is `limit` distinct valid URLs; optional `target_results` sets a
+different target (up to `limit * query_count`). As soon as the target is met,
+remaining futures are dropped. Results are merged in original query order,
+and `cancelled_queries` identifies unfinished queries; cancellation is not a
+failure. A short result is allowed when every query completes before reaching
+the target. A partial failure never discards successful requests: the response
+reports `succeeded`, `failed` and `errors`, and the call fails only when every
+query or URL fails.
 
-Search results from all queries are merged, canonicalized (fragment and known
+URL retrieval uses at most three in-flight requests per call. Optional
+`target_pages` returns as soon as that many pages succeed, dropping the rest
+and reporting `cancelled_urls`. Its default is all explicitly requested URLs;
+request a smaller target when only a subset is needed. Completed pages and
+their character budgets remain in original URL order. Dropping a request
+cancels local reads and retries; it cannot undo work already received by a
+remote server.
+
+Search results from completed queries are merged, canonicalized (fragment and known
 tracking parameters dropped, trailing slash trimmed) and deduplicated by URL.
 The first occurrence keeps its position in query order, so the highest-ranked
 copy of a URL is the one returned, and each record carries the
 `matched_queries` that surfaced it. Records are
-`title`/`url`/`snippet`/`source`/`matched_queries`; the default adapter uses
-Brave Search and needs `BRAVE_SEARCH_API_KEY`, and embedders can provide
-another `SearchProvider`.
+`title`/`url`/`snippet`/`source`/`matched_queries`. Without any API key, the
+default adapter uses DuckDuckGo HTML search. Configuring `BRAVE_SEARCH_API_KEY`
+selects Brave as the preferred provider; failures or empty Brave responses
+fall back to DuckDuckGo. Embedders can still supply another `SearchProvider`,
+or override built-in endpoints with `SearchConfig`. HTML results are parsed
+with the HTML DOM parser, tracking redirects are unwrapped, and advertisements
+and non-HTTP(S) links are excluded. Challenges are reported as errors rather
+than fabricated results. Search never fetches destination page bodies.
 
-Fetch sends only GET, follows up to five redirects, times out after 15 seconds,
+The shared HTTP client retains a connection pool, HTTP Keep-Alive, 30-second
+TCP keepalive, and a bounded 60-second DNS cache using the system resolver.
+Concurrent lookups for the same name are coalesced. The default per-attempt
+connect/read/total timeouts are 2/3/8 seconds. An injected client retains its
+own transport settings. Only timeout, 429 and 5xx responses are retried, with
+one retry after 100 ms; 401/403/404 are never retried. A retry failure is returned
+with its complete error chain. Proxy settings and TLS verification still use
+reqwest defaults.
+
+Fetch sends only GET, follows up to five redirects,
 rejects non-text content, limits each body to 2 MB, and removes comments and
 `script`/`style`/`nav`/`footer`/`aside` noise before converting HTML to
 Markdown. Every page returns `url`, `title` (when the page has one),
@@ -69,6 +95,23 @@ Markdown. Every page returns `url`, `title` (when the page has one),
 characters and one call at most 60,000 characters, always reported through
 `truncated: true` instead of silently cutting content. It does not execute
 browser JavaScript.
+
+Fetch errors include `url`, `error` (the complete joined error chain), `kind`,
+`reason` (a short display label), and `source_chain` (outer error through root
+cause). `kind` is one of `dns`, `connect`, `timeout`, `tls`, `proxy`, `redirect`,
+`http_status`, or `unknown`; HTTP status errors also include `status_code`.
+reqwest's typed status, redirect, timeout and connect flags take precedence;
+DNS, TLS and proxy errors are recognized from source messages, with `unknown`
+as the fallback. URLs are not used for classification. An all-failed fetch
+remains a tool error and carries the same structured records in its diagnostic
+payload. Partial failures keep their records in the successful result's
+`errors` array.
+
+The TUI shows a short row such as `web.fetch · failed (connect timeout)`.
+Ctrl+O expands/collapses the latest fetch diagnostic, showing the full URL
+and every underlying error. The latest diagnostic remains available after its
+original row enters terminal scrollback. ACP completion updates expose these
+records in `rawOutput.errors`.
 
 ```json
 {
@@ -155,13 +198,55 @@ and tool call records a timer. Batched `web` calls add `web.search` and
 latencies, and `web.search.ok` / `web.search.failed` / `web.fetch.ok` /
 `web.fetch.failed` counters.
 
+Network timings add `web.http.dns`, `web.http.connect`, `web.http.ttfb`, and
+`web.http.total`, plus DNS cache hit, retry, provider fallback and cancellation
+counters. DNS is actual resolver duration; connect is the measured connector
+service duration (including DNS, proxy and TLS when required); TTFB measures
+response-header arrival because reqwest does not expose the first socket byte.
+Total covers all attempts, backoff and body reads. These phase measurements
+overlap and must not be added together. Reused connections and literal IPs may
+perform no DNS lookup or connection establishment. No URL, query or credential
+is stored in telemetry. See [web-latency.md](web-latency.md) for the benchmark.
+
 ## Concurrency
 
-Parallel tool execution lives inside each tool, never in the agent loop. Tools
-that may depend on each other (`shell`, `filesystem`, `patch`, `view_image`)
-keep running one call at a time; the read-only network tool batches its own
-requests. `web` is the only built-in that runs independent requests
-concurrently.
+The Runtime builds a dependency DAG for every model tool-call round and runs
+ready independent calls with bounded concurrency (default four, configurable
+through `AgentKernel::with_tool_concurrency`, capped at 64). It uses in-task
+futures rather than spawning a task per model call. Tool permission decisions
+remain unchanged; interactive approvals are serialized while approved work
+runs concurrently.
+
+`Tool::resources(input)` declares read/write effects. Filesystem read/list,
+search and image reads share path leases; filesystem writes and patches acquire
+exclusive path leases. Canonical paths, Windows case normalization and directory
+overlap prevent aliases and parent/child accesses from bypassing conflicts.
+Memory uses its actual SQLite database path, so writes to that database are
+serialized across scopes and kernels; reads can overlap. MCP catalog reads can
+overlap; list-tools modifies the relevant manager resource. Shell scripts,
+including Git commands, and tools without explicit effect declarations hold a
+global exclusive lease because their affected resources cannot be safely inferred
+from command text, names or permission categories. A read-only tool declares its
+effects explicitly to opt into concurrency. Leases are process-wide, including
+forked kernels, and are released on success, error, timeout or cancellation.
+They coordinate AX tool invocations, not external processes editing those paths.
+
+Arguments may contain typed references such as
+`{"$tool_result":"producer-id","pointer":"/url"}`. The runtime detects the
+dependency, waits for the producer, and substitutes the referenced JSON value
+(or the whole text/JSON result when no pointer is provided). The optional
+reserved `_ax_depends_on` array adds explicit success dependencies and is stripped
+before permission checks and execution. These forms are exposed through runtime
+tool schemas; no scheduling decision relies on a prompt. Unknown IDs, duplicate
+IDs and cycles are rejected before execution. Failed input dependencies suppress
+dependent operations; a failed earlier resource write does not suppress a later
+independent call that merely shares the resource.
+
+Tool lifecycle events carry the original `tool_call_id`, including same-name
+calls. Completed results are checkpointed as they finish, preserving raw history,
+then returned together to the next model request in original call order. Tool
+budgets are checked before starting a round, and interrupted calls retain the
+existing recovery placeholders.
 
 ## Reference
 
@@ -171,5 +256,6 @@ concurrently.
 | Built-in tools | `crates/tool/src/shell.rs`, `filesystem.rs`, `patch.rs`, `search.rs`, `web.rs`, `view_image.rs` |
 | `Capability`, `PermissionStore` | `crates/tool/src/permission.rs` |
 | Telemetry | `crates/tool/src/telemetry.rs` |
+| Runtime scheduling and resource locks | `crates/core/src/scheduler.rs`, `crates/tool/src/resources.rs` |
 | Registry assembly, approval wiring | `crates/cli/src/main.rs` |
 | `/permissions`, `/tools` views | `crates/cli/src/tui/commands.rs`, `crates/cli/src/tui/commands/catalogs.rs` |

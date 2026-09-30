@@ -91,6 +91,13 @@ Owns:
   When a configured budget or timeout fires, hanging tool calls get a
   placeholder result so the message record stays well-formed.
 - The **`AgentEvent` stream**: token deltas, tool state, compression events.
+- **Dependency-aware tool rounds**: independent declared effects execute with
+  bounded concurrency; typed result references and shared write resources add
+  DAG edges. Process-wide leases serialize conflicting filesystem, Git and
+  Memory operations across kernels. Lifecycle events and results retain the
+  real tool call IDs. Raw checkpoints follow completion order; the next model
+  receives the completed round in call order. See [tools.md](tools.md#concurrency)
+  and [ADR 0005](adr/0005-tool-round-scheduler.md).
 - **Context management**: `context::select_context` picks history for the
   model by token budget (not fixed message count) and never cuts through an
   unfinished tool-call round.
@@ -212,9 +219,9 @@ user task
   → final text ──────────────→ persist and finish
   → tool calls
       → permission check
-      → execute built-in or MCP proxy
-      → append tool result
-      → checkpoint result
+      → dependency DAG and bounded resource-aware execution
+      → checkpoint completed results with original tool call IDs
+      → append completed round in original call order
       → context pressure check / next model step
 ```
 

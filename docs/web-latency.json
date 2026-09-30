@@ -1,0 +1,21 @@
+{
+  "fetch": {
+    "after_p50_ms": 31.2054,
+    "after_p95_ms": 31.861800000000002,
+    "before_p50_ms": 309.9737,
+    "before_p95_ms": 312.85429999999997
+  },
+  "fixture": {
+    "fast_ms": 20,
+    "straggler_ms": 300,
+    "target": 1,
+    "transport": "loopback, shared client"
+  },
+  "samples": 30,
+  "search": {
+    "after_p50_ms": 31.083,
+    "after_p95_ms": 32.181599999999996,
+    "before_p50_ms": 309.1514,
+    "before_p95_ms": 311.7038
+  }
+}

@@ -37,6 +37,19 @@ struct Input {
 
 #[async_trait]
 impl Tool for MemoryTool {
+    fn resources(&self, input: &Value) -> Vec<tool::ResourceAccess> {
+        let path = if input["scope"] == "global" {
+            &self.global_database
+        } else {
+            &self.database
+        };
+        let resource = tool::Resource::path(path);
+        vec![if input["action"] == "list" {
+            tool::ResourceAccess::read(resource)
+        } else {
+            tool::ResourceAccess::write(resource)
+        }]
+    }
     fn name(&self) -> &'static str {
         "memory"
     }

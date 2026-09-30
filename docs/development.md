@@ -45,6 +45,9 @@ Quick smoke test of a local build:
 
 ## Conventions
 
+Web scheduling benchmarks and the optional public-provider smoke test are
+documented in [web-latency.md](web-latency.md).
+
 - **One-directional dependencies**: `cli` composes; core crates do not depend
   on terminal UI. Keep new modules on the same side of the boundary.
 - **Lazy by default**: providers, skills, MCP servers and memory load on
@@ -72,7 +75,9 @@ Quick smoke test of a local build:
 ### A new built-in tool
 
 1. Implement `Tool` in `crates/tool` (name, description, JSON input schema,
-   `permission()`).
+   `permission()`, and explicit read/write resources through `resources()`).
+   Unknown effects use a global exclusive resource lease; declaration is
+   required to gain safe parallelism. See [tools.md](tools.md#concurrency).
 2. Register it in the composition root's registry (`cli::tools` in
    `crates/cli/src/main.rs`).
 

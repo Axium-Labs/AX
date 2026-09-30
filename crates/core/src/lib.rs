@@ -2,6 +2,7 @@
 
 mod budget;
 mod context;
+mod scheduler;
 pub use budget::{ContextBudget, ExecutionBudget};
 pub use context::select_context;
 
@@ -29,12 +30,15 @@ pub enum AgentEvent {
         delta: String,
     },
     ToolStarted {
+        id: String,
         name: String,
         detail: String,
     },
     ToolFinished {
+        id: String,
         name: String,
         success: bool,
+        diagnostics: Vec<tool::FetchError>,
     },
     TurnFinished,
     ContextCompressed {
@@ -129,6 +133,7 @@ pub struct AgentKernel {
     compression: CompressionPolicy,
     raw_turn_messages: Vec<Message>,
     compression_dirty: bool,
+    tool_concurrency: usize,
 }
 
 impl AgentKernel {
@@ -150,12 +155,19 @@ impl AgentKernel {
             compression: CompressionPolicy::default(),
             raw_turn_messages: Vec::new(),
             compression_dirty: false,
+            tool_concurrency: 4,
         }
     }
 
     #[must_use]
     pub fn with_execution_budget(mut self, budget: ExecutionBudget) -> Self {
         self.budget = budget;
+        self
+    }
+
+    #[must_use]
+    pub fn with_tool_concurrency(mut self, concurrency: usize) -> Self {
+        self.tool_concurrency = concurrency.clamp(1, 64);
         self
     }
 
@@ -210,6 +222,7 @@ impl AgentKernel {
             messages,
             budget: self.budget,
             compression: self.compression.clone(),
+            tool_concurrency: self.tool_concurrency,
             raw_turn_messages: Vec::new(),
             compression_dirty: false,
         }
@@ -599,7 +612,7 @@ impl AgentKernel {
                 function: FunctionSpec {
                     name: tool.name().to_owned(),
                     description: tool.description().to_owned(),
-                    parameters: tool.input_schema(),
+                    parameters: scheduler::input_schema(tool.input_schema()),
                 },
             })
             .collect::<Vec<_>>();
@@ -655,67 +668,37 @@ impl AgentKernel {
                 return Err(AgentError::Budget("tool call limit".into()));
             }
             calls_used = calls_used.saturating_add(tool_calls.len());
-            for call in tool_calls {
-                let name = call.function.name;
-                let input: Value =
-                    serde_json::from_str(&call.function.arguments).map_err(|source| {
-                        AgentError::InvalidToolArguments {
-                            tool: name.clone(),
-                            source,
-                        }
-                    })?;
-                (emit.lock().unwrap())(AgentEvent::ToolStarted {
-                    name: name.clone(),
-                    detail: tool_activity(&name, &input),
-                });
-                let tool = self
-                    .tools
-                    .get(&name)
-                    .ok_or_else(|| ToolError::Unknown(name.clone()))?;
-                let approved = self
-                    .approval
-                    .approve(&name, &input, tool.permission(&input))
-                    .await;
-                let result = if approved {
-                    let _timer = tool::telemetry::Timer::new(format!("tool.{}", tool.name()));
-                    if self.budget.tool_timeout_secs == 0 {
-                        tool.execute_output(input).await
-                    } else {
-                        tokio::time::timeout(
-                            std::time::Duration::from_secs(self.budget.tool_timeout_secs),
-                            tool.execute_output(input),
-                        )
-                        .await
-                        .unwrap_or_else(|_| Err(ToolError::Execution("tool timeout".into())))
-                    }
-                } else {
-                    Err(ToolError::PermissionDenied(name.clone()))
-                };
-                (emit.lock().unwrap())(AgentEvent::ToolFinished {
-                    name,
-                    success: result.is_ok(),
-                });
-                let tool_message =
-                    match result.unwrap_or_else(|error| ToolOutput::Text(error.to_string())) {
-                        ToolOutput::Text(text) => Message::tool(call.id, text),
-                        ToolOutput::Image {
-                            description,
-                            media_type,
-                            data,
-                        } => {
-                            let mut message = Message::tool(call.id, description.clone());
-                            message.parts = vec![
-                                model::ContentPart::Text { text: description },
-                                model::ContentPart::Image { media_type, data },
-                            ];
-                            message
-                        }
-                    };
-                self.messages.push(tool_message.clone());
-                self.raw_turn_messages.push(tool_message);
-                checkpoint(&self.raw_turn_messages)?;
-            }
+            let jobs = scheduler::prepare(&tool_calls, &self.tools)?;
+            let round_start = self.messages.len();
+            let results = scheduler::run(
+                jobs,
+                Arc::clone(&self.approval),
+                self.tool_concurrency,
+                self.budget.tool_timeout_secs,
+                &emit,
+                |message| {
+                    self.messages.push(message.clone());
+                    self.raw_turn_messages.push(message);
+                    checkpoint(&self.raw_turn_messages)
+                },
+            )
+            .await?;
+            // Raw checkpoints follow completion order; the next model request
+            // receives one result per original call, in the original call order.
+            self.messages.truncate(round_start);
+            self.messages.extend(results);
         }
+    }
+}
+
+fn fetch_diagnostics(name: &str, result: &Result<ToolOutput, ToolError>) -> Vec<tool::FetchError> {
+    match result {
+        Err(ToolError::WebFetch(errors)) => errors.clone(),
+        Ok(ToolOutput::Text(text)) if name == "web" => serde_json::from_str::<Value>(text)
+            .ok()
+            .and_then(|value| serde_json::from_value(value["errors"].clone()).ok())
+            .unwrap_or_default(),
+        _ => Vec::new(),
     }
 }
 
@@ -758,6 +741,33 @@ fn tool_activity(name: &str, input: &Value) -> String {
 #[cfg(test)]
 mod tool_activity_tests {
     use super::tool_activity;
+
+    #[test]
+    fn fetch_diagnostics_survive_both_partial_and_total_failure() {
+        use super::{ToolError, ToolOutput, fetch_diagnostics};
+        let value = serde_json::json!({
+            "url": "https://example.test/full",
+            "kind": "connect",
+            "reason": "connection failed",
+            "error": "outer: root",
+            "source_chain": ["outer", "root"]
+        });
+        let diagnostic = serde_json::from_value(value.clone()).unwrap();
+        let failed = Err(ToolError::WebFetch(vec![diagnostic]));
+        let partial = Ok(ToolOutput::Text(
+            serde_json::json!({"errors": [value]}).to_string(),
+        ));
+        for result in [failed, partial] {
+            let diagnostics = fetch_diagnostics("web", &result);
+            assert_eq!(diagnostics.len(), 1);
+            assert_eq!(diagnostics[0].source_chain, ["outer", "root"]);
+            assert_eq!(diagnostics[0].url, "https://example.test/full");
+        }
+        let search = Ok(ToolOutput::Text(
+            serde_json::json!({"errors": [{"query": "q", "error": "search failed"}]}).to_string(),
+        ));
+        assert!(fetch_diagnostics("web", &search).is_empty());
+    }
     use serde_json::json;
 
     #[test]
@@ -1036,7 +1046,7 @@ pub fn estimate_tool_schema_tokens(tools: &ToolRegistry) -> usize {
         .map(|tool| {
             estimate_text_tokens(tool.name())
                 + estimate_text_tokens(tool.description())
-                + estimate_text_tokens(&tool.input_schema().to_string())
+                + estimate_text_tokens(&scheduler::input_schema(tool.input_schema()).to_string())
         })
         .sum()
 }

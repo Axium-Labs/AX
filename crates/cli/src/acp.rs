@@ -134,13 +134,21 @@ fn update(out: &Outbox, session_id: &str, event: AgentEvent, calls: &mut HashMap
         AgentEvent::ThinkingDelta { delta } => {
             json!({"sessionUpdate":"agent_thought_chunk","content":{"type":"text","text":delta}})
         }
-        AgentEvent::ToolStarted { name, detail } => {
-            let id = Uuid::new_v4().to_string();
-            calls.insert(name.clone(), id.clone());
+        AgentEvent::ToolStarted { id, name, detail } => {
+            calls.insert(id.clone(), id.clone());
             json!({"sessionUpdate":"tool_call","toolCallId":id,"title":detail,"kind":"execute","status":"pending","rawInput":{"name":name}})
         }
-        AgentEvent::ToolFinished { name, success } => {
-            json!({"sessionUpdate":"tool_call_update","toolCallId":calls.remove(&name).unwrap_or_else(|| name.clone()),"status":if success {"completed"} else {"failed"}})
+        AgentEvent::ToolFinished {
+            id,
+            success,
+            diagnostics,
+            ..
+        } => {
+            let mut update = json!({"sessionUpdate":"tool_call_update","toolCallId":calls.remove(&id).unwrap_or(id),"status":if success {"completed"} else {"failed"}});
+            if !diagnostics.is_empty() {
+                update["rawOutput"] = json!({"errors": diagnostics});
+            }
+            update
         }
         AgentEvent::ModelStarted { .. }
         | AgentEvent::ContextCompressed { .. }

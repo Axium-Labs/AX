@@ -34,6 +34,12 @@ impl Tool for PatchTool {
     fn safety(&self, _input: &Value) -> SafetyLevel {
         SafetyLevel::RequiresApproval
     }
+    fn resources(&self, input: &Value) -> Vec<crate::ResourceAccess> {
+        input["path"].as_str().map_or_else(
+            || vec![crate::ResourceAccess::exclusive()],
+            |path| vec![crate::ResourceAccess::write(crate::Resource::path(path))],
+        )
+    }
     async fn execute(&self, input: Value) -> Result<String, ToolError> {
         let input: Input =
             serde_json::from_value(input).map_err(|e| ToolError::InvalidInput(e.to_string()))?;

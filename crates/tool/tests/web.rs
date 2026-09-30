@@ -66,6 +66,172 @@ fn tool_without_search() -> WebTool {
     WebTool::new().with_client(reqwest::Client::builder().no_proxy().build().unwrap())
 }
 
+fn fetch_errors(error: ToolError) -> Vec<tool::FetchError> {
+    let ToolError::WebFetch(errors) = error else {
+        panic!("expected structured fetch error: {error}")
+    };
+    errors
+}
+
+struct FailingDns;
+impl reqwest::dns::Resolve for FailingDns {
+    fn resolve(&self, _: reqwest::dns::Name) -> reqwest::dns::Resolving {
+        Box::pin(async { Err(std::io::Error::other("fixture resolver failure").into()) })
+    }
+}
+
+struct PendingDns;
+impl reqwest::dns::Resolve for PendingDns {
+    fn resolve(&self, _: reqwest::dns::Name) -> reqwest::dns::Resolving {
+        Box::pin(std::future::pending())
+    }
+}
+
+#[tokio::test]
+async fn fetch_preserves_dns_sources_without_classifying_url_text() {
+    let tool = WebTool::new().with_client(
+        reqwest::Client::builder()
+            .no_proxy()
+            .dns_resolver(Arc::new(FailingDns))
+            .build()
+            .unwrap(),
+    );
+    let errors = fetch_errors(
+        tool.execute(
+            json!({"operation":"fetch","url":"http://proxy-tls-timeout.test/full?query=1"}),
+        )
+        .await
+        .unwrap_err(),
+    );
+    assert_eq!(errors[0].kind, tool::FetchErrorKind::Dns);
+    assert_eq!(
+        errors[0].source_chain.last().unwrap(),
+        "fixture resolver failure"
+    );
+    assert!(errors[0].source_chain.len() >= 3);
+    assert_eq!(errors[0].error, errors[0].source_chain.join(": "));
+    assert!(
+        serde_json::to_value(&errors[0])
+            .unwrap()
+            .get("status_code")
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn fetch_classifies_connection_refusal() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    drop(listener);
+    let errors = fetch_errors(
+        tool_without_search()
+            .execute(json!({"operation":"fetch","url":format!("http://{address}/dns/tls/proxy")}))
+            .await
+            .unwrap_err(),
+    );
+    assert_eq!(errors[0].kind, tool::FetchErrorKind::Connect);
+    assert!(errors[0].source_chain.len() >= 3);
+}
+
+#[tokio::test]
+async fn fetch_distinguishes_connect_and_response_timeout() {
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .dns_resolver(Arc::new(PendingDns))
+        .connect_timeout(Duration::from_millis(50))
+        .build()
+        .unwrap();
+    let errors = fetch_errors(
+        WebTool::new()
+            .with_client(client)
+            .execute(json!({"operation":"fetch","url":"http://timeout.test/full"}))
+            .await
+            .unwrap_err(),
+    );
+    assert_eq!(errors[0].kind, tool::FetchErrorKind::Timeout);
+    assert_eq!(errors[0].reason, "connect timeout");
+
+    let server = spawn_server(|_| (200, "OK", PAGE.into()), Duration::from_secs(1)).await;
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .timeout(Duration::from_millis(50))
+        .build()
+        .unwrap();
+    let errors = fetch_errors(
+        WebTool::new()
+            .with_client(client)
+            .execute(json!({"operation":"fetch","url":format!("http://{}/full", server.address)}))
+            .await
+            .unwrap_err(),
+    );
+    assert_eq!(errors[0].kind, tool::FetchErrorKind::Timeout);
+    assert_eq!(errors[0].reason, "request timeout");
+}
+
+#[tokio::test]
+async fn fetch_classifies_tls_and_proxy_tunnel_failures() {
+    // A plaintext response during the TLS handshake exercises the real TLS chain.
+    let server = spawn_server(|_| (200, "OK", PAGE.into()), Duration::ZERO).await;
+    let errors = fetch_errors(
+        tool_without_search()
+            .execute(json!({"operation":"fetch","url":format!("https://{}/full", server.address)}))
+            .await
+            .unwrap_err(),
+    );
+    assert_eq!(errors[0].kind, tool::FetchErrorKind::Tls, "{errors:?}");
+    assert!(errors[0].source_chain.len() >= 2);
+
+    let proxy = spawn_server(
+        |_| (407, "Proxy Authentication Required", String::new()),
+        Duration::ZERO,
+    )
+    .await;
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .proxy(reqwest::Proxy::all(format!("http://{}", proxy.address)).unwrap())
+        .build()
+        .unwrap();
+    let errors = fetch_errors(
+        WebTool::new()
+            .with_client(client)
+            .execute(json!({"operation":"fetch","url":"https://destination.test/full"}))
+            .await
+            .unwrap_err(),
+    );
+    assert_eq!(errors[0].kind, tool::FetchErrorKind::Proxy, "{errors:?}");
+}
+
+#[tokio::test]
+async fn fetch_classifies_redirect_limit() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        loop {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut buffer = [0; 2048];
+            if stream.read(&mut buffer).await.unwrap() == 0 {
+                continue;
+            }
+            stream.write_all(b"HTTP/1.1 302 Found\r\nLocation: /loop\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await.unwrap();
+        }
+    });
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::limited(5))
+        .build()
+        .unwrap();
+    let errors = fetch_errors(
+        WebTool::new()
+            .with_client(client)
+            .execute(json!({"operation":"fetch","url":format!("http://{address}/loop")}))
+            .await
+            .unwrap_err(),
+    );
+    assert_eq!(errors[0].kind, tool::FetchErrorKind::Redirect);
+    assert!(errors[0].source_chain.len() >= 2);
+    server.abort();
+}
+
 fn payload(text: &str) -> Value {
     serde_json::from_str(text).unwrap()
 }
@@ -299,14 +465,249 @@ async fn search_deduplicates_repeated_queries_within_limit() {
 }
 
 #[tokio::test]
-async fn search_reports_missing_provider() {
-    let tool = tool_without_search();
-    let error = tool
-        .execute(json!({"operation":"search","queries":["ax"]}))
-        .await
-        .unwrap_err();
-    assert!(error.to_string().contains("BRAVE_SEARCH_API_KEY"));
+async fn search_without_brave_key_uses_duckduckgo() {
+    let server = spawn_server(|_| (200, "OK", DDG_RESULTS.into()), Duration::ZERO).await;
+    let tool = builtin_search_tool(&server, None);
+    let value = payload(
+        &tool
+            .execute(json!({"operation":"search","query":"ax"}))
+            .await
+            .unwrap(),
+    );
+    assert_eq!(value["results"][0]["source"], "duckduckgo");
+    assert_eq!(value["results"][0]["title"], "AX docs");
     assert_eq!(MAX_QUERIES, 4);
+}
+
+const DDG_RESULTS: &str = "<div class='result'><a class='result__a' href='https://example.test/doc'>AX docs</a><a class='result__snippet'>AX information</a></div>";
+
+#[tokio::test]
+async fn built_in_search_reuses_client_pool_and_keepalive_connections() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let connections = Arc::new(AtomicUsize::new(0));
+    let counter = connections.clone();
+    let server = tokio::spawn(async move {
+        loop {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            counter.fetch_add(1, Ordering::SeqCst);
+            tokio::spawn(async move {
+                let mut buffer = [0; 2048];
+                loop {
+                    match socket.read(&mut buffer).await {
+                        Ok(n) if n > 0 => {}
+                        _ => return,
+                    }
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: keep-alive\r\n\r\n{DDG_RESULTS}",
+                        DDG_RESULTS.len()
+                    );
+                    if socket.write_all(response.as_bytes()).await.is_err() {
+                        return;
+                    }
+                }
+            });
+        }
+    });
+    let tool = tool_without_search().with_search_config(tool::SearchConfig {
+        duckduckgo_url: format!("http://{address}/html"),
+        ..tool::SearchConfig::default()
+    });
+    for query in ["first", "second"] {
+        tool.execute(json!({"operation":"search","query":query}))
+            .await
+            .unwrap();
+    }
+    assert_eq!(
+        connections.load(Ordering::SeqCst),
+        1,
+        "provider creation must retain the shared connection pool"
+    );
+    server.abort();
+}
+
+fn builtin_search_tool(server: &TestServer, key: Option<&str>) -> WebTool {
+    tool_without_search().with_search_config(tool::SearchConfig {
+        brave_api_key: key.map(str::to_owned),
+        brave_url: format!("http://{}/brave", server.address),
+        duckduckgo_url: format!("http://{}/duck", server.address),
+    })
+}
+
+#[tokio::test]
+async fn search_with_brave_key_prefers_brave() {
+    let hits = Arc::new(AtomicUsize::new(0));
+    let counter = hits.clone();
+    let server = spawn_server(move |path| {
+        assert!(path.starts_with("/brave?q="));
+        counter.fetch_add(1, Ordering::SeqCst);
+        (200, "OK", json!({"web":{"results":[{"title":"Brave title","url":"https://example.test/brave","description":"snippet"}]}}).to_string())
+    }, Duration::ZERO).await;
+    let value = payload(
+        &builtin_search_tool(&server, Some("fixture-key"))
+            .execute(json!({"operation":"search","query":"ax"}))
+            .await
+            .unwrap(),
+    );
+    assert_eq!(value["results"][0]["source"], "brave");
+    assert_eq!(hits.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn brave_failure_falls_back_without_retrying_unauthorized() {
+    let brave_hits = Arc::new(AtomicUsize::new(0));
+    let counter = brave_hits.clone();
+    let server = spawn_server(
+        move |path| {
+            if path.starts_with("/brave") {
+                counter.fetch_add(1, Ordering::SeqCst);
+                (401, "Unauthorized", String::new())
+            } else {
+                (200, "OK", DDG_RESULTS.into())
+            }
+        },
+        Duration::ZERO,
+    )
+    .await;
+    let value = payload(
+        &builtin_search_tool(&server, Some("invalid-key"))
+            .execute(json!({"operation":"search","query":"ax"}))
+            .await
+            .unwrap(),
+    );
+    assert_eq!(value["results"][0]["source"], "duckduckgo");
+    assert_eq!(brave_hits.load(Ordering::SeqCst), 1);
+}
+
+struct LatencySearch {
+    started: Arc<AtomicUsize>,
+    completed: Arc<AtomicUsize>,
+}
+
+#[async_trait]
+impl SearchProvider for LatencySearch {
+    async fn search(&self, query: &str, _: usize) -> Result<Vec<SearchResult>, ToolError> {
+        self.started.fetch_add(1, Ordering::SeqCst);
+        tokio::time::sleep(if query == "fast" {
+            Duration::from_millis(20)
+        } else {
+            Duration::from_millis(300)
+        })
+        .await;
+        self.completed.fetch_add(1, Ordering::SeqCst);
+        Ok(one_result(query))
+    }
+}
+
+#[tokio::test]
+async fn search_cancels_remaining_queries_after_valid_result_target() {
+    let started = Arc::new(AtomicUsize::new(0));
+    let completed = Arc::new(AtomicUsize::new(0));
+    let tool = tool_without_search().with_search_provider(Arc::new(LatencySearch {
+        started: started.clone(),
+        completed: completed.clone(),
+    }));
+    let value = payload(
+        &tokio::time::timeout(
+            Duration::from_millis(200),
+            tool.execute(json!({"operation":"search","queries":["slow","fast","other"],"limit":1})),
+        )
+        .await
+        .unwrap()
+        .unwrap(),
+    );
+    assert_eq!(started.load(Ordering::SeqCst), 3);
+    assert_eq!(completed.load(Ordering::SeqCst), 1);
+    assert_eq!(value["cancelled_queries"], json!(["slow", "other"]));
+    assert_eq!(value["results"][0]["title"], "fast");
+    tokio::time::sleep(Duration::from_millis(320)).await;
+    assert_eq!(
+        completed.load(Ordering::SeqCst),
+        1,
+        "cancelled providers must not keep running"
+    );
+}
+
+#[tokio::test]
+async fn fetch_retries_only_transient_statuses_and_is_bounded() {
+    for (status, expected_attempts) in [(401, 1), (403, 1), (404, 1), (429, 2), (500, 2), (503, 2)]
+    {
+        let hits = Arc::new(AtomicUsize::new(0));
+        let counter = hits.clone();
+        let server = spawn_server(
+            move |_| {
+                counter.fetch_add(1, Ordering::SeqCst);
+                (status, "Failure", String::new())
+            },
+            Duration::ZERO,
+        )
+        .await;
+        let errors = fetch_errors(
+            tool_without_search()
+                .execute(json!({"operation":"fetch","url":format!("http://{}/", server.address)}))
+                .await
+                .unwrap_err(),
+        );
+        assert_eq!(errors[0].status_code, Some(status));
+        assert_eq!(hits.load(Ordering::SeqCst), expected_attempts);
+    }
+    let server = spawn_server(|_| (200, "OK", PAGE.into()), Duration::from_millis(40)).await;
+    let urls: Vec<_> = (0..6)
+        .map(|i| format!("http://{}/{i}", server.address))
+        .collect();
+    let value = payload(
+        &tool_without_search()
+            .execute(json!({"operation":"fetch","urls":urls}))
+            .await
+            .unwrap(),
+    );
+    assert_eq!(value["succeeded"], 6);
+    assert_eq!(server.peak_in_flight.load(Ordering::SeqCst), 3);
+}
+
+#[tokio::test]
+async fn fetch_cancels_slow_urls_at_page_target() {
+    let fast = spawn_server(|_| (200, "OK", PAGE.into()), Duration::from_millis(20)).await;
+    let slow = spawn_server(|_| (200, "OK", PAGE.into()), Duration::from_secs(1)).await;
+    let urls = [
+        format!("http://{}/slow", slow.address),
+        format!("http://{}/fast", fast.address),
+    ];
+    let value = payload(
+        &tokio::time::timeout(
+            Duration::from_millis(200),
+            tool_without_search()
+                .execute(json!({"operation":"fetch","urls":urls,"target_pages":1})),
+        )
+        .await
+        .unwrap()
+        .unwrap(),
+    );
+    assert_eq!(value["succeeded"], 1);
+    assert_eq!(value["failed"], 0);
+    assert_eq!(value["cancelled_urls"], json!([urls[0]]));
+}
+
+#[tokio::test]
+async fn fetch_cancellation_stops_retry_backoff_and_further_attempts() {
+    let hits = Arc::new(AtomicUsize::new(0));
+    let counter = hits.clone();
+    let retrying = spawn_server(
+        move |_| {
+            counter.fetch_add(1, Ordering::SeqCst);
+            (429, "Too Many Requests", String::new())
+        },
+        Duration::ZERO,
+    )
+    .await;
+    let fast = spawn_server(|_| (200, "OK", PAGE.into()), Duration::from_millis(30)).await;
+    let value = payload(&tool_without_search().execute(json!({
+        "operation":"fetch","urls":[format!("http://{}/rate-limited",retrying.address),format!("http://{}/fast",fast.address)],"target_pages":1
+    })).await.unwrap());
+    assert_eq!(value["succeeded"], 1);
+    assert_eq!(value["cancelled_urls"].as_array().unwrap().len(), 1);
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    assert_eq!(hits.load(Ordering::SeqCst), 1);
 }
 
 const PAGE: &str = "<html><head><title>Doc Title</title>\
@@ -402,6 +803,12 @@ async fn fetch_reports_partial_failures() {
     assert_eq!(value["succeeded"], 1);
     assert_eq!(value["failed"], 1);
     assert_eq!(value["pages"].as_array().unwrap().len(), 1);
+    assert_eq!(value["errors"][0]["kind"], "http_status");
+    assert_eq!(value["errors"][0]["status_code"], 404);
+    assert_eq!(
+        value["errors"][0]["source_chain"].as_array().unwrap().len(),
+        1
+    );
     assert_eq!(
         value["errors"][0]["url"],
         format!("http://{}/missing", server.address)
@@ -426,6 +833,15 @@ async fn fetch_fails_only_when_every_url_fails() {
         .await
         .unwrap_err();
     assert!(error.to_string().contains("every url"), "{error}");
+    let ToolError::WebFetch(errors) = error else {
+        panic!("expected fetch diagnostics")
+    };
+    assert_eq!(errors.len(), 2);
+    for error in errors {
+        assert_eq!(error.kind, tool::FetchErrorKind::HttpStatus);
+        assert_eq!(error.status_code, Some(500));
+        assert_eq!(error.error, error.source_chain.join(": "));
+    }
     let scheme = tool
         .execute(json!({"operation":"fetch","url":"file:///etc/passwd"}))
         .await

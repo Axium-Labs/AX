@@ -16,6 +16,15 @@ impl McpGateway {
 }
 #[async_trait]
 impl Tool for McpGateway {
+    fn resources(&self, input: &Value) -> Vec<tool::ResourceAccess> {
+        let resource =
+            tool::Resource::Named(format!("mcp-manager:{:p}", Arc::as_ptr(&self.manager)));
+        match input["action"].as_str() {
+            Some("catalog") => vec![tool::ResourceAccess::read(resource)],
+            Some("list_tools") => vec![tool::ResourceAccess::write(resource)],
+            _ => vec![tool::ResourceAccess::exclusive()],
+        }
+    }
     fn name(&self) -> &'static str {
         "mcp"
     }

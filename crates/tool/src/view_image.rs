@@ -58,6 +58,12 @@ struct Input {
 
 #[async_trait]
 impl Tool for ViewImageTool {
+    fn resources(&self, input: &Value) -> Vec<crate::ResourceAccess> {
+        input["path"].as_str().map_or_else(
+            || vec![crate::ResourceAccess::exclusive()],
+            |path| vec![crate::ResourceAccess::read(crate::Resource::path(path))],
+        )
+    }
     fn name(&self) -> &'static str {
         "view_image"
     }
