@@ -54,11 +54,12 @@ pub async fn run() -> Result<()> {
         .json()
         .await
         .context("could not read the latest GitHub Release")?;
-    if release.tag_name.trim_start_matches('v') == env!("CARGO_PKG_VERSION") {
-        println!("AX is up to date ({}).", release.tag_name);
-        return Ok(());
-    }
+    let binary_outdated = release.tag_name.trim_start_matches('v') != env!("CARGO_PKG_VERSION");
 
+    // Always pull the latest archive so the bundled payload (skills plus the
+    // example MCP config) is refreshed even when the binary itself is already
+    // current. Archives from before those were packaged simply have nothing to
+    // install.
     println!("AX: downloading {}...", release.tag_name);
     let archive = download(&client, &release.asset(&asset_name)?.browser_download_url).await?;
     let sums = download(&client, &release.asset("SHA256SUMS")?.browser_download_url).await?;
@@ -68,52 +69,58 @@ pub async fn run() -> Result<()> {
         bail!("checksum mismatch for {asset_name}; the existing AX executable was not changed");
     }
 
-    let staged = stage_path(&target)?;
-    let result = (|| -> Result<()> {
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&staged)
-            .with_context(|| format!("cannot stage update beside {}", target.display()))?;
-        extract_executable(&archive, &asset_name, &mut file)?;
-        file.flush()?;
-        file.sync_all()?;
-        drop(file);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(&staged, fs::Permissions::from_mode(0o755))?;
-        }
-        // Refresh the bundled payload that ships alongside the executable
-        // (skills plus the example MCP config). Archives from before those
-        // were packaged simply have nothing to install.
-        let home = config::ax_home();
-        match install_bundled_assets(&archive, &asset_name, &home) {
-            Ok(report) => {
-                if !report.skills.is_empty() {
-                    println!(
-                        "AX: installed {} bundled skill package(s) into {}",
-                        report.skills.len(),
-                        home.join("skills").display()
-                    );
-                }
-                if report.mcp {
-                    println!(
-                        "AX: wrote example MCP config to {} (all servers disabled)",
-                        home.join("mcp.toml").display()
-                    );
-                }
+    let home = config::ax_home();
+    match install_bundled_assets(&archive, &asset_name, &home) {
+        Ok(report) => {
+            if !report.skills.is_empty() {
+                println!(
+                    "AX: installed {} bundled skill package(s) into {}",
+                    report.skills.len(),
+                    home.join("skills").display()
+                );
             }
-            Err(error) => {
-                eprintln!("AX: could not refresh bundled skills/MCP config: {error:#}");
+            if report.mcp {
+                println!(
+                    "AX: wrote example MCP config to {} (all servers disabled)",
+                    home.join("mcp.toml").display()
+                );
             }
         }
-        replace_after_download(&staged, &target)
-    })();
-    if result.is_err() {
-        let _ = fs::remove_file(&staged);
+        Err(error) => {
+            eprintln!("AX: could not refresh bundled skills/MCP config: {error:#}");
+        }
     }
-    result
+
+    if binary_outdated {
+        let staged = stage_path(&target)?;
+        let result = (|| -> Result<()> {
+            let mut file = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&staged)
+                .with_context(|| format!("cannot stage update beside {}", target.display()))?;
+            extract_executable(&archive, &asset_name, &mut file)?;
+            file.flush()?;
+            file.sync_all()?;
+            drop(file);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                fs::set_permissions(&staged, fs::Permissions::from_mode(0o755))?;
+            }
+            replace_after_download(&staged, &target)
+        })();
+        if result.is_err() {
+            let _ = fs::remove_file(&staged);
+        }
+        result
+    } else {
+        println!(
+            "AX is up to date ({}); bundled skills and MCP config were refreshed.",
+            release.tag_name
+        );
+        Ok(())
+    }
 }
 
 async fn download(client: &reqwest::Client, url: &str) -> Result<Vec<u8>> {

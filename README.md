@@ -73,7 +73,7 @@ Both installers accept two environment variables:
 
 | Variable | Purpose |
 |---|---|
-| `AX_VERSION` | Install a specific release tag instead of latest (e.g. `AX_VERSION=v0.1.0`) |
+| `AX_VERSION` | Install a specific release tag instead of the latest (default: latest) |
 | `AX_INSTALL_DIR` | Override the install directory |
 
 To update the executable you are currently running to the latest GitHub
@@ -81,7 +81,9 @@ Release, run `ax --update`. AX checks the release version, verifies the
 download against `SHA256SUMS`, and replaces that executable; it also refreshes
 the bundled payload from the same archive, installing any missing skill package
 into `~/.ax/skills` and writing `~/.ax/mcp.toml` only when no config exists
-yet (existing skills and configs are left alone). On Windows,
+yet (existing skills and configs are left alone). The bundled payload is
+refreshed on every `ax --update`, even when the binary is already up to date,
+so newly added skill packages are picked up without a version bump. On Windows,
 the verified update is scheduled for replacement after the command exits;
 restart AX before using the new version. The command does not otherwise change your
 `~/.ax` user data or
@@ -90,12 +92,12 @@ any project's `.ax` directory. If you installed a separate copy using
 alone is not a release; the release workflow runs for `v*` tags.
 
 ```bash
-AX_VERSION=v0.1.0 curl -fsSL https://raw.githubusercontent.com/Axium-Labs/AX/main/scripts/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/Axium-Labs/AX/main/scripts/install.sh | sh
 AX_INSTALL_DIR="$HOME/bin" curl -fsSL https://raw.githubusercontent.com/Axium-Labs/AX/main/scripts/install.sh | sh
 ```
 
 ```powershell
-powershell -ExecutionPolicy Bypass -c "$env:AX_VERSION='v0.1.0'; iex ((iwr 'https://raw.githubusercontent.com/Axium-Labs/AX/main/scripts/install.ps1' -UseBasicParsing).Content)"
+powershell -ExecutionPolicy Bypass -c "iex ((iwr 'https://raw.githubusercontent.com/Axium-Labs/AX/main/scripts/install.ps1' -UseBasicParsing).Content)"
 ```
 
 ### Uninstall

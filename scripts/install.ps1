@@ -4,7 +4,7 @@
 #   powershell -ExecutionPolicy Bypass -c "iex ((iwr 'https://raw.githubusercontent.com/Axium-Labs/AX/main/scripts/install.ps1' -UseBasicParsing).Content)"
 #
 # Environment:
-#   AX_VERSION       release tag to install (default: latest, e.g. v0.1.0)
+#   AX_VERSION       release tag to install (default: latest)
 #   AX_INSTALL_DIR   install directory (default: $env:LOCALAPPDATA\Programs\AX\bin)
 #   AX_HOME          AX state directory (default: $env:USERPROFILE\.ax)
 #
