@@ -9,10 +9,20 @@ pub struct FilesystemTool;
 #[derive(Deserialize)]
 #[serde(tag = "operation", rename_all = "snake_case")]
 enum FilesystemInput {
-    Read { path: String },
-    List { path: String },
-    Write { path: String, content: String },
+    Read {
+        path: String,
+        start_line: Option<usize>,
+        end_line: Option<usize>,
+    },
+    List {
+        path: String,
+    },
+    Write {
+        path: String,
+        content: String,
+    },
 }
+
 
 #[async_trait]
 #[allow(clippy::unnecessary_literal_bound)]
@@ -22,7 +32,7 @@ impl Tool for FilesystemTool {
     }
 
     fn description(&self) -> &str {
-        "Read, list, or write filesystem paths. Writes require explicit approval."
+        "Read a small 1-based start_line/end_line range after exact search. Batch independent reads in one round. Whole-file reads and directory listing only when necessary. Use patch for existing file edits; writes require approval."
     }
 
     fn input_schema(&self) -> Value {
@@ -31,7 +41,9 @@ impl Tool for FilesystemTool {
             "properties": {
                 "operation": { "type": "string", "enum": ["read", "list", "write"] },
                 "path": { "type": "string" },
-                "content": { "type": "string" }
+                "content": { "type": "string" },
+                "start_line": { "type":"integer", "minimum":1 },
+                "end_line": { "type":"integer", "minimum":1 }
             },
             "required": ["operation", "path"],
             "additionalProperties": false
@@ -58,13 +70,35 @@ impl Tool for FilesystemTool {
         let input: FilesystemInput = serde_json::from_value(input)
             .map_err(|error| ToolError::InvalidInput(error.to_string()))?;
         match input {
-            FilesystemInput::Read { path } => tokio::fs::read_to_string(path)
-                .await
-                .map_err(|error| ToolError::Execution(error.to_string())),
-            FilesystemInput::List { path } => {
-                let mut entries = tokio::fs::read_dir(path)
+            FilesystemInput::Read {
+                path,
+                start_line,
+                end_line,
+            } => {
+                let text = tokio::fs::read_to_string(&path)
                     .await
-                    .map_err(|error| ToolError::Execution(error.to_string()))?;
+                    .map_err(|error| crate::path_error(std::path::Path::new(&path), &error))?;
+                if start_line.is_none() && end_line.is_none() {
+                    return Ok(text);
+                }
+                let start = start_line.unwrap_or(1);
+                let end = end_line.unwrap_or(start.saturating_add(79));
+                if start == 0 || end < start {
+                    return Err(ToolError::InvalidInput("invalid line range".into()));
+                }
+                Ok(text
+                    .lines()
+                    .enumerate()
+                    .skip(start - 1)
+                    .take(end - start + 1)
+                    .map(|(i, line)| format!("{}: {line}", i + 1))
+                    .collect::<Vec<_>>()
+                    .join("\n"))
+            }
+            FilesystemInput::List { path } => {
+                let mut entries = tokio::fs::read_dir(&path)
+                    .await
+                    .map_err(|error| crate::path_error(std::path::Path::new(&path), &error))?;
                 let mut names = Vec::new();
                 while let Some(entry) = entries
                     .next_entry()
@@ -95,5 +129,30 @@ impl Tool for FilesystemTool {
         } else {
             crate::ResourceAccess::read(resource)
         }]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[tokio::test]
+    async fn ranged_read_and_missing_path_include_recovery_information() {
+        let root = std::env::temp_dir().join(format!("ax-read-test-{}", uuid::Uuid::new_v4()));
+        tokio::fs::create_dir(&root).await.unwrap();
+        let path = root.join("actual.rs");
+        tokio::fs::write(&path, "one\ntwo\nthree\n").await.unwrap();
+        let result = FilesystemTool
+            .execute(json!({"operation":"read","path":path,"start_line":2,"end_line":2}))
+            .await
+            .unwrap();
+        assert_eq!(result, "2: two");
+        let error = FilesystemTool
+            .execute(json!({"operation":"read","path":root.join("missing.rs")}))
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("candidate_paths"));
+        assert!(error.to_string().contains("actual.rs"));
+        tokio::fs::remove_file(path).await.unwrap();
+        tokio::fs::remove_dir(root).await.unwrap();
     }
 }

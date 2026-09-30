@@ -1,0 +1,56 @@
+{
+  "schema_version": 1,
+  "dataset_label": "Local SWE-bench dev subset (23 rows); user-approved, not standard Lite",
+  "dataset_glob": "**/*.parquet",
+  "model": "gpt-6-luna",
+  "reasoning_effort": "low",
+  "timeout_secs": 240,
+  "test_timeout_secs": 120,
+  "parallel_agents": true,
+  "ax_binary": "../ax/target/debug/ax.exe",
+  "codex_binary": "C:/Program Files/nodejs/node_cache/node_modules/@openai/codex/node_modules/@openai/codex-win32-x64/vendor/x86_64-pc-windows-msvc/bin/codex.exe",
+  "python": "C:/Users/14181/Desktop/axlab/benchmark/runtime/cpython-3.9.25-windows-x86_64-none/python.exe",
+  "instances": [
+    {
+      "instance_id": "marshmallow-code__marshmallow-1343",
+      "repo": "marshmallow-code/marshmallow",
+      "base_commit": "2be2d83a1a9a6d3d9b85804f3ab545cecc409bb0",
+      "dependencies": [
+        "pytest==7.4.4",
+        "six==1.17.0",
+        "python-dateutil==2.9.0.post0",
+        "simplejson==3.20.2",
+        "pytz==2025.2",
+        "mock==5.2.0",
+        "setuptools==75.8.2"
+      ],
+      "reason": "Pure Python; bounded marshalling regression and 24 preservation tests"
+    },
+    {
+      "instance_id": "marshmallow-code__marshmallow-1359",
+      "repo": "marshmallow-code/marshmallow",
+      "base_commit": "b40a0f4e33823e6d0f341f7e8684e359a99060d1",
+      "dependencies": [
+        "pytest==7.4.4",
+        "six==1.17.0",
+        "python-dateutil==2.9.0.post0",
+        "simplejson==3.20.2",
+        "pytz==2025.2",
+        "mock==5.2.0",
+        "setuptools==75.8.2"
+      ],
+      "reason": "Pure Python; field formatting regression and 76 preservation tests"
+    },
+    {
+      "instance_id": "pydicom__pydicom-1256",
+      "repo": "pydicom/pydicom",
+      "base_commit": "49a3da4a3d9c24d7e8427a25048a1c7d5c4f7724",
+      "dependencies": [
+        "pytest==7.4.4",
+        "numpy==1.26.4",
+        "setuptools==75.8.2"
+      ],
+      "reason": "Targeted JSON/bulk-data regression and 22 preservation tests"
+    }
+  ]
+}

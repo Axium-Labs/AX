@@ -22,7 +22,7 @@ impl Tool for SearchTool {
         "search"
     }
     fn description(&self) -> &'static str {
-        "Search literal text in UTF-8 files. Returns paths, 1-based line numbers and snippets. Skips symlinks, .git, target and node_modules. Limits traversal and results; reports truncated scans."
+        "Search exact literal text in a targeted file/subtree before reading code. Batch independent searches/reads in the SAME model response; the DAG executes them concurrently. Returns paths, 1-based lines and snippets; read small hit ranges next. Do not enumerate broad directories first."
     }
     fn input_schema(&self) -> Value {
         json!({"type":"object","properties":{"path":{"type":"string"},"query":{"type":"string"},"max_results":{"type":"integer","minimum":1,"maximum":200}},"required":["path","query"],"additionalProperties":false})
@@ -61,7 +61,7 @@ impl Tool for SearchTool {
                 Ok(m) => m,
                 Err(error) => {
                     if visited == 1 {
-                        return Err(ToolError::Execution(error.to_string()));
+                        return Err(crate::path_error(&path, &error));
                     }
                     skipped += 1;
                     continue;

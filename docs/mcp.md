@@ -145,7 +145,12 @@ importing its server framework.
 
 `ax mcp import servers.toml` validates and merges servers into the project's
 `.ax/mcp.toml` (or `--mcp-config`). Add `--global` to use `$AX_HOME/mcp.toml`.
-JSON files containing `servers` or the common `mcpServers` object are supported;
+Codex `~/.codex/config.toml` files with `[mcp_servers.*]` are supported;
+unrelated model settings are ignored. `http_headers` and `tool_timeout_sec`
+are mapped to AX fields. Environment-referenced credential fields are rejected
+rather than silently dropping authentication. JSON files from Cursor
+(`~/.cursor/mcp.json`, `.cursor/mcp.json`) and Claude Code (`~/.claude.json`,
+`.mcp.json`) containing `servers` or the common `mcpServers` object are supported;
 command entries become stdio transports and URL entries become HTTP transports.
 Explicit stdio, HTTP/streamable-http and WebSocket types are supported. Legacy
 SSE types are rejected. Conflicting server names reject the whole import;

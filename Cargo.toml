@@ -2,6 +2,7 @@
 members = [
     "crates/cli",
     "crates/core",
+    "crates/evolution",
     "crates/lexical",
     "crates/memory",
     "crates/mcp",
@@ -12,7 +13,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.2.4"
+version = "0.2.5"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 rust-version = "1.92"

@@ -14,10 +14,11 @@ How to build, test and extend AX. For how the pieces fit together, start with
 ## Workspace layout
 
 ```text
-Cargo.toml               # workspace root: 8 crates, shared deps, lints, release profile
+Cargo.toml               # workspace root: 9 crates, shared deps, lints, release profile
 crates/
 ├── cli/                 # composition root: args, provider selection, TUI, sessions
 ├── core/                # runtime-core: agent loop, context, budget, compression
+├── evolution/           # low-frequency learning of owned Skills and Project facts
 ├── lexical/             # shared language-independent lexical features + similarity
 ├── memory/              # SQLite + JSONL storage, scoped facts, resume
 ├── mcp/                 # MCP client, transports, gateway, proxies

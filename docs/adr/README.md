@@ -13,6 +13,7 @@ discoverable.
 | [0003-portable-axpack.md](0003-portable-axpack.md) | Versioned portable AX data packages | Accepted |
 | [0004-acp-control-plane.md](0004-acp-control-plane.md) | ACP adapter at the AX CLI boundary | Accepted |
 | [0005-tool-round-scheduler.md](0005-tool-round-scheduler.md) | Dependency-aware tool-round scheduling | Accepted |
+| [0006-skill-evolution.md](0006-skill-evolution.md) | Skill evolution outside the runtime kernel | Accepted |
 
 ## Adding an ADR
 

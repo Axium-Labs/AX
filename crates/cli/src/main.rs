@@ -26,6 +26,7 @@ mod auth_login;
 mod capability_import;
 mod config;
 mod crew_device;
+mod evolution;
 mod file_reference;
 mod memory_context;
 mod memory_tool;
@@ -37,6 +38,7 @@ mod session_restore;
 mod skill_settings;
 mod tui;
 mod update;
+mod worktree_changes;
 use config::{AxConfig, InferenceMode};
 use model_selection::ModelResolution;
 use tui::run_tui;
@@ -246,6 +248,8 @@ struct ReplState {
     runtime: Option<AgentKernel>,
     permissions: PermissionStore,
     execution_budget: runtime_core::ExecutionBudget,
+    evolution: Option<::evolution::Handle>,
+    evolution_revision: u64,
 }
 
 impl ReplState {
@@ -302,6 +306,8 @@ impl ReplState {
             runtime: None,
             permissions: PermissionStore::default(),
             execution_budget: runtime_core::ExecutionBudget::default(),
+            evolution: None,
+            evolution_revision: 0,
         })
     }
 
@@ -324,6 +330,7 @@ impl ReplState {
     }
 
     fn create_session(&mut self, title: &str) -> Result<()> {
+        self.evolution_end_session();
         #[cfg(not(test))]
         self.register_project()?;
         let session = self.store()?.create_session(title)?;
@@ -361,6 +368,7 @@ impl ReplState {
         if self.project_id == location.id {
             return Ok(());
         }
+        self.evolution_end_session();
         let mut next = Self::new_in_project(
             location.data_dir.clone(),
             location.skills_dir.clone(),
@@ -381,6 +389,7 @@ impl ReplState {
     }
 
     fn open_session(&mut self, id: &str, budget: &runtime_core::ContextBudget) -> Result<bool> {
+        self.evolution_end_session();
         let session = self.store()?.session(id)?;
         let Some(session) = session else {
             return Ok(false);
@@ -422,7 +431,13 @@ impl ReplState {
             )?;
         }
         self.loaded_messages.extend(recovered);
+        let evolved_prefix = self.evolution_root().to_string_lossy().into_owned();
         self.loaded_messages.retain(|message| {
+            if message.content.starts_with(SKILL_CONTEXT_PREFIX)
+                && message.content.contains(&evolved_prefix)
+            {
+                return false;
+            }
             active_skill_name(message).is_none_or(|name| {
                 !disabled_skills.contains(&name)
                     && self
@@ -525,7 +540,8 @@ impl ReplState {
     fn skills(&mut self) -> Result<&SkillCatalog> {
         if self.skill_catalog.is_none() {
             let global_skills = config::ax_home().join("skills");
-            let catalog = SkillCatalog::index_sources([&self.skills_dir, &global_skills])
+            let evolved = self.evolution_root().join("live");
+            let catalog = SkillCatalog::index_sources([&self.skills_dir, &global_skills, &evolved])
                 .with_context(|| {
                     format!(
                         "failed to index skills directory {}",
@@ -736,6 +752,7 @@ impl ReplState {
     }
 
     fn reset_new_session(&mut self) {
+        self.evolution_end_session();
         self.permissions.reset_session();
         self.current_session = None;
         self.loaded_messages.clear();
@@ -887,7 +904,7 @@ fn context_budget(
 fn kernel(
     selection: &ModelSelection,
     approval: Arc<dyn ApprovalPolicy>,
-    messages: Vec<Message>,
+    mut messages: Vec<Message>,
     mcp_tools: &[McpToolProxy],
     auth_path: &Path,
 ) -> Result<AgentKernel> {
@@ -913,6 +930,10 @@ fn kernel(
     } else {
         ToolRegistry::new()
     };
+    let policy = include_str!("tool_policy.md");
+    if !messages.iter().any(|message| message.content == policy) {
+        messages.insert(0, Message::system(policy));
+    }
     Ok(AgentKernel::new(provider, tool_registry, approval).with_messages(messages))
 }
 
@@ -1049,6 +1070,21 @@ fn build_provider(selection: &ModelSelection, auth_path: &Path) -> Result<Arc<dy
 }
 
 fn render_event(event: AgentEvent) {
+    // Opt-in measurement sink; no new session or startup work in normal runs.
+    if let Some(path) = std::env::var_os("AX_EVENT_LOG") {
+        use std::fs::OpenOptions;
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs_f64();
+        if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) {
+            let _ = writeln!(
+                file,
+                "{}",
+                serde_json::json!({"timestamp":timestamp,"event":event})
+            );
+        }
+    }
     match event {
         AgentEvent::ModelStarted { provider, model } => {
             eprintln!("[{provider}/{model}] thinking...");
@@ -1134,7 +1170,7 @@ async fn main() -> Result<()> {
             let selection = model_selection::require_resolved(&cli)?;
             let mut state = ReplState::new(data_dir, skills_dir, cli.mcp_config.clone())?;
             state.execution_budget = budget;
-            run_prompt(&mut state, &selection, approval, prompt).await?;
+            evolution::run_once(&mut state, &selection, approval, prompt).await?;
         }
         Some(Command::Agents {
             ref prompts,
@@ -1309,7 +1345,7 @@ async fn run_prompt_with<F>(
     selection: &ModelSelection,
     approval: Arc<dyn ApprovalPolicy>,
     prompt: &str,
-    mut emit: F,
+    emit: F,
 ) -> Result<String>
 where
     F: FnMut(AgentEvent) + Send,
@@ -1365,17 +1401,11 @@ where
         .expect("runtime initialized")
         .set_context("[retrieved-memory]", memory_context);
     let remaining = state.prepare_file_context(prompt, budget.skills_budget_tokens())?;
+    state.evolution_prepare(selection);
     state.prepare_skill_context(prompt, remaining)?;
     drop(context_timer);
     let mut runtime = state.runtime.take().expect("runtime initialized");
-    let mut saved = 0;
-    let result = runtime
-        .run_turn_checkpointed(prompt, &mut emit, |messages| {
-            state
-                .persist_turn_messages(messages, &mut saved)
-                .map_err(|error| runtime_core::AgentError::Persistence(error.to_string()))
-        })
-        .await;
+    let result = evolution::checkpointed_turn(&mut runtime, state, prompt, emit).await;
     let snapshot = if runtime.take_compression_dirty() {
         let summary = runtime
             .messages()

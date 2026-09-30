@@ -279,7 +279,9 @@ impl App {
                 self.unseen_output |= self.transcript.scroll_from_bottom > 0;
                 self.transcript.push_agent_delta(&delta);
             }
-            AgentEvent::ToolStarted { id, name, detail } => {
+            AgentEvent::ToolStarted {
+                id, name, detail, ..
+            } => {
                 self.transcript.streaming = false;
                 self.transcript.tool_started_with_id(id, name, detail);
             }
@@ -862,6 +864,9 @@ pub(super) async fn run_tui(
     let _ = disable_raw_mode();
     if !app.session_id.is_empty() {
         println!("Session ID: {}", app.session_id);
+    }
+    if let Some(state) = state.as_mut() {
+        state.evolution_finish().await;
     }
     Ok(())
 }

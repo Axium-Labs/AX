@@ -160,18 +160,32 @@ impl Tool for ShellTool {
             .map_err(|error| ToolError::Execution(error.to_string()))?;
         let stdout = decode(&output.stdout);
         let stderr = decode(&output.stderr);
-        Ok(format!(
+        let text = format!(
             "exit_code: {}\nstdout:\n{}\nstderr:\n{}",
             output.status.code().unwrap_or(-1),
             stdout,
             stderr
-        ))
+        );
+        if output.status.success() {
+            Ok(text)
+        } else {
+            Err(ToolError::Execution(text))
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::decode;
+    #[tokio::test]
+    async fn nonzero_exit_is_a_tool_error() {
+        use crate::Tool;
+        let error = super::ShellTool
+            .execute(serde_json::json!({"command":"exit 7"}))
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("exit_code: 7"));
+    }
 
     #[test]
     fn leaves_utf8_untouched() {

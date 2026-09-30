@@ -66,6 +66,8 @@ required_tools = ["mcp"]
         let data = root.join("data");
         let mut state =
             ReplState::new_in_project(data.clone(), skills.clone(), None, &root).unwrap();
+        // Isolate this fixture from any Skills installed in the developer's AX home.
+        state.allowed_skills = Some(std::collections::HashSet::from(["review".to_owned()]));
         assert_eq!(
             state.skills().unwrap().directory("review"),
             Some(source.as_path())
@@ -112,6 +114,7 @@ required_tools = ["mcp"]
         );
         drop(state);
         let mut restored = ReplState::new_in_project(data, skills, None, &root).unwrap();
+        restored.allowed_skills = Some(std::collections::HashSet::from(["review".to_owned()]));
         assert!(restored.disabled_skills().unwrap().contains("review"));
         let budget = runtime_core::ContextBudget::new(32000, Some(1000), 0);
         assert!(restored.open_session(&session, &budget).unwrap());

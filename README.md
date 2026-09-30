@@ -229,3 +229,7 @@ ax mcp import C:/downloads/mcp.toml --global     # ~/.ax/mcp.toml
 
 Imports validate their contents, preserve existing names and do not run scripts
 or MCP servers. MCP JSON accepts the common `mcpServers` format.
+
+## Local coding benchmark
+
+See [benchmark/README.md](benchmark/README.md) for the fixed three-task AX vs Codex runner, isolation requirements and measured results. The included run was blocked by gateway 403 responses before coding and does not establish a performance ranking.

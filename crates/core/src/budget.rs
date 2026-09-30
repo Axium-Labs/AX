@@ -58,6 +58,12 @@ impl ContextBudget {
             .saturating_sub(self.tool_schema_tokens)
     }
 
+    /// Share of history reserved for one tool's compact projection.
+    #[must_use]
+    pub const fn tool_result_chars(&self) -> usize {
+        self.history_budget().saturating_mul(4) / 32
+    }
+
     /// Trigger compaction at a fraction of the same history allowance used
     /// when preparing a model request.
     #[must_use]

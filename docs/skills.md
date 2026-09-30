@@ -119,6 +119,15 @@ The repository's five bundled standard packages are `coding`, `code-review`,
 `skill-creator`, `skill-installer`, and `web-research` (batched, source-backed
 web research strategy for the `web` tool).
 
+## Self-evolving Skills
+
+The CLI also discovers trial/active packages in
+`<data-dir>/evolution/<project-id>/live`,
+after project and global Skills. Candidate and archived packages do not route.
+Evolution reuses the standard skill-creator instructions and Skill validator,
+with separate ownership metadata and automatic mutation restricted to evolved
+packages. See [evolution.md](evolution.md) for scheduling, lifecycle and controls.
+
 ## Reference
 
 | Concern | Code |

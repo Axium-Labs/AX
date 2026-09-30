@@ -31,6 +31,7 @@ cli ───────────────┬──> runtime-core ──>
 | `lexical` | Language-independent lexical features (NFKC, case fold, word tokens, character n-grams) and normalized similarity, shared by skill routing and memory retrieval so the two cannot drift apart. Leaf crate: no dependency on other AX crates. |
 | `memory` | SQLite session/message repository, effective-context snapshots, scoped facts, JSONL event streams, resume and compaction state. |
 | `cli` | The only composition root: clap arguments, provider selection, lazy SQLite/Skill/MCP initialization, REPL, ratatui TUI, session commands, permission dialogs. |
+| `evolution` | CLI-fed bounded Experience observation, low-frequency in-process analysis, owned standard Skill lifecycle and learned Project facts; no core/tool dependency. |
 
 The explicit `ax --update` path belongs to the CLI and exits before normal
 runtime setup. It checks the latest GitHub Release, verifies its archive against

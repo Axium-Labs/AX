@@ -69,7 +69,47 @@ fn source_config(source: &Path) -> Result<toml::Value> {
         let config: toml::Value = serde_json::from_value(value)?;
         Ok(config)
     } else {
-        Ok(toml::from_str(&contents)?)
+        let config: toml::Value = toml::from_str(&contents)?;
+        if let Some(servers) = config.get("mcp_servers") {
+            let mut servers = servers
+                .as_table()
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("mcp_servers must be a table"))?;
+            for (_, server) in &mut servers {
+                let fields = server
+                    .as_table_mut()
+                    .ok_or_else(|| anyhow::anyhow!("server must be a table"))?;
+                if fields.contains_key("env_vars")
+                    || fields.contains_key("bearer_token_env_var")
+                    || fields.contains_key("env_http_headers")
+                {
+                    bail!(
+                        "Environment-referenced Codex credentials are not supported; use explicit env/headers in an export"
+                    );
+                }
+                if let Some(headers) = fields.remove("http_headers") {
+                    fields.insert("headers".into(), headers);
+                }
+                if let Some(timeout) = fields.remove("tool_timeout_sec") {
+                    fields.insert("request_timeout_secs".into(), timeout);
+                }
+                fields.remove("startup_timeout_sec");
+                fields.remove("startup_timeout_ms");
+                let transport = if fields.contains_key("command") {
+                    "stdio"
+                } else {
+                    "http"
+                };
+                fields
+                    .entry("transport")
+                    .or_insert_with(|| toml::Value::String(transport.into()));
+            }
+            return Ok(toml::Value::Table(toml::Table::from_iter([(
+                "servers".into(),
+                toml::Value::Table(servers),
+            )])));
+        }
+        Ok(config)
     }
 }
 
@@ -166,6 +206,19 @@ mod tests {
         .unwrap();
         assert!(import_mcp(&source, &destination).is_err());
         assert_eq!(before, fs::read(&destination).unwrap());
+        let codex_source = root.join("config.toml");
+        fs::write(
+            &codex_source,
+            "model = 'unrelated'\n[mcp_servers.codex]\ncommand = 'never-run'\n",
+        )
+        .unwrap();
+        import_mcp(&codex_source, &destination).unwrap();
+        assert!(
+            mcp::McpConfig::load(&destination)
+                .unwrap()
+                .servers
+                .contains_key("codex")
+        );
         let toml_source = root.join("source.toml");
         fs::write(
             &toml_source,
@@ -174,7 +227,7 @@ mod tests {
         .unwrap();
         import_mcp(&toml_source, &destination).unwrap();
         let config = mcp::McpConfig::load(&destination).unwrap();
-        assert_eq!(config.servers.len(), 2);
+        assert_eq!(config.servers.len(), 3);
         assert!(config.servers.contains_key("files"));
         fs::remove_dir_all(root).unwrap();
     }

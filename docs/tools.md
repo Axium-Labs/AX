@@ -33,6 +33,36 @@ permissions from tool-name strings (e.g. `mcp__`/`::`).
 The registry is assembled per composition root (`cli::tools`): the built-ins,
 then discovered MCP proxies.
 
+### Tool use and result protocol
+
+The CLI supplies a strategy without changing permissions or the dependency DAG.
+Known independent search/read calls must be emitted in one response. Prefer
+targeted exact search, then numbered `filesystem.read` ranges (`start_line`,
+`end_line`). Failure recovery uses minimal diagnostics, a local repair and the
+smallest relevant check before required full tests.
+
+`patch` addresses original 1-based coordinates with `start_line`, `delete_count`,
+`new_text` and optional `expected_lines`. All hunks validate before writing,
+preserve CRLF, and report conflict locations with local context. Repeated text
+is supported; unique `old_text` matching is no longer the edit API. Missing paths
+return nearby candidates without a recursive search. Use `filesystem.write`
+for new files.
+
+Text results are stored as lossless `ToolResult` envelopes: `status`
+(`success`/`error`), `summary`, `diagnostics`, `raw_output`, `truncated`. Model
+projections derive from `ContextBudget`, retain key errors and remove redundant
+compiler warnings. Raw checkpoints remain authoritative.
+`tool_output(call_id, start_line, end_line)` reads retained raw ranges on demand,
+including after restore. Typed DAG references still resolve the original value.
+
+Nonzero shell exits fail. ACP live updates and replay retain failure status,
+result envelopes, original call IDs and tool names. ACP `turn_changes` lists
+changed files using current Git diff counts and is persisted through the existing
+history; it never stages/reverts files and is excluded from model context. Counts
+may include pre-existing edits to the same changed file. `AX_EVENT_LOG` optionally
+records runtime JSONL for measurement without normal startup work. The workspace
+`benchmark/README.md` documents the fixed local benchmark and limitations.
+
 The TUI tool timeline shows a short description while each call runs (for
 example the search query and path, file operation and path, or shell command).
 After completion it keeps the detail visible briefly, then folds it into a

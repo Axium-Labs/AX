@@ -10,6 +10,7 @@ async-trait.workspace = true
 model = { path = "../model" }
 tool = { path = "../tool" }
 serde_json.workspace = true
+serde.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 futures-util.workspace = true

@@ -148,6 +148,11 @@ inspect current state before retrying.
 
 ## Reference
 
+Low-frequency [Evolution](evolution.md) can additionally learn Project facts
+from recurring Experiences. It uses existing validation and optimistic writes,
+requires quoted user evidence, marks provenance as `evolved`, and never
+overwrites a user-authored fact. Ordinary turns do not gain a learning model call.
+
 | Concern | Code |
 |---|---|
 | Storage repository, scopes, resume | `crates/memory/src/lib.rs`, `crates/memory/src/scoped.rs` |

@@ -134,19 +134,25 @@ fn update(out: &Outbox, session_id: &str, event: AgentEvent, calls: &mut HashMap
         AgentEvent::ThinkingDelta { delta } => {
             json!({"sessionUpdate":"agent_thought_chunk","content":{"type":"text","text":delta}})
         }
-        AgentEvent::ToolStarted { id, name, detail } => {
+        AgentEvent::ToolStarted {
+            id,
+            name,
+            detail,
+            input,
+        } => {
             calls.insert(id.clone(), id.clone());
-            json!({"sessionUpdate":"tool_call","toolCallId":id,"title":detail,"kind":"execute","status":"pending","rawInput":{"name":name}})
+            json!({"sessionUpdate":"tool_call","toolCallId":id,"title":detail,"kind":name,"status":"pending","rawInput":{"name":name,"arguments":input}})
         }
         AgentEvent::ToolFinished {
             id,
             success,
             diagnostics,
+            result,
             ..
         } => {
-            let mut update = json!({"sessionUpdate":"tool_call_update","toolCallId":calls.remove(&id).unwrap_or(id),"status":if success {"completed"} else {"failed"}});
+            let mut update = json!({"sessionUpdate":"tool_call_update","toolCallId":calls.remove(&id).unwrap_or(id),"status":if success {"completed"} else {"failed"},"rawOutput":result});
             if !diagnostics.is_empty() {
-                update["rawOutput"] = json!({"errors": diagnostics});
+                update["rawOutput"]["errors"] = json!(diagnostics);
             }
             update
         }
@@ -424,12 +430,31 @@ fn replay(out: &Outbox, session_id: &str, state: &mut ReplState) -> Result<()> {
                 json!({"sessionUpdate":"user_message_chunk","messageId":message.id.to_string(),"content":{"type":"text","text":message.content}})
             }
             MessageRole::Assistant => {
+                if let Some(calls) = message.metadata.get("tool_calls").and_then(Value::as_array) {
+                    for call in calls {
+                        let name = call["function"]["name"].as_str().unwrap_or("tool");
+                        let input = call["function"]["arguments"]
+                            .as_str()
+                            .and_then(|text| serde_json::from_str::<Value>(text).ok())
+                            .unwrap_or(Value::Null);
+                        let detail = runtime_core::tool_activity(name, &input);
+                        let start = json!({"sessionUpdate":"tool_call","toolCallId":call["id"],"title":detail,"kind":name,"rawInput":{"name":name,"arguments":input},"status":"pending"});
+                        out.send(json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":session_id,"update":stamp(start,message.created_at)}})).ok();
+                    }
+                }
                 json!({"sessionUpdate":"agent_message_chunk","messageId":message.id.to_string(),"content":{"type":"text","text":message.content}})
             }
             MessageRole::Tool => {
-                json!({"sessionUpdate":"tool_call_update","toolCallId":message.metadata.get("tool_call_id").and_then(Value::as_str).unwrap_or("unknown"),"status":"completed","content":[{"type":"content","content":{"type":"text","text":message.content}}]})
+                let result = serde_json::from_str::<tool::ToolResult>(&message.content)
+                    .unwrap_or_else(|_| tool::ToolResult::from_legacy(message.content.clone()));
+                json!({"sessionUpdate":"tool_call_update","toolCallId":message.metadata.get("tool_call_id").and_then(Value::as_str).unwrap_or("unknown"),"status":if result.status=="success" {"completed"} else {"failed"},"rawOutput":result})
             }
-            MessageRole::System => continue,
+            MessageRole::System => {
+                let Some(data) = message.content.strip_prefix("[ax-changes]\n") else {
+                    continue;
+                };
+                json!({"sessionUpdate":"turn_changes","changedFiles":serde_json::from_str::<Value>(data).unwrap_or(Value::Null)})
+            }
         };
         out.send(json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":session_id,"update":stamp(update, message.created_at)}})).ok();
     }
@@ -773,10 +798,18 @@ pub async fn run(cli: &Cli, data_dir: PathBuf, skills_dir: PathBuf) -> Result<()
                             session_id: task_session.clone(),
                         });
                         let mut calls = HashMap::new();
-                        run_prompt_with(&mut state, &selection, approval, &prompt, |event| {
+                        let before=crate::worktree_changes::snapshot(&task_cwd);
+                        let outcome=run_prompt_with(&mut state, &selection, approval, &prompt, |event| {
                             update(&task_out, &task_session, event, &mut calls);
                         })
-                        .await
+                        .await;
+                        let files=crate::worktree_changes::changed(&before,crate::worktree_changes::snapshot(&task_cwd));
+                        if !files.is_empty() {
+                            state.persist_messages(&[model::Message::system(format!("[ax-changes]\n{}",json!(files)))])?;
+                            let body=stamp(json!({"sessionUpdate":"turn_changes","changedFiles":files}),now_seconds());
+                            task_out.send(json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":task_session,"update":body}})).ok();
+                        }
+                        outcome
                     }
                     .await;
                     let should_reply = task_active
@@ -949,6 +982,43 @@ pub async fn run(cli: &Cli, data_dir: PathBuf, skills_dir: PathBuf) -> Result<()
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn failed_tool_update_keeps_call_id_and_structured_failure() {
+        let (out, mut rx) = mpsc::unbounded_channel();
+        let mut calls = HashMap::new();
+        update(
+            &out,
+            "session",
+            AgentEvent::ToolStarted {
+                id: "call-1".into(),
+                name: "shell".into(),
+                detail: "running exit 1".into(),
+                input: json!({"command":"exit 1"}),
+            },
+            &mut calls,
+        );
+        update(
+            &out,
+            "session",
+            AgentEvent::ToolFinished {
+                id: "call-1".into(),
+                name: "shell".into(),
+                success: false,
+                diagnostics: vec![],
+                result: tool::ToolResult::new(false, "exit_code: 1\nerror: failure".into()),
+            },
+            &mut calls,
+        );
+        let start = rx.try_recv().unwrap();
+        let finish = rx.try_recv().unwrap();
+        assert_eq!(
+            start["params"]["update"]["toolCallId"],
+            finish["params"]["update"]["toolCallId"]
+        );
+        assert_eq!(start["params"]["update"]["kind"], "shell");
+        assert_eq!(finish["params"]["update"]["status"], "failed");
+        assert_eq!(finish["params"]["update"]["rawOutput"]["status"], "error");
+    }
 
     #[test]
     fn stamp_keeps_the_update_and_adds_the_private_time() {

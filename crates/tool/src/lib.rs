@@ -1,6 +1,8 @@
 //! Tool contracts, registry, and lightweight built-in tools.
 
 mod filesystem;
+mod result;
+pub use result::{ResultReader, ToolResult, path_error};
 mod patch;
 mod search;
 mod web;

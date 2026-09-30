@@ -15,7 +15,8 @@ use thiserror::Error;
 use tokio::task::JoinSet;
 use tool::{SafetyLevel, ToolError, ToolOutput, ToolPermission, ToolRegistry};
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
 pub enum AgentEvent {
     TurnStarted,
     ModelStarted {
@@ -33,12 +34,14 @@ pub enum AgentEvent {
         id: String,
         name: String,
         detail: String,
+        input: Value,
     },
     ToolFinished {
         id: String,
         name: String,
         success: bool,
         diagnostics: Vec<tool::FetchError>,
+        result: tool::ToolResult,
     },
     TurnFinished,
     ContextCompressed {
@@ -134,6 +137,7 @@ pub struct AgentKernel {
     raw_turn_messages: Vec<Message>,
     compression_dirty: bool,
     tool_concurrency: usize,
+    result_reader: tool::ResultReader,
 }
 
 impl AgentKernel {
@@ -146,6 +150,8 @@ impl AgentKernel {
         if !provider.capabilities().vision {
             tools.remove("view_image");
         }
+        let result_reader = tool::ResultReader::default();
+        tools.register(result_reader.clone());
         Self {
             provider,
             tools,
@@ -156,6 +162,7 @@ impl AgentKernel {
             raw_turn_messages: Vec::new(),
             compression_dirty: false,
             tool_concurrency: 4,
+            result_reader,
         }
     }
 
@@ -190,6 +197,14 @@ impl AgentKernel {
     /// Seeds the kernel with a previously loaded session context.
     #[must_use]
     pub fn with_messages(mut self, messages: Vec<Message>) -> Self {
+        for message in &messages {
+            if let Some(id) = &message.tool_call_id
+                && let Ok(result) = serde_json::from_str::<tool::ToolResult>(&message.content)
+                && let Ok(mut store) = self.result_reader.0.write()
+            {
+                store.insert(id.clone(), result.raw_output);
+            }
+        }
         self.messages = messages;
         self
     }
@@ -215,17 +230,22 @@ impl AgentKernel {
 
     #[must_use]
     pub fn fork_with_messages(&self, messages: Vec<Message>) -> Self {
+        let result_reader = tool::ResultReader::default();
+        let mut tools = self.tools.clone();
+        tools.register(result_reader.clone());
         Self {
             provider: Arc::clone(&self.provider),
-            tools: self.tools.clone(),
+            tools,
             approval: Arc::clone(&self.approval),
-            messages,
+            messages: Vec::new(),
             budget: self.budget,
             compression: self.compression.clone(),
             tool_concurrency: self.tool_concurrency,
             raw_turn_messages: Vec::new(),
             compression_dirty: false,
+            result_reader,
         }
+        .with_messages(messages)
     }
 
     #[must_use]
@@ -624,6 +644,14 @@ impl AgentKernel {
                 return Err(AgentError::StepLimit(self.budget.max_steps));
             }
             steps_used = steps_used.saturating_add(1);
+            let chars = self.context_budget().tool_result_chars();
+            for message in &mut self.messages {
+                if message.role == model::Role::Tool
+                    && let Ok(result) = serde_json::from_str::<tool::ToolResult>(&message.content)
+                {
+                    message.content = result.model_view(chars);
+                }
+            }
             self.compress_if_needed(|event| (emit.lock().unwrap())(event))
                 .await?;
             (emit.lock().unwrap())(AgentEvent::ModelStarted {
@@ -678,6 +706,16 @@ impl AgentKernel {
                 self.budget.tool_timeout_secs,
                 &emit,
                 |message| {
+                    if let Some(id) = &message.tool_call_id
+                        && let Ok(result) =
+                            serde_json::from_str::<tool::ToolResult>(&message.content)
+                    {
+                        self.result_reader
+                            .0
+                            .write()
+                            .unwrap()
+                            .insert(id.clone(), result.raw_output);
+                    }
                     self.messages.push(message.clone());
                     self.raw_turn_messages.push(message);
                     checkpoint(&self.raw_turn_messages)
@@ -703,7 +741,7 @@ fn fetch_diagnostics(name: &str, result: &Result<ToolOutput, ToolError>) -> Vec<
     }
 }
 
-fn tool_activity(name: &str, input: &Value) -> String {
+pub fn tool_activity(name: &str, input: &Value) -> String {
     let field = |key: &str| input.get(key).and_then(Value::as_str).unwrap_or("");
     let detail = match name {
         "search" => format!("searching '{}' in {}", field("query"), field("path")),
@@ -982,13 +1020,22 @@ fn request_context(
     let mut memory = Vec::new();
     let mut skills = Vec::new();
     for message in messages {
+        if message.role == model::Role::System && message.content.starts_with("[ax-changes]\n") {
+            continue;
+        }
+        let mut projected = message.clone();
+        if message.role == model::Role::Tool
+            && let Ok(result) = serde_json::from_str::<tool::ToolResult>(&message.content)
+        {
+            projected.content = result.model_view(budget.tool_result_chars());
+        }
         if message.role == model::Role::System && message.content.starts_with("[retrieved-memory]")
         {
             memory.push(message.clone());
         } else if message.role == model::Role::System && message.content.starts_with("[ax-skill:") {
             skills.push(message.clone());
         } else {
-            history.push(message.clone());
+            history.push(projected);
         }
     }
 
@@ -1231,6 +1278,104 @@ mod tests {
     }
 
     struct EchoTool;
+
+    #[tokio::test]
+    async fn failed_patch_recovers_with_local_read_patch_and_minimal_check() {
+        let path = std::env::temp_dir().join(format!(
+            "ax-recovery-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        tokio::fs::write(&path, "old\nkeep\n").await.unwrap();
+        let call = |id: &str, name: &str, input: Value| ModelResponse {
+            usage: None,
+            content: String::new(),
+            tool_calls: vec![ToolCall {
+                id: id.into(),
+                kind: "function".into(),
+                function: FunctionCall {
+                    name: name.into(),
+                    arguments: input.to_string(),
+                },
+            }],
+            finish_reason: None,
+        };
+        let provider = ScriptedProvider {
+            model: "recovery".into(),
+            responses: Mutex::new(VecDeque::from([
+                call(
+                    "bad",
+                    "patch",
+                    serde_json::json!({"path":path,"edits":[{"start_line":1,"delete_count":1,"expected_lines":["stale"],"new_text":"new\n"}]}),
+                ),
+                call(
+                    "read",
+                    "filesystem",
+                    serde_json::json!({"operation":"read","path":path,"start_line":1,"end_line":2}),
+                ),
+                call(
+                    "fix",
+                    "patch",
+                    serde_json::json!({"path":path,"edits":[{"start_line":1,"delete_count":1,"expected_lines":["old"],"new_text":"new\n"}]}),
+                ),
+                call(
+                    "check",
+                    "filesystem",
+                    serde_json::json!({"operation":"read","path":path,"start_line":1,"end_line":1}),
+                ),
+                ModelResponse {
+                    usage: None,
+                    content: "done".into(),
+                    tool_calls: vec![],
+                    finish_reason: None,
+                },
+            ])),
+        };
+        let mut tools = ToolRegistry::new();
+        tools.register(tool::PatchTool);
+        tools.register(tool::FilesystemTool);
+        let mut kernel = AgentKernel::new(Arc::new(provider), tools, Arc::new(AllowAll));
+        let mut finished = Vec::new();
+        kernel
+            .run_turn("repair this file", |event| {
+                if let AgentEvent::ToolFinished {
+                    id,
+                    success,
+                    result,
+                    ..
+                } = event
+                {
+                    finished.push((id, success, result));
+                }
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            finished
+                .iter()
+                .map(|(id, ok, _)| (id.as_str(), *ok))
+                .collect::<Vec<_>>(),
+            [
+                ("bad", false),
+                ("read", true),
+                ("fix", true),
+                ("check", true)
+            ]
+        );
+        assert!(
+            serde_json::to_string(&finished[0].2.diagnostics)
+                .unwrap()
+                .contains("patch_conflict")
+        );
+        assert_eq!(
+            tokio::fs::read_to_string(&path).await.unwrap(),
+            "new\nkeep\n"
+        );
+        tokio::fs::remove_file(path).await.unwrap();
+    }
 
     #[tokio::test]
     async fn checkpoint_failure_stops_before_tool_execution_and_keeps_recoverable_history() {
@@ -1679,14 +1824,12 @@ mod tests {
             sizes[1] < 1000,
             "second request should see reduced test output: {sizes:?}"
         );
-        assert!(events.iter().any(|e| matches!(
-            e,
-            AgentEvent::ContextCompressed {
-                tool_outputs_reduced: 1,
-                semantic_called: false,
-                ..
-            }
-        )));
+        assert!(
+            kernel
+                .messages()
+                .iter()
+                .any(|message| message.content.contains("\"truncated\":true"))
+        );
         assert!(
             kernel
                 .messages()

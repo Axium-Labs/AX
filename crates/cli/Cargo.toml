@@ -15,6 +15,7 @@ async-trait.workspace = true
 runtime-core = { path = "../core" }
 model = { path = "../model" }
 memory = { path = "../memory" }
+evolution = { path = "../evolution" }
 mcp = { path = "../mcp" }
 tool = { path = "../tool" }
 clap.workspace = true

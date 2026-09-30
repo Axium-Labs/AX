@@ -206,8 +206,9 @@ fn resolve(input: &Value, jobs: &[Job], outputs: &[Option<Message>]) -> Result<V
                 .position(|job| job.id == id)
                 .and_then(|index| outputs[index].as_ref())
                 .ok_or_else(|| ToolError::InvalidInput(format!("unresolved tool result: {id}")))?;
-            let value = serde_json::from_str(&output.content)
-                .unwrap_or_else(|_| Value::String(output.content.clone()));
+            let raw = serde_json::from_str::<tool::ToolResult>(&output.content)
+                .map_or_else(|_| output.content.clone(), |result| result.raw_output);
+            let value = serde_json::from_str(&raw).unwrap_or(Value::String(raw));
             if let Some(pointer) = object.get("pointer").and_then(Value::as_str) {
                 return value.pointer(pointer).cloned().ok_or_else(|| {
                     ToolError::InvalidInput(format!(
@@ -282,11 +283,13 @@ where
             running.push(Box::pin(async move {
                 let result = execute(job, input, approval, approval_gate, timeout_secs, emit).await;
                 let success = result.is_ok();
+                let envelope = envelope(&result);
                 (emit.lock().unwrap())(AgentEvent::ToolFinished {
                     id: job.id.clone(),
                     name: job.name.clone(),
                     success,
                     diagnostics: fetch_diagnostics(&job.name, &result),
+                    result: envelope,
                 });
                 (index, success, message(&job.id, result))
             }));
@@ -313,6 +316,7 @@ async fn execute<F: FnMut(AgentEvent) + Send>(
         id: job.id.clone(),
         name: job.name.clone(),
         detail: tool_activity(&job.name, input.as_ref().unwrap_or(&job.input)),
+        input: input.as_ref().unwrap_or(&job.input).clone(),
     });
     let input = input?;
     let tool = job
@@ -345,8 +349,11 @@ async fn execute<F: FnMut(AgentEvent) + Send>(
 }
 
 fn message(id: &str, result: Result<ToolOutput, ToolError>) -> Message {
+    let envelope = envelope(&result);
     match result.unwrap_or_else(|error| ToolOutput::Text(error.to_string())) {
-        ToolOutput::Text(text) => Message::tool(id, text),
+        ToolOutput::Text(_) => {
+            Message::tool(id, serde_json::to_string(&envelope).unwrap_or_default())
+        }
         ToolOutput::Image {
             description,
             media_type,
@@ -360,6 +367,20 @@ fn message(id: &str, result: Result<ToolOutput, ToolError>) -> Message {
             message
         }
     }
+}
+
+fn envelope(result: &Result<ToolOutput, ToolError>) -> tool::ToolResult {
+    let raw = match result {
+        Ok(
+            ToolOutput::Text(text)
+            | ToolOutput::Image {
+                description: text, ..
+            },
+        )
+        | Err(ToolError::Execution(text) | ToolError::InvalidInput(text)) => text.clone(),
+        Err(error) => error.to_string(),
+    };
+    tool::ToolResult::new(result.is_ok(), raw)
 }
 
 #[derive(Default)]
@@ -613,7 +634,12 @@ mod tests {
             call("producer", json!({"label":"producer","value":42})),
         ], &tools, 4).await;
         assert_eq!(
-            serde_json::from_str::<Value>(&results[0].content).unwrap()["value"],
+            serde_json::from_str::<Value>(
+                &serde_json::from_str::<tool::ToolResult>(&results[0].content)
+                    .unwrap()
+                    .raw_output
+            )
+            .unwrap()["value"],
             42
         );
         assert_eq!(
