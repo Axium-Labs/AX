@@ -716,6 +716,7 @@ mod tests {
                             .is_object()
                     );
                     Ok(ModelResponse {
+                        usage: None,
                         content: String::new(),
                         tool_calls: vec![
                             call("slow", json!({"label":"slow","delay":100})),
@@ -731,6 +732,7 @@ mod tests {
                         .collect();
                     assert_eq!(results, ["slow", "fast"]);
                     Ok(ModelResponse {
+                        usage: None,
                         content: "done".into(),
                         tool_calls: Vec::new(),
                         finish_reason: None,

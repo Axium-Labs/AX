@@ -108,6 +108,8 @@ pub enum Role {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Message {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<Value>,
     pub role: Role,
     pub content: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -122,6 +124,7 @@ impl Message {
     #[must_use]
     pub fn system(content: impl Into<String>) -> Self {
         Self {
+            usage: None,
             role: Role::System,
             content: content.into(),
             parts: Vec::new(),
@@ -133,6 +136,7 @@ impl Message {
     #[must_use]
     pub fn user(content: impl Into<String>) -> Self {
         Self {
+            usage: None,
             role: Role::User,
             content: content.into(),
             parts: Vec::new(),
@@ -144,6 +148,7 @@ impl Message {
     #[must_use]
     pub fn assistant(content: impl Into<String>, tool_calls: Vec<ToolCall>) -> Self {
         Self {
+            usage: None,
             role: Role::Assistant,
             content: content.into(),
             parts: Vec::new(),
@@ -155,6 +160,7 @@ impl Message {
     #[must_use]
     pub fn tool(call_id: impl Into<String>, content: impl Into<String>) -> Self {
         Self {
+            usage: None,
             role: Role::Tool,
             content: content.into(),
             parts: Vec::new(),
@@ -214,6 +220,7 @@ pub struct ModelRequest {
 
 #[derive(Clone, Debug)]
 pub struct ModelResponse {
+    pub usage: Option<Value>,
     pub content: String,
     pub tool_calls: Vec<ToolCall>,
     pub finish_reason: Option<String>,

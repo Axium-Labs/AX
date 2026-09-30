@@ -514,6 +514,24 @@ pub async fn run(cli: &Cli, data_dir: PathBuf, skills_dir: PathBuf) -> Result<()
                     }),
                 );
             }
+            "session/delete" => {
+                let session_id = params["sessionId"].as_str().unwrap_or("");
+                if uuid::Uuid::parse_str(session_id).is_err() || active.lock().unwrap().is_some() {
+                    error(&out, id, -32602, "valid idle session required");
+                    continue;
+                }
+                match ReplState::new_in_project(
+                    data_dir.clone(),
+                    skills_dir.clone(),
+                    mcp_config.clone(),
+                    &cwd,
+                )
+                .and_then(|mut state| Ok(state.store()?.delete_session(session_id)?))
+                {
+                    Ok(deleted) => reply(&out, id, json!({"deleted":deleted})),
+                    Err(err) => error(&out, id, -32603, err.to_string()),
+                }
+            }
             "session/new" => {
                 if let Err(err) = session_cwd(params, &cwd) {
                     error(&out, id, -32602, err.to_string());

@@ -1430,6 +1430,7 @@ fn restore_message(stored: &StoredMessage) -> Message {
         return message;
     }
     Message {
+        usage: None,
         role: match stored.role {
             MessageRole::User => Role::User,
             MessageRole::Assistant => Role::Assistant,
@@ -1521,6 +1522,7 @@ mod file_context_tests {
             _: ModelRequest,
         ) -> std::result::Result<ModelResponse, ModelError> {
             Ok(ModelResponse {
+                usage: None,
                 content: String::new(),
                 tool_calls: Vec::new(),
                 finish_reason: None,

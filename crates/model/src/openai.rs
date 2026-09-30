@@ -243,6 +243,8 @@ struct ResponsesRequest<'a> {
 #[derive(Deserialize)]
 struct ResponsesResponse {
     #[serde(default)]
+    usage: Option<Value>,
+    #[serde(default)]
     output: Vec<Value>,
     status: Option<String>,
 }
@@ -475,7 +477,7 @@ impl OpenAiProvider {
             // parameters as the Codex CLI. Without client_version the request
             // can authenticate successfully while returning no usable catalog.
             let client_version =
-                std::env::var("AX_CODEX_CLIENT_VERSION").unwrap_or_else(|_| "0.154.0".to_owned());
+                std::env::var("AX_CODEX_CLIENT_VERSION").unwrap_or_else(|_| "0.159.2".to_owned());
             request = request
                 .query(&[("client_version", client_version.as_str())])
                 .header("originator", "codex_cli_rs")
@@ -552,8 +554,8 @@ fn parse_models_catalog(value: &Value, provider: &str) -> Result<Vec<ModelInfo>,
                     .get("default_reasoning_level")
                     .and_then(Value::as_str)
                     .and_then(ReasoningEffort::parse),
-                supports_tools: model.get("supported_in_api").and_then(Value::as_bool)
-                    != Some(false),
+                supports_tools: provider == "openai-codex"
+                    || model.get("supported_in_api").and_then(Value::as_bool) != Some(false),
                 endpoint: None,
             })
         })
@@ -562,6 +564,7 @@ fn parse_models_catalog(value: &Value, provider: &str) -> Result<Vec<ModelInfo>,
 
 #[derive(Default)]
 struct StreamedResponse {
+    usage: Option<Value>,
     content: String,
     calls: BTreeMap<String, StreamedCall>,
     status: Option<String>,
@@ -582,6 +585,7 @@ impl StreamedResponse {
             ));
         }
         Ok(ModelResponse {
+            usage: self.usage,
             content: self.content,
             tool_calls: self
                 .calls
@@ -681,6 +685,10 @@ fn process_response_event(
             }
         }
         Some("response.completed") => {
+            output.usage = value
+                .pointer("/response/usage")
+                .filter(|v| !v.is_null())
+                .cloned();
             output.status = value
                 .get("response")
                 .and_then(|response| response.get("status"))
@@ -807,6 +815,7 @@ fn parse_response(response: ResponsesResponse) -> Result<ModelResponse, ModelErr
         ));
     }
     Ok(ModelResponse {
+        usage: response.usage,
         content: content.join("\n"),
         tool_calls,
         finish_reason: response.status,
@@ -820,6 +829,13 @@ fn truncate_error(message: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn completed_stream_preserves_reported_usage() {
+        let mut output = StreamedResponse::default();
+        process_response_event(br#"data: {"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":120,"output_tokens":30}}}"#, &mut output, &mut |_| {}).unwrap();
+        assert_eq!(output.usage.unwrap()["input_tokens"], 120);
+    }
 
     #[test]
     fn response_tool_output_preserves_native_image_part() {
@@ -844,6 +860,7 @@ mod tests {
     #[test]
     fn parses_text_and_function_calls() {
         let response = ResponsesResponse {
+            usage: None,
             output: vec![
                 json!({
                     "type": "message",

@@ -652,7 +652,8 @@ impl AgentKernel {
             drop(model_timer);
             let content = response.content;
             let tool_calls = response.tool_calls;
-            let assistant = Message::assistant(content.clone(), tool_calls.clone());
+            let mut assistant = Message::assistant(content.clone(), tool_calls.clone());
+            assistant.usage = response.usage.map(|reported| serde_json::json!({"provider": self.provider.name(), "model": self.provider.model_id(), "reported": reported}));
             self.messages.push(assistant.clone());
             self.raw_turn_messages.push(assistant);
             checkpoint(&self.raw_turn_messages)?;
@@ -1236,6 +1237,7 @@ mod tests {
         let provider = ScriptedProvider {
             model: "scripted".into(),
             responses: Mutex::new(VecDeque::from([ModelResponse {
+                usage: None,
                 content: String::new(),
                 tool_calls: vec![ToolCall {
                     id: "call".into(),
@@ -1279,6 +1281,7 @@ mod tests {
             model: "scripted".into(),
             responses: Mutex::new(VecDeque::from([
                 ModelResponse {
+                    usage: None,
                     content: String::new(),
                     tool_calls: vec![ToolCall {
                         id: "call".into(),
@@ -1291,6 +1294,7 @@ mod tests {
                     finish_reason: None,
                 },
                 ModelResponse {
+                    usage: None,
                     content: "done".into(),
                     tool_calls: vec![],
                     finish_reason: None,
@@ -1338,6 +1342,7 @@ mod tests {
 
         async fn complete(&self, request: ModelRequest) -> Result<ModelResponse, ModelError> {
             Ok(ModelResponse {
+                usage: None,
                 content: request
                     .messages
                     .last()
@@ -1381,6 +1386,7 @@ mod tests {
             model: "scripted".to_owned(),
             responses: Mutex::new(VecDeque::from([
                 ModelResponse {
+                    usage: None,
                     content: String::new(),
                     tool_calls: vec![ToolCall {
                         id: "call-1".to_owned(),
@@ -1393,6 +1399,7 @@ mod tests {
                     finish_reason: Some("tool_calls".to_owned()),
                 },
                 ModelResponse {
+                    usage: None,
                     content: "done".to_owned(),
                     tool_calls: Vec::new(),
                     finish_reason: Some("stop".to_owned()),
@@ -1418,6 +1425,7 @@ mod tests {
         let provider = ScriptedProvider {
             model: "scripted".to_owned(),
             responses: Mutex::new(VecDeque::from([ModelResponse {
+            usage: None,
                 content: r#"{"state":[{"type":"goal","content":"goal and decisions preserved","importance":0.9}]}"#.to_owned(),
                 tool_calls: Vec::new(),
                 finish_reason: Some("stop".to_owned()),
@@ -1504,6 +1512,7 @@ mod tests {
         let provider = ScriptedProvider {
             model: "scripted".to_owned(),
             responses: Mutex::new(VecDeque::from([ModelResponse {
+                usage: None,
                 content:
                     r#"{"state":[{"type":"progress","content":"short summary","importance":0.8}]}"#
                         .to_owned(),
@@ -1566,6 +1575,7 @@ mod tests {
                 .is_some_and(|m| m.content.starts_with("Compress the older conversation"))
             {
                 return Ok(ModelResponse {
+                    usage: None,
                     content: r#"{"state":[{"type":"goal","content":"finish","importance":0.9}]}"#
                         .into(),
                     tool_calls: vec![],
@@ -1632,16 +1642,19 @@ mod tests {
         let provider = Arc::new(RecordingProvider {
             replies: Mutex::new(VecDeque::from([
                 ModelResponse {
+                    usage: None,
                     content: String::new(),
                     tool_calls: vec![test_call("a", true)],
                     finish_reason: None,
                 },
                 ModelResponse {
+                    usage: None,
                     content: String::new(),
                     tool_calls: vec![test_call("b", false)],
                     finish_reason: None,
                 },
                 ModelResponse {
+                    usage: None,
                     content: "done".into(),
                     tool_calls: vec![],
                     finish_reason: None,
@@ -1687,7 +1700,7 @@ mod tests {
     #[tokio::test]
     async fn semantic_state_keeps_early_constraints_and_failures_without_summary_recursion() {
         let provider = ScriptedProvider { model: "scripted".into(), responses: Mutex::new(VecDeque::from([
-            ModelResponse { content: r#"{"state":[{"type":"constraint","content":"Do not change the public API","importance":1.0},{"type":"failure","content":"Approach A failed because of a parser stack overflow","importance":0.95}]}"#.into(), tool_calls: vec![], finish_reason: None }
+            ModelResponse { usage: None, content: r#"{"state":[{"type":"constraint","content":"Do not change the public API","importance":1.0},{"type":"failure","content":"Approach A failed because of a parser stack overflow","importance":0.95}]}"#.into(), tool_calls: vec![], finish_reason: None }
         ])) };
         let mut kernel = AgentKernel::new(
             Arc::new(provider),
@@ -1776,7 +1789,7 @@ mod tests {
     #[tokio::test]
     async fn semantic_model_can_preserve_constraint_without_keyword() {
         let provider = ScriptedProvider { model: "scripted".into(), responses: Mutex::new(VecDeque::from([
-            ModelResponse { content: r#"{"state":[{"type":"constraint","content":"All deliverables use British English","importance":0.98}]}"#.into(), tool_calls: vec![], finish_reason: None }
+            ModelResponse { usage: None, content: r#"{"state":[{"type":"constraint","content":"All deliverables use British English","importance":0.98}]}"#.into(), tool_calls: vec![], finish_reason: None }
         ])) };
         let mut kernel = AgentKernel::new(
             Arc::new(provider),
@@ -1806,6 +1819,7 @@ mod tests {
         let provider = ScriptedProvider {
             model: "scripted".into(),
             responses: Mutex::new(VecDeque::from([ModelResponse {
+                usage: None,
                 content: "{broken JSON".into(),
                 tool_calls: vec![],
                 finish_reason: None,
@@ -1875,6 +1889,7 @@ mod tests {
         let provider = ScriptedProvider {
             model: "test".into(),
             responses: Mutex::new(VecDeque::from([ModelResponse {
+                usage: None,
                 content: String::new(),
                 tool_calls: vec![
                     ToolCall {

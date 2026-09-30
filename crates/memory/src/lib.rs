@@ -379,14 +379,14 @@ impl MemoryStore {
             [id],
         )?;
         let deleted = transaction.execute("DELETE FROM sessions WHERE id=?1", [id])? == 1;
-        transaction.commit()?;
-        if deleted {
-            match fs::remove_file(self.event_path(id)?) {
-                Ok(()) => {}
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(error) => return Err(error.into()),
-            }
+        // Do not commit an invisible session while its raw transcript remains on disk.
+        // An already removed index may still have an orphaned transcript to clean up.
+        match fs::remove_file(self.event_path(id)?) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
         }
+        transaction.commit()?;
         Ok(deleted)
     }
 

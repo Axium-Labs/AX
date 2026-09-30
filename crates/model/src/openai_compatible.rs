@@ -72,6 +72,7 @@ impl OpenAiCompatibleProvider {
                     messages: chat_messages(&request.messages),
                     tools: &request.tools,
                     stream: false,
+                    stream_options: None,
                     reasoning_effort: self.config.reasoning_effort,
                 })
                 .send()
@@ -85,6 +86,7 @@ impl OpenAiCompatibleProvider {
             ModelError::InvalidResponse("response contains no choices".to_owned())
         })?;
         Ok(ModelResponse {
+            usage: response.usage,
             content: choice.message.content.unwrap_or_default(),
             tool_calls: choice.message.tool_calls,
             finish_reason: choice.finish_reason,
@@ -98,7 +100,7 @@ impl OpenAiCompatibleProvider {
         on_thinking: &mut (dyn FnMut(String) + Send),
         started: Instant,
     ) -> Result<ModelResponse, ModelError> {
-        let response = ensure_success(
+        let send = |include_usage: bool| {
             self.client
                 .post(&self.config.endpoint)
                 .bearer_auth(&self.config.api_key)
@@ -107,12 +109,21 @@ impl OpenAiCompatibleProvider {
                     messages: chat_messages(&request.messages),
                     tools: &request.tools,
                     stream: true,
+                    stream_options: include_usage.then(|| json!({"include_usage":true})),
                     reasoning_effort: self.config.reasoning_effort,
                 })
                 .send()
-                .await?,
-        )
-        .await?;
+        };
+        let response = match ensure_success(send(true).await?).await {
+            // Some compatible providers reject this optional OpenAI field.
+            Err(ModelError::HttpStatus {
+                status: 400 | 422,
+                message,
+            }) if message.contains("stream_options") || message.contains("include_usage") => {
+                ensure_success(send(false).await?).await?
+            }
+            other => other?,
+        };
         // TTFT = time to the first valid delta of any kind: reasoning, text
         // or tool call. Reasoning flows through the callback; text and tool
         // deltas are checked after each event.
@@ -132,6 +143,7 @@ impl OpenAiCompatibleProvider {
         let mut content = String::new();
         let mut tool_calls = BTreeMap::<usize, PartialToolCall>::new();
         let mut finish_reason = None;
+        let mut usage = None;
 
         'events: while let Some(chunk) = stream.next().await {
             buffer.extend_from_slice(&chunk?);
@@ -143,6 +155,7 @@ impl OpenAiCompatibleProvider {
                     &mut content,
                     &mut tool_calls,
                     &mut finish_reason,
+                    &mut usage,
                     on_delta,
                     &mut on_thinking,
                 )? {
@@ -167,6 +180,7 @@ impl OpenAiCompatibleProvider {
                 &mut content,
                 &mut tool_calls,
                 &mut finish_reason,
+                &mut usage,
                 on_delta,
                 &mut on_thinking,
             )?;
@@ -182,6 +196,7 @@ impl OpenAiCompatibleProvider {
             }
         }
         Ok(ModelResponse {
+            usage,
             content,
             tool_calls: tool_calls
                 .into_values()
@@ -206,6 +221,8 @@ struct ChatRequest<'a> {
     tools: &'a [ToolSpec],
     stream: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
+    stream_options: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     reasoning_effort: Option<ReasoningEffort>,
 }
 
@@ -228,6 +245,21 @@ fn chat_messages(messages: &[Message]) -> Vec<Value> {
 #[cfg(test)]
 mod content_tests {
     use super::*;
+    #[test]
+    fn final_empty_choices_chunk_preserves_usage() {
+        let mut usage = None;
+        process_event(
+            br#"data: {"choices":[],"usage":{"prompt_tokens":100,"completion_tokens":5}}"#,
+            &mut String::new(),
+            &mut BTreeMap::new(),
+            &mut None,
+            &mut usage,
+            &mut |_| {},
+            &mut |_| {},
+        )
+        .unwrap();
+        assert_eq!(usage.unwrap()["completion_tokens"], 5);
+    }
     #[test]
     fn text_only_provider_omits_multimodal_metadata() {
         let mut message = Message::tool("call", "image description");
@@ -253,6 +285,8 @@ struct RemoteModel {
 
 #[derive(Deserialize)]
 struct ChatResponse {
+    #[serde(default)]
+    usage: Option<Value>,
     choices: Vec<Choice>,
 }
 
@@ -272,6 +306,8 @@ struct ResponseMessage {
 
 #[derive(Deserialize)]
 struct StreamChunk {
+    #[serde(default)]
+    usage: Option<Value>,
     #[serde(default)]
     choices: Vec<StreamChoice>,
 }
@@ -458,6 +494,7 @@ fn process_event(
     content: &mut String,
     tool_calls: &mut BTreeMap<usize, PartialToolCall>,
     finish_reason: &mut Option<String>,
+    usage: &mut Option<Value>,
     on_delta: &mut (dyn FnMut(String) + Send),
     on_thinking: &mut (dyn FnMut(String) + Send),
 ) -> Result<bool, ModelError> {
@@ -482,6 +519,9 @@ fn process_event(
     }
     let chunk = serde_json::from_str::<StreamChunk>(data)
         .map_err(|error| ModelError::InvalidResponse(error.to_string()))?;
+    if chunk.usage.is_some() {
+        *usage = chunk.usage;
+    }
     for choice in chunk.choices {
         if let Some(reasoning) = choice.delta.reasoning_content {
             on_thinking(reasoning.clone());
@@ -540,6 +580,7 @@ mod tests {
         let mut content = String::new();
         let mut calls = BTreeMap::new();
         let mut finish = None;
+        let mut usage = None;
         let mut deltas = Vec::new();
         let mut thinking = Vec::new();
         let mut on_delta = |delta: String| deltas.push(delta);
@@ -549,6 +590,7 @@ mod tests {
             &mut content,
             &mut calls,
             &mut finish,
+            &mut usage,
             &mut on_delta,
             &mut on_thinking,
         )
@@ -558,6 +600,7 @@ mod tests {
             &mut content,
             &mut calls,
             &mut finish,
+            &mut usage,
             &mut on_delta,
             &mut on_thinking,
         )

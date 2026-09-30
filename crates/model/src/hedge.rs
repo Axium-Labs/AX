@@ -281,6 +281,7 @@ impl ModelProvider for HedgingProvider {
                                     empty_response = Some(response);
                                     if active == 0 {
                                         break Ok(empty_response.unwrap_or(ModelResponse {
+            usage: None,
                                             content: String::new(),
                                             tool_calls: Vec::new(),
                                             finish_reason: None,
@@ -472,6 +473,7 @@ mod tests {
             }
             if self.tool_call_only {
                 return Ok(ModelResponse {
+                    usage: None,
                     content: String::new(),
                     tool_calls: vec![crate::ToolCall {
                         id: "call-1".to_owned(),
@@ -488,6 +490,7 @@ mod tests {
                 on_delta(delta.clone());
             }
             Ok(ModelResponse {
+                usage: None,
                 content: self.deltas.concat(),
                 tool_calls: Vec::new(),
                 finish_reason: Some("stop".to_owned()),
