@@ -6,3 +6,6 @@
 *.db
 *.db-shm
 *.db-wal
+
+# Local copies of GitHub Release assets
+/release/

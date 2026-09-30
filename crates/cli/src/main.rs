@@ -5,6 +5,7 @@ use std::{
     num::NonZeroUsize,
     path::{Path, PathBuf},
     sync::Arc,
+    time::Duration,
 };
 
 use anyhow::{Context, Result, anyhow};
@@ -12,8 +13,8 @@ use clap::{Parser, Subcommand, ValueEnum};
 use mcp::{McpConfig, McpManager, McpToolProxy};
 use memory::{MemoryStore, MessageKind, MessageRole, NewMessage, Session, StoredMessage};
 use model::{
-    AuthStorage, Message, ModelProvider, OpenAiCompatibleConfig, OpenAiCompatibleProvider,
-    OpenAiConfig, OpenAiProvider, ReasoningEffort, Role,
+    AuthStorage, HedgeConfig, HedgingProvider, Message, ModelProvider, OpenAiCompatibleConfig,
+    OpenAiCompatibleProvider, OpenAiConfig, OpenAiProvider, ReasoningEffort, Role,
 };
 use runtime_core::{AgentEvent, AgentKernel, AllowAll, ApprovalPolicy, DenyDangerous};
 use runtime_core::{AgentSupervisor, AgentTask};
@@ -21,6 +22,8 @@ use skill::SkillCatalog;
 use tool::{FilesystemTool, ShellTool, ToolRegistry};
 
 mod acp;
+mod auth_login;
+mod capability_import;
 mod config;
 mod crew_device;
 mod file_reference;
@@ -34,6 +37,7 @@ mod session_restore;
 mod skill_settings;
 mod tui;
 mod update;
+use config::{AxConfig, InferenceMode};
 use model_selection::ModelResolution;
 use tui::run_tui;
 
@@ -94,6 +98,21 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Manage AX provider credentials.
+    Auth {
+        #[command(subcommand)]
+        command: AuthCommand,
+    },
+    /// Import a validated Skill directory into AX.
+    Skill {
+        #[command(subcommand)]
+        command: CapabilityCommand,
+    },
+    /// Import MCP server configuration without launching servers.
+    Mcp {
+        #[command(subcommand)]
+        command: CapabilityCommand,
+    },
     /// Run the Agent Client Protocol v1 adapter on stdio.
     Acp,
     /// Pair or connect this AX instance to an AX Crew gateway.
@@ -129,6 +148,34 @@ enum Command {
 }
 
 #[derive(Subcommand)]
+enum CapabilityCommand {
+    /// Import from a local directory (Skill) or TOML/JSON file (MCP).
+    Import {
+        path: PathBuf,
+        /// Install globally instead of into the current project.
+        #[arg(long)]
+        global: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum AuthCommand {
+    /// Sign in through the system browser.
+    Login {
+        provider: String,
+        /// `WorkBuddy` login region (intl or cn). Defaults to the provider's region.
+        #[arg(long, value_enum)]
+        region: Option<WorkBuddyLoginRegion>,
+    },
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum WorkBuddyLoginRegion {
+    Intl,
+    Cn,
+}
+
+#[derive(Subcommand)]
 enum CrewCommand {
     /// Pair this machine using a one-time code issued by Crew.
     Pair {
@@ -145,6 +192,7 @@ enum ProviderKind {
     Deepseek,
     Openai,
     Codex,
+    Workbuddy,
     Compatible,
 }
 
@@ -169,6 +217,7 @@ impl ModelSelection {
             Some(capacity) => capacity,
             None => match self.provider {
                 ProviderKind::Deepseek => 64_000,
+                ProviderKind::Workbuddy => 128_000,
                 ProviderKind::Openai | ProviderKind::Codex | ProviderKind::Compatible => 200_000,
             },
         }
@@ -842,6 +891,64 @@ fn kernel(
     mcp_tools: &[McpToolProxy],
     auth_path: &Path,
 ) -> Result<AgentKernel> {
+    let primary = build_provider(selection, auth_path)?;
+    let inference = AxConfig::load().ok().and_then(|config| config.inference);
+    let provider: Arc<dyn ModelProvider> = match inference {
+        Some(config) if config.mode == InferenceMode::Fast => {
+            let fast = config.fast.unwrap_or_default();
+            let alternates = hedge_alternates(selection, auth_path);
+            Arc::new(HedgingProvider::new(
+                primary,
+                alternates,
+                HedgeConfig {
+                    threshold_override: fast.hedge_threshold_ms.map(Duration::from_millis),
+                    max_parallel: fast.max_parallel.unwrap_or(2).max(1),
+                },
+            ))
+        }
+        _ => primary,
+    };
+    let tool_registry = if selection.supports_tools {
+        tools(mcp_tools)
+    } else {
+        ToolRegistry::new()
+    };
+    Ok(AgentKernel::new(provider, tool_registry, approval).with_messages(messages))
+}
+
+/// Other configured providers that serve the same model. The hedge secondary
+/// picks the best-ranked one at trigger time; an empty list means the hedge
+/// fires a second request at the primary itself, which the design allows.
+fn hedge_alternates(selection: &ModelSelection, auth_path: &Path) -> Vec<Arc<dyn ModelProvider>> {
+    let mut alternates = Vec::new();
+    for provider_id in model_selection::detect_configured_providers(selection.codex_auth.as_ref()) {
+        if provider_id == selection.provider_id {
+            continue;
+        }
+        let serves_model = model_selection::local_catalog_models(&provider_id)
+            .iter()
+            .any(|model| model.id == selection.model);
+        if !serves_model {
+            continue;
+        }
+        let Ok(alt_selection) = model_selection::selection_for_provider_id(
+            &provider_id,
+            Some(selection.model.clone()),
+            selection.reasoning_effort,
+            selection.codex_auth.clone(),
+        ) else {
+            continue;
+        };
+        if let Ok(provider) = build_provider(&alt_selection, auth_path) {
+            alternates.push(provider);
+        }
+    }
+    alternates
+}
+
+/// Builds the concrete provider for a selection. Called once for the primary
+/// and, in Fast mode, once per hedge alternate.
+fn build_provider(selection: &ModelSelection, auth_path: &Path) -> Result<Arc<dyn ModelProvider>> {
     let auth = AuthStorage::new(auth_path);
     let provider: Arc<dyn ModelProvider> = match selection.provider {
         ProviderKind::Deepseek => {
@@ -894,6 +1001,21 @@ fn kernel(
             config.reasoning_effort = selection.reasoning_effort;
             Arc::new(OpenAiProvider::new(config))
         }
+        ProviderKind::Workbuddy => {
+            let region =
+                model::workbuddy::WorkBuddyRegion::from_provider_id(&selection.provider_id)
+                    .ok_or_else(|| {
+                        anyhow!("unknown WorkBuddy region: {}", selection.provider_id)
+                    })?;
+            let mut provider = model::workbuddy::WorkBuddyProvider::for_region(
+                auth,
+                selection.model.clone(),
+                selection.context_capacity(),
+                region,
+            )?;
+            provider.set_limits(selection.max_output_tokens, selection.reasoning_effort);
+            Arc::new(provider)
+        }
         ProviderKind::Compatible => {
             let spec = model::provider(&selection.provider_id).ok_or_else(|| {
                 anyhow!(
@@ -923,12 +1045,7 @@ fn kernel(
             Arc::new(OpenAiCompatibleProvider::new(config))
         }
     };
-    let tool_registry = if selection.supports_tools {
-        tools(mcp_tools)
-    } else {
-        ToolRegistry::new()
-    };
-    Ok(AgentKernel::new(provider, tool_registry, approval).with_messages(messages))
+    Ok(provider)
 }
 
 fn render_event(event: AgentEvent) {
@@ -970,13 +1087,9 @@ async fn main() -> Result<()> {
     let cwd = std::env::current_dir()?;
     let (data_dir, skills_dir) =
         resolve_directories(&cwd, cli.data_dir.clone(), cli.skills_dir.clone());
-    let budget = runtime_core::ExecutionBudget {
-        max_steps: cli.max_steps,
-        max_tool_calls: cli.max_tool_calls,
-        turn_timeout_secs: cli.turn_timeout_secs,
-        tool_timeout_secs: cli.tool_timeout_secs,
-    };
+    let budget = execution_budget(&cli);
     drop(startup_timer);
+    model::stats::init(config::ax_home().join("inference_stats.json"));
     let auth_path = ax_auth_path();
     let approval: Arc<dyn ApprovalPolicy> = if cli.allow_dangerous {
         Arc::new(AllowAll)
@@ -984,6 +1097,12 @@ async fn main() -> Result<()> {
         Arc::new(DenyDangerous)
     };
 
+    if let Some(Command::Auth { ref command }) = cli.command {
+        return auth_login::run(command).await;
+    }
+    if capability_import::run(&cli, &data_dir, &skills_dir)? {
+        return Ok(());
+    }
     if matches!(cli.command, Some(Command::Acp)) {
         return acp::run(&cli, data_dir, skills_dir).await;
     }
@@ -992,7 +1111,13 @@ async fn main() -> Result<()> {
     }
 
     match cli.command {
-        Some(Command::Acp | Command::Crew { .. }) => {
+        Some(
+            Command::Acp
+            | Command::Crew { .. }
+            | Command::Auth { .. }
+            | Command::Skill { .. }
+            | Command::Mcp { .. },
+        ) => {
             unreachable!("handled before command dispatch")
         }
         Some(Command::Export {
@@ -1052,6 +1177,15 @@ async fn main() -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn execution_budget(cli: &Cli) -> runtime_core::ExecutionBudget {
+    runtime_core::ExecutionBudget {
+        max_steps: cli.max_steps,
+        max_tool_calls: cli.max_tool_calls,
+        turn_timeout_secs: cli.turn_timeout_secs,
+        tool_timeout_secs: cli.tool_timeout_secs,
+    }
 }
 
 fn run_export(

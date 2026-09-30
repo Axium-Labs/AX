@@ -242,11 +242,17 @@ fn selection_for_kind(
         ProviderKind::Deepseek => "deepseek".to_owned(),
         ProviderKind::Openai => "openai".to_owned(),
         ProviderKind::Codex => "openai-codex".to_owned(),
+        ProviderKind::Workbuddy => "workbuddy".to_owned(),
         ProviderKind::Compatible => {
             let configured = detect_configured_providers(codex_auth.as_ref());
             let compatible = configured
                 .iter()
-                .filter(|id| !matches!(id.as_str(), "deepseek" | "openai" | "openai-codex"))
+                .filter(|id| {
+                    !matches!(
+                        id.as_str(),
+                        "deepseek" | "openai" | "openai-codex" | "workbuddy" | "workbuddy-cn"
+                    )
+                })
                 .cloned()
                 .collect::<Vec<_>>();
             match compatible.len() {
@@ -268,7 +274,7 @@ fn selection_for_kind(
     selection_for_provider_id(&provider_id, model, None, codex_auth)
 }
 
-fn selection_for_provider_id(
+pub(crate) fn selection_for_provider_id(
     provider_id: &str,
     model: Option<String>,
     effort: Option<ReasoningEffort>,
@@ -393,6 +399,7 @@ fn provider_kind_for(provider_id: &str) -> Result<ProviderKind> {
         "deepseek" => Ok(ProviderKind::Deepseek),
         "openai" => Ok(ProviderKind::Openai),
         "openai-codex" | "codex" => Ok(ProviderKind::Codex),
+        "workbuddy" | "workbuddy-cn" => Ok(ProviderKind::Workbuddy),
         id if provider(id)
             .is_some_and(|spec| spec.protocol == ProviderProtocol::OpenAiCompatible) =>
         {
@@ -658,6 +665,7 @@ mod tests {
                 model: "deepseek-flash".to_owned(),
                 reasoning_effort: Some("high".to_owned()),
             }),
+            inference: None,
         };
         config.save_to(&path).unwrap();
         let loaded = AxConfig::load_from(&path).unwrap();

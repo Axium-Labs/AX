@@ -1,4 +1,10 @@
-use std::{collections::BTreeMap, fs, path::PathBuf, time::Duration};
+use std::{
+    collections::BTreeMap,
+    fs,
+    path::PathBuf,
+    sync::atomic::{AtomicBool, Ordering},
+    time::{Duration, Instant},
+};
 
 use async_trait::async_trait;
 use futures_util::StreamExt;
@@ -8,7 +14,7 @@ use serde_json::{Value, json};
 
 use crate::{
     FunctionCall, Message, ModelError, ModelInfo, ModelProvider, ModelRequest, ModelResponse,
-    ReasoningEffort, Role, ToolCall, ToolSpec,
+    ReasoningEffort, Role, ToolCall, ToolSpec, stats,
 };
 
 const API_ENDPOINT: &str = "https://api.openai.com/v1/responses";
@@ -273,38 +279,11 @@ impl ModelProvider for OpenAiProvider {
     }
 
     async fn complete(&self, request: ModelRequest) -> Result<ModelResponse, ModelError> {
-        let payload = ResponsesRequest {
-            model: &self.config.model,
-            input: response_input(&request.messages),
-            tools: response_tools(&request.tools),
-            store: false,
-            stream: false,
-            reasoning: self
-                .config
-                .reasoning_effort
-                .map(|effort| json!({ "effort": effort })),
-        };
-        let response = self
-            .client
-            .post(&self.config.endpoint)
-            .headers(self.auth_headers()?)
-            .header("originator", "ax")
-            .json(&payload)
-            .send()
-            .await?;
-        let status = response.status();
-        if !status.is_success() {
-            let message = response
-                .text()
-                .await
-                .unwrap_or_else(|_| "response body unavailable".to_owned());
-            return Err(ModelError::HttpStatus {
-                status: status.as_u16(),
-                message: truncate_error(&message),
-            });
+        let result = self.complete_inner(request).await;
+        if result.is_err() {
+            stats::record_error(self.name(), &self.config.model);
         }
-        let response = response.json::<ResponsesResponse>().await?;
-        parse_response(response)
+        result
     }
 
     async fn complete_stream(
@@ -314,51 +293,28 @@ impl ModelProvider for OpenAiProvider {
         on_thinking: &mut (dyn FnMut(String) + Send),
     ) -> Result<ModelResponse, ModelError> {
         let _ = on_thinking;
-        let payload = ResponsesRequest {
-            model: &self.config.model,
-            input: response_input(&request.messages),
-            tools: response_tools(&request.tools),
-            store: false,
-            stream: true,
-            reasoning: self
-                .config
-                .reasoning_effort
-                .map(|effort| json!({ "effort": effort })),
-        };
-        let response = self
-            .client
-            .post(&self.config.endpoint)
-            .headers(self.auth_headers()?)
-            .header("originator", "ax")
-            .json(&payload)
-            .send()
-            .await?;
-        let status = response.status();
-        if !status.is_success() {
-            let message = response
-                .text()
-                .await
-                .unwrap_or_else(|_| "response body unavailable".to_owned());
-            return Err(ModelError::HttpStatus {
-                status: status.as_u16(),
-                message: truncate_error(&message),
-            });
-        }
-        let mut stream = response.bytes_stream();
-        let mut buffer = Vec::new();
-        let mut output = StreamedResponse::default();
-        while let Some(chunk) = stream.next().await {
-            buffer.extend_from_slice(&chunk?);
-            while let Some((end, delimiter_len)) = find_sse_event_end(&buffer) {
-                let event = buffer.drain(..end).collect::<Vec<_>>();
-                buffer.drain(..delimiter_len);
-                process_response_event(&event, &mut output, on_delta)?;
+        let started = Instant::now();
+        let result = self.stream_inner(request, on_delta, started).await;
+        match &result {
+            Ok(response) => {
+                let output_chars = response.content.len()
+                    + response
+                        .tool_calls
+                        .iter()
+                        .map(|call| {
+                            call.id.len() + call.function.name.len() + call.function.arguments.len()
+                        })
+                        .sum::<usize>();
+                stats::record_completion(
+                    self.name(),
+                    &self.config.model,
+                    (output_chars / 4) as u64,
+                    started.elapsed(),
+                );
             }
+            Err(_) => stats::record_error(self.name(), &self.config.model),
         }
-        if !buffer.is_empty() {
-            process_response_event(&buffer, &mut output, on_delta)?;
-        }
-        output.finish()
+        result
     }
 
     async fn list_models(&self) -> Result<Vec<ModelInfo>, ModelError> {
@@ -402,6 +358,105 @@ impl ModelProvider for OpenAiProvider {
 }
 
 impl OpenAiProvider {
+    async fn complete_inner(&self, request: ModelRequest) -> Result<ModelResponse, ModelError> {
+        let payload = ResponsesRequest {
+            model: &self.config.model,
+            input: response_input(&request.messages),
+            tools: response_tools(&request.tools),
+            store: false,
+            stream: false,
+            reasoning: self
+                .config
+                .reasoning_effort
+                .map(|effort| json!({ "effort": effort })),
+        };
+        let response = self
+            .client
+            .post(&self.config.endpoint)
+            .headers(self.auth_headers()?)
+            .header("originator", "ax")
+            .json(&payload)
+            .send()
+            .await?;
+        let status = response.status();
+        if !status.is_success() {
+            let message = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "response body unavailable".to_owned());
+            return Err(ModelError::HttpStatus {
+                status: status.as_u16(),
+                message: truncate_error(&message),
+            });
+        }
+        let response = response.json::<ResponsesResponse>().await?;
+        parse_response(response)
+    }
+
+    async fn stream_inner(
+        &self,
+        request: ModelRequest,
+        on_delta: &mut (dyn FnMut(String) + Send),
+        started: Instant,
+    ) -> Result<ModelResponse, ModelError> {
+        let payload = ResponsesRequest {
+            model: &self.config.model,
+            input: response_input(&request.messages),
+            tools: response_tools(&request.tools),
+            store: false,
+            stream: true,
+            reasoning: self
+                .config
+                .reasoning_effort
+                .map(|effort| json!({ "effort": effort })),
+        };
+        let response = self
+            .client
+            .post(&self.config.endpoint)
+            .headers(self.auth_headers()?)
+            .header("originator", "ax")
+            .json(&payload)
+            .send()
+            .await?;
+        let status = response.status();
+        if !status.is_success() {
+            let message = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "response body unavailable".to_owned());
+            return Err(ModelError::HttpStatus {
+                status: status.as_u16(),
+                message: truncate_error(&message),
+            });
+        }
+        // TTFT = time to the first text delta (the Responses API surfaces no
+        // reasoning or tool-call deltas through the callbacks).
+        let first_delta = AtomicBool::new(false);
+        let provider_name = self.name().to_owned();
+        let model = self.config.model.clone();
+        let mut on_delta = |text: String| {
+            if !text.is_empty() && !first_delta.swap(true, Ordering::SeqCst) {
+                stats::record_ttft(&provider_name, &model, started.elapsed());
+            }
+            on_delta(text);
+        };
+        let mut stream = response.bytes_stream();
+        let mut buffer = Vec::new();
+        let mut output = StreamedResponse::default();
+        while let Some(chunk) = stream.next().await {
+            buffer.extend_from_slice(&chunk?);
+            while let Some((end, delimiter_len)) = find_sse_event_end(&buffer) {
+                let event = buffer.drain(..end).collect::<Vec<_>>();
+                buffer.drain(..delimiter_len);
+                process_response_event(&event, &mut output, &mut on_delta)?;
+            }
+        }
+        if !buffer.is_empty() {
+            process_response_event(&buffer, &mut output, &mut on_delta)?;
+        }
+        output.finish()
+    }
+
     async fn fetch_models(&self) -> Result<Vec<ModelInfo>, ModelError> {
         let endpoint = self
             .config

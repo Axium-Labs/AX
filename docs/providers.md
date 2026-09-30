@@ -159,3 +159,87 @@ inference test. Unsupported protocols remain explicitly disabled.
 
 Endpoint references: [MiniMax OpenAI SDK](https://platform.minimax.io/docs/api-reference/text-openai-api)
 and [Fireworks Chat Completions](https://docs.fireworks.ai/api-reference/post-chatcompletions).
+
+## Native WorkBuddy
+
+`ax auth login workbuddy` displays a login URL to click or copy, waits for authorization,
+saves access/refresh tokens and expiry in AX's existing `AuthStorage`, and
+awaits account model discovery before exiting. The TUI offers WorkBuddy under
+`/login` → account sign-in. After login, use `/model` to select a discovered
+`workbuddy/<model-id>`; the CLI also accepts `--provider workbuddy --model <id>`.
+Regions have separate provider identities, credentials and model caches:
+
+| Region | Provider / credential key | Login command | Model/auth endpoint |
+|---|---|---|---|
+| International | `workbuddy` | `ax auth login workbuddy --region intl` | `https://www.workbuddy.ai` |
+| China | `workbuddy-cn` | `ax auth login workbuddy --region cn` (or `ax auth login workbuddy-cn`) | `https://copilot.tencent.com` |
+
+The original `ax auth login workbuddy` command continues to use International.
+`/login` shows **WorkBuddy International** and **WorkBuddy China** separately;
+`/model` and persisted model selections use `workbuddy/<id>` or
+`workbuddy-cn/<id>`. Both accounts may be signed in concurrently. Signing in
+again clears only that region's cache. A China provider never falls back to
+International credentials, and known token domain/issuer region mismatches are
+rejected before use. `workbuddy-cn --region intl` is rejected as conflicting.
+China requests use the China product UA, `www.codebuddy.cn` Origin/Referer,
+`copilot.tencent.com` domain and `X-Auth-Refresh-Source: workbuddy`;
+International retains `X-Auth-Refresh-Source: plugin`.
+
+Protocol reference: [workbuddy2api-hub](https://github.com/ardeyouxipianyi/workbuddy2api-hub),
+commit `6c2a6637f27dcecb6c4956392dfd936fac687306`, verified 2026-09-30.
+The current CLI login is a server-issued random state and browser authorization
+followed by token polling, **not** an authorization-code localhost redirect.
+AX validates the HTTPS authorization origin, login path and exact state
+(including rejecting duplicate state parameters), and polls only that attempt.
+Neither the reference implementation nor the current CLI login page provides a
+localhost callback or PKCE contract. This implementation uses the agreed polling
+flow; it does not claim to implement those unsupported features. Temporary
+state stays in memory. Login expires after 10 minutes; Ctrl+C cancels CLI login,
+Esc cancels a pending TUI login, and leaving the TUI aborts it.
+
+Endpoints:
+
+- `POST /v2/plugin/auth/state?platform=CLI` → `data.state`, `data.authUrl`.
+- `GET /v2/plugin/auth/token?state=...`: code `11217` means pending;
+  successful `data` carries `accessToken`, `refreshToken`, and expiry (explicit
+  epoch, JWT `exp`, or `expiresIn`).
+- `POST /v2/plugin/auth/token/refresh`: `X-Refresh-Token` and
+  region-specific `X-Auth-Refresh-Source`; accepts both `data` and `data.data` envelopes.
+- International `GET /v2/enterprises/personal/models`, China `GET /v3/config`:
+  deduplicate `data.agents[].models`
+  (object-shaped agents are also accepted), omit the non-chat `lite` channel.
+- `POST /v2/chat/completions`: AX messages/tools sent directly, with SSE
+  accumulated for non-streaming callers. The shared parser handles split UTF-8,
+  LF/CRLF framing, reasoning/tool deltas, repeated `data:` prefixes and `[DONE]`.
+
+Before every model/list request AX reloads its stored credential and refreshes
+within 120 seconds of expiry. Refresh is serialized across provider instances
+and persists rotated tokens before use. HTTP 401 triggers one refresh/retry
+before asking for login; 403 reports account/model entitlement denial, and 429
+reports rate/quota exhaustion. Transport failures remain transport errors and
+preserve credentials. HTTP error bodies are not echoed from this provider.
+Login and refresh requests time out after 30 seconds, model listing after 10
+seconds, and chat transport after 180 seconds (15 second connect deadline).
+Dropping the request future closes its stream, following AX cancellation.
+
+WorkBuddy has no invented offline model list. Successful discovery uses the
+existing AX model cache and picker; a failed refresh keeps the existing cache
+with a warning. A new account login clears the previous WorkBuddy model cache
+before discovering its models. Catalog membership is the account's declaration,
+not a guarantee against subsequent quota or entitlement changes.
+
+The WorkBuddy product user-agent and product routing headers are required by
+the upstream model/catalog protocol. AX sends no machine/session fingerprints,
+browser cookies, desktop token imports, proxy rotation, account pooling,
+check-ins, rewards, WorkBuddy agent sessions, skills/tools or injected system
+prompt. Only AX supplies conversation context and tool schemas.
+
+### Crew account sign-in
+
+ACP catalogs include `auth_kind` (`api_key`, `oauth`, or `ambient`). Crew separates
+account sign-in from API keys and environment credentials, and rejects saving
+an API key for OAuth providers. `ax auth login openai-codex` also exposes AX's
+existing device-code flow to the desktop. Crew runs AX's login command, displays
+the URL and device code, and only opens the system browser after a user click.
+Closing the authorization dialog cancels the login process. AX remains the
+sole owner of token exchange, credential persistence and model discovery.

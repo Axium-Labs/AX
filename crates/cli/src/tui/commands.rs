@@ -7,7 +7,7 @@ use catalogs::{mcp_items, open_mcp, open_skills, open_tools, skill_items};
 
 use anyhow::Result;
 use model::{
-    AuthStorage, ModelInfo, OAuthCredential, PROVIDERS, ProviderAuthKind, ReasoningEffort,
+    AuthStorage, ModelInfo, OAuthCredential, PROVIDERS, ProviderAuthKind, ReasoningEffort, stats,
 };
 use tokio::sync::mpsc;
 
@@ -18,7 +18,7 @@ pub enum LoginUpdate {
     /// Show the verification link + one-time code to the user.
     Prompt(String),
     /// Tokens were persisted to AX's provider-scoped `~/.ax/auth.json`.
-    Success,
+    Success(String),
     /// Login failed (network, auth server, or file write).
     Failed(String),
     /// Plain progress line from a background task (for example the outcome of
@@ -36,6 +36,7 @@ use super::bottom_pane::{
 };
 use super::catalog_refresh;
 use super::{App, BottomPane, TranscriptKind};
+use crate::config::{AxConfig, InferenceMode};
 use crate::{ModelSelection, PermissionDecision, ProviderKind, ReplState};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -426,6 +427,46 @@ fn status_panel(
         "Environment".into(),
         format!("Directory         {}", app.directory),
     ];
+    lines.push(String::new());
+    lines.push("Inference".into());
+    let inference = AxConfig::load().ok().and_then(|config| config.inference);
+    match inference {
+        Some(config) if config.mode == InferenceMode::Fast => {
+            lines.push("Mode              Fast (adaptive hedging)".into());
+            let override_ms = config
+                .fast
+                .as_ref()
+                .and_then(|fast| fast.hedge_threshold_ms);
+            let threshold = match override_ms {
+                Some(ms) => format!("{ms} ms (configured)"),
+                None => format!(
+                    "auto {} ms",
+                    stats::hedge_threshold(&selection.provider_id, &selection.model).as_millis()
+                ),
+            };
+            lines.push(format!("Hedge Threshold   {threshold}"));
+            let snapshot = stats::hedge_snapshot();
+            lines.push(format!(
+                "Trigger Rate      {:.1}% ({}/{})",
+                snapshot.trigger_rate * 100.0,
+                snapshot.hedged,
+                snapshot.fast_requests
+            ));
+            let ttft = match (snapshot.ttft_p50_ms, snapshot.ttft_p95_ms) {
+                (Some(p50), Some(p95)) => format!("{p50} / {p95} ms"),
+                _ => "no data yet".to_owned(),
+            };
+            lines.push(format!("TTFT P50/P95      {ttft}"));
+            lines.push(format!("Tokens/s          {:.1}", snapshot.tokens_per_sec));
+            lines.push(format!("Canceled          {}", snapshot.canceled));
+            // Measured from actual token spend — never a fixed promise.
+            lines.push(format!(
+                "Extra Cost        {:.2}x",
+                snapshot.extra_cost_factor
+            ));
+        }
+        _ => lines.push("Mode              Standard".into()),
+    }
     lines.push(format!(
         "Budget            {} steps / {} tool calls / {} turn / {} tool",
         limit_display(state.execution_budget.max_steps),
@@ -563,6 +604,7 @@ fn apply_model_info(
             "deepseek" => ProviderKind::Deepseek,
             "openai" => ProviderKind::Openai,
             "codex" | "openai-codex" => ProviderKind::Codex,
+            "workbuddy" | "workbuddy-cn" => ProviderKind::Workbuddy,
             provider
                 if model::provider(provider).is_some_and(|spec| {
                     spec.protocol == model::ProviderProtocol::OpenAiCompatible
@@ -949,6 +991,49 @@ pub(super) async fn apply_modal_action(
                         );
                         }
                         ProviderAuthKind::ApiKey => pane.push_view(SecretInput::open(id)),
+                        ProviderAuthKind::ExternalOAuth
+                            if model::workbuddy::WorkBuddyRegion::from_provider_id(provider.id)
+                                .is_some() =>
+                        {
+                            pane.clear_views();
+                            if app
+                                .workbuddy_login
+                                .as_ref()
+                                .is_some_and(|login| !login.is_finished())
+                            {
+                                app.push(
+                                    TranscriptKind::Info,
+                                    "WorkBuddy login is already in progress; press Esc to cancel",
+                                );
+                                return Ok(());
+                            }
+                            let region =
+                                model::workbuddy::WorkBuddyRegion::from_provider_id(provider.id)
+                                    .expect("matched WorkBuddy region");
+                            app.workbuddy_login_region = Some(region);
+                            let tx = login_tx.clone();
+                            app.workbuddy_login = Some(tokio::spawn(async move {
+                                let result = crate::auth_login::login_workbuddy(
+                                    |text| {
+                                        let _ = tx.send(LoginUpdate::Notice(text.to_owned()));
+                                    },
+                                    false,
+                                    region,
+                                )
+                                .await;
+                                let update = match result {
+                                    Ok(()) => LoginUpdate::Success(region.provider_id().into()),
+                                    Err(error) => {
+                                        LoginUpdate::Failed(format!("{}: {error}", region.label()))
+                                    }
+                                };
+                                let _ = tx.send(update);
+                            }));
+                            app.push(
+                                TranscriptKind::Status,
+                                format!("Starting {} browser login", region.label()),
+                            );
+                        }
                         ProviderAuthKind::ExternalOAuth => {
                             pane.clear_views();
                             app.push(
@@ -972,6 +1057,13 @@ pub(super) async fn apply_modal_action(
                     }
                 }
             } else if surface == "logout-provider" {
+                if app
+                    .workbuddy_login_region
+                    .is_some_and(|region| region.provider_id() == id)
+                    && let Some(login) = app.workbuddy_login.take()
+                {
+                    login.abort();
+                }
                 if id == "openai-codex" {
                     AuthStorage::new(crate::ax_auth_path()).remove("openai-codex")?;
                     state.invalidate_runtime();
@@ -1037,7 +1129,7 @@ fn start_codex_login(
                     account_id: tokens.account_id,
                 },
             ) {
-                Ok(()) => report(LoginUpdate::Success),
+                Ok(()) => report(LoginUpdate::Success("openai-codex".into())),
                 Err(error) => report(LoginUpdate::Failed(error.to_string())),
             },
             Err(error) => report(LoginUpdate::Failed(error.to_string())),

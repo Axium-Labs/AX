@@ -74,6 +74,8 @@ mod tests {
         assert!(is_supported_provider("openai"));
         assert!(is_supported_provider("openai-codex"));
         assert!(is_supported_provider("groq"));
+        assert!(is_supported_provider("workbuddy"));
+        assert!(is_supported_provider("workbuddy-cn"));
         assert!(!is_supported_provider("anthropic"));
         assert!(!is_supported_provider("amazon-bedrock"));
         assert!(!is_supported_provider("does-not-exist"));

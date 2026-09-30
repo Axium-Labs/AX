@@ -169,6 +169,10 @@ pub async fn refresh_provider(
     {
         return None;
     }
+    if model::workbuddy::WorkBuddyRegion::from_provider_id(provider_id).is_some() {
+        let provider = workbuddy_provider(&auth, provider_id)?;
+        return Some(registry.discover(&provider).await);
+    }
     if provider_id == "openai-codex" {
         let provider = codex_provider(&auth, codex_auth, None)?;
         return Some(registry.discover(&provider).await);
@@ -260,6 +264,13 @@ pub(crate) fn cached_snapshot(data_dir: &Path, codex_auth: Option<&PathBuf>) -> 
             continue;
         };
         models.extend(registry.cached(&provider, "cached snapshot").models);
+    }
+    for id in ["workbuddy", "workbuddy-cn"] {
+        if configured.iter().any(|configured_id| configured_id == id)
+            && let Some(provider) = workbuddy_provider(&auth, id)
+        {
+            models.extend(registry.cached(&provider, "cached snapshot").models);
+        }
     }
     sort_models(&mut models);
     models
@@ -367,8 +378,44 @@ async fn run_refresh(data_dir: &Path, codex_auth: Option<PathBuf>) -> CatalogRef
             replace_provider(&mut models, &catalog.provider, catalog.models);
         }
     }
+    refresh_workbuddy_regions(&registry, &auth, &configured, &mut models, &mut failed).await;
     sort_models(&mut models);
     CatalogRefreshResult { models, failed }
+}
+
+async fn refresh_workbuddy_regions(
+    registry: &ModelRegistry,
+    auth: &AuthStorage,
+    configured: &[String],
+    models: &mut Vec<ModelInfo>,
+    failed: &mut Vec<String>,
+) {
+    for id in ["workbuddy", "workbuddy-cn"] {
+        if configured.iter().any(|configured_id| configured_id == id)
+            && let Some(provider) = workbuddy_provider(auth, id)
+        {
+            let catalog = registry.discover(&provider).await;
+            if catalog.warning.is_some() {
+                failed.push(id.to_owned());
+            }
+            replace_provider(models, id, catalog.models);
+        }
+    }
+}
+
+fn workbuddy_provider(
+    auth: &AuthStorage,
+    provider_id: &str,
+) -> Option<model::workbuddy::WorkBuddyProvider> {
+    let region = model::workbuddy::WorkBuddyRegion::from_provider_id(provider_id)?;
+    auth.resolve_oauth(provider_id).ok().flatten()?;
+    model::workbuddy::WorkBuddyProvider::for_region(
+        auth.clone(),
+        "catalog-only".into(),
+        128_000,
+        region,
+    )
+    .ok()
 }
 
 fn compatible_provider(auth: &AuthStorage, provider_id: &str) -> Option<OpenAiCompatibleProvider> {

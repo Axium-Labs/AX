@@ -2,16 +2,20 @@
 
 mod auth;
 mod codex_device;
+mod hedge;
 mod openai;
 mod openai_compatible;
 mod providers;
 mod registry;
+pub mod stats;
+pub mod workbuddy;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
 
+pub use hedge::{HedgeConfig, HedgingProvider};
 pub use openai_compatible::{OpenAiCompatibleConfig, OpenAiCompatibleProvider};
 pub use providers::DEEPSEEK_FALLBACK_MODEL;
 pub use providers::deepseek_compatible_config;

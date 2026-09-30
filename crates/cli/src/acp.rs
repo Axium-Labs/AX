@@ -174,8 +174,13 @@ fn provider_catalog(codex_auth: Option<&PathBuf>) -> Vec<Value> {
             snapshot.iter().filter(|item| item.provider == spec.id && item.supports_tools).cloned().collect::<Vec<_>>()
         } else { Vec::new() };
         json!({"id":spec.id,"name":spec.name,"configured":configured,"supported":supported,
+            "auth_kind":match spec.auth {
+                model::ProviderAuthKind::ApiKey => "api_key",
+                model::ProviderAuthKind::CodexOAuth | model::ProviderAuthKind::ExternalOAuth => "oauth",
+                model::ProviderAuthKind::Ambient => "ambient",
+            },
             "unsupported_reason":model::provider_unsupported_reason(spec.id),
-            "source":if !configured { None } else if stored.iter().any(|id| id == spec.id) { Some("AX") } else { Some("环境变量") },
+            "source":if !configured { None } else if stored.iter().any(|id| id == spec.id) { Some("AX") } else { Some("environment") },
             "model_source": if models.is_empty() { "none" } else if crate::ax_models_dir().join(format!("{}.json", spec.id)).is_file() { "cache" } else { "fallback" },
             "models":models})
     }).collect()

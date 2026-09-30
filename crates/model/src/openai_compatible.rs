@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
-use std::time::Duration;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use futures_util::StreamExt;
@@ -8,7 +9,7 @@ use serde_json::{Value, json};
 
 use crate::{
     FunctionCall, Message, ModelError, ModelInfo, ModelProvider, ModelRequest, ModelResponse,
-    ReasoningEffort, ToolCall, ToolSpec,
+    ReasoningEffort, ToolCall, ToolSpec, stats,
 };
 
 #[derive(Clone, Debug)]
@@ -49,12 +50,152 @@ pub struct OpenAiCompatibleProvider {
 }
 
 impl OpenAiCompatibleProvider {
+    pub(crate) fn with_client(config: OpenAiCompatibleConfig, client: reqwest::Client) -> Self {
+        Self { client, config }
+    }
+
     #[must_use]
     pub fn new(config: OpenAiCompatibleConfig) -> Self {
         Self {
             client: reqwest::Client::new(),
             config,
         }
+    }
+
+    async fn complete_inner(&self, request: ModelRequest) -> Result<ModelResponse, ModelError> {
+        let response = ensure_success(
+            self.client
+                .post(&self.config.endpoint)
+                .bearer_auth(&self.config.api_key)
+                .json(&ChatRequest {
+                    model: &self.config.model,
+                    messages: chat_messages(&request.messages),
+                    tools: &request.tools,
+                    stream: false,
+                    reasoning_effort: self.config.reasoning_effort,
+                })
+                .send()
+                .await?,
+        )
+        .await?
+        .json::<ChatResponse>()
+        .await?;
+
+        let choice = response.choices.into_iter().next().ok_or_else(|| {
+            ModelError::InvalidResponse("response contains no choices".to_owned())
+        })?;
+        Ok(ModelResponse {
+            content: choice.message.content.unwrap_or_default(),
+            tool_calls: choice.message.tool_calls,
+            finish_reason: choice.finish_reason,
+        })
+    }
+
+    async fn stream_inner(
+        &self,
+        request: ModelRequest,
+        on_delta: &mut (dyn FnMut(String) + Send),
+        on_thinking: &mut (dyn FnMut(String) + Send),
+        started: Instant,
+    ) -> Result<ModelResponse, ModelError> {
+        let response = ensure_success(
+            self.client
+                .post(&self.config.endpoint)
+                .bearer_auth(&self.config.api_key)
+                .json(&ChatRequest {
+                    model: &self.config.model,
+                    messages: chat_messages(&request.messages),
+                    tools: &request.tools,
+                    stream: true,
+                    reasoning_effort: self.config.reasoning_effort,
+                })
+                .send()
+                .await?,
+        )
+        .await?;
+        // TTFT = time to the first valid delta of any kind: reasoning, text
+        // or tool call. Reasoning flows through the callback; text and tool
+        // deltas are checked after each event.
+        let first_delta = AtomicBool::new(false);
+        let mut on_thinking = |text: String| {
+            if !text.is_empty() && !first_delta.swap(true, Ordering::SeqCst) {
+                stats::record_ttft(
+                    &self.config.provider_id,
+                    &self.config.model,
+                    started.elapsed(),
+                );
+            }
+            on_thinking(text);
+        };
+        let mut stream = response.bytes_stream();
+        let mut buffer = Vec::new();
+        let mut content = String::new();
+        let mut tool_calls = BTreeMap::<usize, PartialToolCall>::new();
+        let mut finish_reason = None;
+
+        'events: while let Some(chunk) = stream.next().await {
+            buffer.extend_from_slice(&chunk?);
+            while let Some((end, delimiter_len)) = find_event_end(&buffer) {
+                let event = buffer.drain(..end).collect::<Vec<_>>();
+                buffer.drain(..delimiter_len);
+                if process_event(
+                    &event,
+                    &mut content,
+                    &mut tool_calls,
+                    &mut finish_reason,
+                    on_delta,
+                    &mut on_thinking,
+                )? {
+                    buffer.clear();
+                    break 'events;
+                }
+                if !first_delta.load(Ordering::SeqCst)
+                    && (!content.is_empty() || !tool_calls.is_empty())
+                {
+                    first_delta.store(true, Ordering::SeqCst);
+                    stats::record_ttft(
+                        &self.config.provider_id,
+                        &self.config.model,
+                        started.elapsed(),
+                    );
+                }
+            }
+        }
+        if !buffer.is_empty() {
+            process_event(
+                &buffer,
+                &mut content,
+                &mut tool_calls,
+                &mut finish_reason,
+                on_delta,
+                &mut on_thinking,
+            )?;
+            if !first_delta.load(Ordering::SeqCst)
+                && (!content.is_empty() || !tool_calls.is_empty())
+            {
+                first_delta.store(true, Ordering::SeqCst);
+                stats::record_ttft(
+                    &self.config.provider_id,
+                    &self.config.model,
+                    started.elapsed(),
+                );
+            }
+        }
+        Ok(ModelResponse {
+            content,
+            tool_calls: tool_calls
+                .into_values()
+                .map(|call| ToolCall {
+                    id: call.id,
+                    kind: "function".to_owned(),
+                    function: FunctionCall {
+                        name: call.name,
+                        arguments: call.arguments,
+                    },
+                })
+                .collect(),
+            finish_reason,
+        })
     }
 }
 
@@ -189,32 +330,11 @@ impl ModelProvider for OpenAiCompatibleProvider {
     }
 
     async fn complete(&self, request: ModelRequest) -> Result<ModelResponse, ModelError> {
-        let response = ensure_success(
-            self.client
-                .post(&self.config.endpoint)
-                .bearer_auth(&self.config.api_key)
-                .json(&ChatRequest {
-                    model: &self.config.model,
-                    messages: chat_messages(&request.messages),
-                    tools: &request.tools,
-                    stream: false,
-                    reasoning_effort: self.config.reasoning_effort,
-                })
-                .send()
-                .await?,
-        )
-        .await?
-        .json::<ChatResponse>()
-        .await?;
-
-        let choice = response.choices.into_iter().next().ok_or_else(|| {
-            ModelError::InvalidResponse("response contains no choices".to_owned())
-        })?;
-        Ok(ModelResponse {
-            content: choice.message.content.unwrap_or_default(),
-            tool_calls: choice.message.tool_calls,
-            finish_reason: choice.finish_reason,
-        })
+        let result = self.complete_inner(request).await;
+        if result.is_err() {
+            stats::record_error(&self.config.provider_id, &self.config.model);
+        }
+        result
     }
 
     async fn complete_stream(
@@ -223,67 +343,30 @@ impl ModelProvider for OpenAiCompatibleProvider {
         on_delta: &mut (dyn FnMut(String) + Send),
         on_thinking: &mut (dyn FnMut(String) + Send),
     ) -> Result<ModelResponse, ModelError> {
-        let response = ensure_success(
-            self.client
-                .post(&self.config.endpoint)
-                .bearer_auth(&self.config.api_key)
-                .json(&ChatRequest {
-                    model: &self.config.model,
-                    messages: chat_messages(&request.messages),
-                    tools: &request.tools,
-                    stream: true,
-                    reasoning_effort: self.config.reasoning_effort,
-                })
-                .send()
-                .await?,
-        )
-        .await?;
-        let mut stream = response.bytes_stream();
-        let mut buffer = Vec::new();
-        let mut content = String::new();
-        let mut tool_calls = BTreeMap::<usize, PartialToolCall>::new();
-        let mut finish_reason = None;
-
-        while let Some(chunk) = stream.next().await {
-            buffer.extend_from_slice(&chunk?);
-            while let Some((end, delimiter_len)) = find_event_end(&buffer) {
-                let event = buffer.drain(..end).collect::<Vec<_>>();
-                buffer.drain(..delimiter_len);
-                process_event(
-                    &event,
-                    &mut content,
-                    &mut tool_calls,
-                    &mut finish_reason,
-                    on_delta,
-                    on_thinking,
-                )?;
+        let started = Instant::now();
+        let result = self
+            .stream_inner(request, on_delta, on_thinking, started)
+            .await;
+        match &result {
+            Ok(response) => {
+                let output_chars = response.content.len()
+                    + response
+                        .tool_calls
+                        .iter()
+                        .map(|call| {
+                            call.id.len() + call.function.name.len() + call.function.arguments.len()
+                        })
+                        .sum::<usize>();
+                stats::record_completion(
+                    &self.config.provider_id,
+                    &self.config.model,
+                    (output_chars / 4) as u64,
+                    started.elapsed(),
+                );
             }
+            Err(_) => stats::record_error(&self.config.provider_id, &self.config.model),
         }
-        if !buffer.is_empty() {
-            process_event(
-                &buffer,
-                &mut content,
-                &mut tool_calls,
-                &mut finish_reason,
-                on_delta,
-                on_thinking,
-            )?;
-        }
-        Ok(ModelResponse {
-            content,
-            tool_calls: tool_calls
-                .into_values()
-                .map(|call| ToolCall {
-                    id: call.id,
-                    kind: "function".to_owned(),
-                    function: FunctionCall {
-                        name: call.name,
-                        arguments: call.arguments,
-                    },
-                })
-                .collect(),
-            finish_reason,
-        })
+        result
     }
 
     async fn list_models(&self) -> Result<Vec<ModelInfo>, ModelError> {
@@ -377,7 +460,7 @@ fn process_event(
     finish_reason: &mut Option<String>,
     on_delta: &mut (dyn FnMut(String) + Send),
     on_thinking: &mut (dyn FnMut(String) + Send),
-) -> Result<(), ModelError> {
+) -> Result<bool, ModelError> {
     let event = std::str::from_utf8(event)
         .map_err(|error| ModelError::InvalidResponse(error.to_string()))?;
     let Some(data) = event
@@ -385,10 +468,17 @@ fn process_event(
         .find_map(|line| line.trim_end_matches('\r').strip_prefix("data:"))
         .map(str::trim)
     else {
-        return Ok(());
+        return Ok(false);
     };
-    if data == "[DONE]" || data.is_empty() {
-        return Ok(());
+    let mut data = data;
+    while let Some(rest) = data.strip_prefix("data:") {
+        data = rest.trim();
+    }
+    if data == "[DONE]" {
+        return Ok(true);
+    }
+    if data.is_empty() || data.starts_with(':') {
+        return Ok(false);
     }
     let chunk = serde_json::from_str::<StreamChunk>(data)
         .map_err(|error| ModelError::InvalidResponse(error.to_string()))?;
@@ -418,7 +508,7 @@ fn process_event(
             *finish_reason = choice.finish_reason;
         }
     }
-    Ok(())
+    Ok(false)
 }
 
 #[cfg(test)]

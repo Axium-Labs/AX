@@ -145,6 +145,8 @@ No network call happens during startup.
 | Provider | Credential | How to use |
 |---|---|---|
 | OpenAI Codex | OAuth login | `/login` → Codex OAuth |
+| WorkBuddy International | Browser OAuth + token polling | `ax auth login workbuddy --region intl`, or `/login` → WorkBuddy International |
+| WorkBuddy China | Browser OAuth + token polling | `ax auth login workbuddy --region cn`, or `/login` → WorkBuddy China |
 | DeepSeek | API key | `/login` → API key, or `DEEPSEEK_API_KEY` |
 | OpenAI | API key | `/login` → API key, or `OPENAI_API_KEY` |
 | OpenAI-compatible vendors (Groq, Mistral, OpenRouter, etc.) | Provider API key | `/login` → provider, or its API-key environment variable |
@@ -215,3 +217,15 @@ scheduling, SQLite schema, module layout — is documented in
 ## License
 
 MIT OR Apache-2.0.
+
+### Import Skills and MCP
+
+```powershell
+ax skill import C:/downloads/my-skill           # project skills/
+ax skill import C:/downloads/my-skill --global  # ~/.ax/skills
+ax mcp import C:/downloads/mcp.json             # project .ax/mcp.toml
+ax mcp import C:/downloads/mcp.toml --global     # ~/.ax/mcp.toml
+```
+
+Imports validate their contents, preserve existing names and do not run scripts
+or MCP servers. MCP JSON accepts the common `mcpServers` format.

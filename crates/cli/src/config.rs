@@ -35,6 +35,8 @@ pub(crate) fn config_path() -> PathBuf {
 pub struct AxConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<ModelConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inference: Option<InferenceConfig>,
 }
 
 /// The last model selection AX successfully switched to via `/model`.
@@ -44,6 +46,44 @@ pub struct ModelConfig {
     pub model: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<String>,
+}
+
+/// Inference strategy. Only two modes exist, deliberately: `Standard` sends a
+/// single request; `Fast` races a hedged secondary against a slow primary.
+/// There is no Race/Aggressive tier on top of this.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum InferenceMode {
+    /// One request per model call — the historical behavior.
+    #[default]
+    Standard,
+    /// Adaptive hedging: a secondary request fires when the primary exceeds
+    /// the learned TTFT threshold. Latency only; model, reasoning effort and
+    /// output limits are never altered.
+    Fast,
+}
+
+/// Inference settings. Missing entirely means Standard mode.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct InferenceConfig {
+    #[serde(default)]
+    pub mode: InferenceMode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fast: Option<FastConfig>,
+}
+
+/// Advanced overrides for Fast mode. Ordinary users should leave both unset:
+/// the hedge threshold is learned from the provider's historical TTFT.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct FastConfig {
+    /// Fixed hedge delay in milliseconds. `None` = adaptive (P95 of the
+    /// primary provider's recent TTFT, clamped to a sane range).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hedge_threshold_ms: Option<u64>,
+    /// Maximum concurrent inference requests; default 2 (primary + one
+    /// secondary). 1 effectively disables hedging.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_parallel: Option<usize>,
 }
 
 impl AxConfig {

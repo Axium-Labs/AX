@@ -52,6 +52,20 @@ macro_rules! key {
 /// Provider inventory kept in the same order as pi's built-in registry.
 pub static PROVIDERS: &[ProviderSpec] = &[
     ProviderSpec {
+        id: "workbuddy-cn",
+        name: "WorkBuddy China",
+        environment: None,
+        auth: ProviderAuthKind::ExternalOAuth,
+        protocol: ProviderProtocol::Managed,
+    },
+    ProviderSpec {
+        id: "workbuddy",
+        name: "WorkBuddy International",
+        environment: None,
+        auth: ProviderAuthKind::ExternalOAuth,
+        protocol: ProviderProtocol::Managed,
+    },
+    ProviderSpec {
         id: "amazon-bedrock",
         name: "Amazon Bedrock",
         environment: None,
@@ -299,6 +313,9 @@ fn expand_environment(template: &str) -> Option<String> {
 /// unsupported in another.
 #[must_use]
 pub fn provider_supported(id: &str) -> bool {
+    if crate::workbuddy::WorkBuddyRegion::from_provider_id(id).is_some() {
+        return true;
+    }
     provider(id).is_some_and(|spec| {
         matches!(
             spec.protocol,
@@ -459,6 +476,8 @@ pub fn provider_supports_oauth(id: &str) -> bool {
             | "kimi-coding"
             | "meta"
             | "openai-codex"
+            | "workbuddy"
+            | "workbuddy-cn"
             | "openrouter"
             | "radius"
             | "xai"
@@ -684,8 +703,10 @@ mod tests {
                     spec.id
                 );
                 assert!(
-                    matches!(spec.id, "openai" | "openai-codex")
-                        || provider_chat_endpoint(spec.id).is_some(),
+                    matches!(
+                        spec.id,
+                        "openai" | "openai-codex" | "workbuddy" | "workbuddy-cn"
+                    ) || provider_chat_endpoint(spec.id).is_some(),
                     "{} is supported but has no endpoint",
                     spec.id
                 );

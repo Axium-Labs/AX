@@ -46,6 +46,8 @@ adapters:
 
 - OpenAI-compatible Chat Completions (DeepSeek, Groq, Mistral, OpenRouter,
   Together, xAI, Kimi and other compatible providers);
+- Native WorkBuddy browser authorization, rotating OAuth credentials and direct
+  Chat Completions transport (see [providers.md](providers.md#native-workbuddy));
 - OpenAI Responses API;
 - Codex local-file auth + ChatGPT Codex Responses endpoint.
 

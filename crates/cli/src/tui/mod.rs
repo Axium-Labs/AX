@@ -136,6 +136,8 @@ struct ActiveTurn {
 }
 
 struct App {
+    workbuddy_login: Option<tokio::task::JoinHandle<()>>,
+    workbuddy_login_region: Option<model::workbuddy::WorkBuddyRegion>,
     transcript: Transcript,
     model: String,
     session: String,
@@ -158,6 +160,14 @@ struct App {
     loading_session: Option<Instant>,
 }
 
+impl Drop for App {
+    fn drop(&mut self) {
+        if let Some(login) = self.workbuddy_login.take() {
+            login.abort();
+        }
+    }
+}
+
 impl App {
     fn new(selection: &ModelSelection) -> Self {
         let directory = std::env::current_dir()
@@ -172,6 +182,8 @@ impl App {
             &directory,
         ));
         Self {
+            workbuddy_login: None,
+            workbuddy_login_region: None,
             transcript,
             model: selection.model.clone(),
             session: "New Session".to_owned(),
@@ -421,6 +433,20 @@ pub(super) async fn run_tui(
                 break 'outer;
             }
 
+            if key.code == KeyCode::Esc
+                && !pane.has_view()
+                && app
+                    .workbuddy_login
+                    .as_ref()
+                    .is_some_and(|login| !login.is_finished())
+            {
+                if let Some(login) = app.workbuddy_login.take() {
+                    login.abort();
+                }
+                app.push(TranscriptKind::Status, "WorkBuddy login cancelled");
+                continue;
+            }
+
             // Modal views (pickers / approval dialog).
             if pane.has_view()
                 && let Some((outcome, action)) = pane.handle_view_key(key)
@@ -601,12 +627,21 @@ pub(super) async fn run_tui(
             updated = true;
             match update {
                 commands::LoginUpdate::Prompt(text) => {
-                    app.push(TranscriptKind::Info, format!("Codex login\n{text}"));
+                    app.push(TranscriptKind::Info, format!("Account login\n{text}"));
                 }
-                commands::LoginUpdate::Success => {
+                commands::LoginUpdate::Success(provider_id) => {
+                    // An agent turn temporarily owns ReplState. Defer completion
+                    // until it returns, rather than racing runtime invalidation.
+                    if state.is_none() {
+                        let _ = login_tx.send(commands::LoginUpdate::Success(provider_id));
+                        break;
+                    }
+                    if let Some(state) = state.as_mut() {
+                        state.invalidate_runtime();
+                    }
                     app.push(
                         TranscriptKind::Status,
-                        "Codex login successful — discovering available models",
+                        format!("{provider_id} login successful — discovering available models"),
                     );
                     let refresh_data_dir = state
                         .as_ref()
@@ -625,24 +660,23 @@ pub(super) async fn run_tui(
                         match catalog_refresh::refresh_provider(
                             &refresh_data_dir,
                             refresh_codex_auth.clone(),
-                            "openai-codex",
+                            &provider_id,
                         )
                         .await
                         {
                             Some(catalog) if catalog.models.is_empty() => report(format!(
-                                "openai-codex: no models discovered — {}",
+                                "{provider_id}: no models discovered — {}",
                                 catalog
                                     .warning
                                     .unwrap_or_else(|| "empty catalog".to_owned())
                             )),
                             Some(catalog) => report(format!(
-                                "openai-codex: discovered {} model(s), cached for the model picker",
+                                "{provider_id}: discovered {} model(s), cached for the model picker",
                                 catalog.models.len()
                             )),
-                            None => report(
-                                "openai-codex: credential stored, but credentials could not be resolved for discovery"
-                                    .to_owned(),
-                            ),
+                            None => report(format!(
+                                "{provider_id}: credential stored, but credentials could not be resolved for discovery"
+                            )),
                         }
                         catalog_refresh::refresh_catalogs(refresh_data_dir, refresh_codex_auth)
                             .await;
@@ -654,7 +688,7 @@ pub(super) async fn run_tui(
                 commands::LoginUpdate::Failed(error) => {
                     app.push(
                         TranscriptKind::Error,
-                        format!("Codex login failed: {error}"),
+                        format!("Account login failed: {error}"),
                     );
                 }
             }

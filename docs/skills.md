@@ -128,3 +128,12 @@ web research strategy for the `web` tool).
 | CLI routing and context injection | `crates/cli/src/main.rs` |
 | Enable and disable | `crates/cli/src/skill_settings.rs` |
 | `/skills` UI | `crates/cli/src/tui/commands/catalogs.rs` |
+
+## Importing a local Skill
+
+Use `ax skill import C:/downloads/my-skill` to install a validated package into
+the current project's `skills/` directory, or add `--global` to use
+`$AX_HOME/skills`. `--skills-dir` also applies to project imports. AX reuses
+the standard package validator, copies resources, rejects symbolic links and
+conflicting names, and does not execute package scripts during import.
+Crew exposes the same command under Settings → AX capabilities.
