@@ -1,7 +1,7 @@
 use super::*;
 use model::{FunctionCall, ModelError, ModelProvider, ModelRequest, ModelResponse, ToolCall};
 use runtime_core::task_queue::TaskStatus;
-use runtime_core::{AgentEvent, AllowAll, ExecutionBudget, GoalTurn, QueueState};
+use runtime_core::{AgentEvent, AgentSupervisor, AllowAll, ExecutionBudget, GoalTurn, QueueState};
 use serde_json::json;
 use std::sync::{Arc, Mutex};
 use tool::ToolRegistry;
@@ -156,6 +156,7 @@ impl Fixture {
         std::fs::create_dir_all(&source).unwrap();
         std::fs::write(source.join("project.txt"), "controller baseline").unwrap();
         let host = Arc::new(LocalChildHost {
+            policy: WorkspacePolicy::default(),
             source,
             root: root.join("children"),
             excluded: vec![],
@@ -195,15 +196,27 @@ fn check_isolation(kernel: &AgentKernel, provider: &Provider, count: usize) {
         assert!(sessions.insert(&run.session_id));
         assert!(dirs.insert(&run.cwd));
         assert!(scopes.insert(&run.memory_scope));
+        assert!(
+            !run.cwd.exists(),
+            "completed and failed workspaces are disposable"
+        );
+        assert!(
+            run.state_dir
+                .as_ref()
+                .unwrap()
+                .join("child.sqlite3")
+                .exists()
+        );
         if task.status == TaskStatus::Failed {
             continue;
         }
         let expected = format!("child {}", index + 1);
-        assert_eq!(
-            std::fs::read_to_string(run.cwd.join("result.txt")).unwrap(),
-            expected
+        assert!(
+            !run.cwd.exists(),
+            "terminal child workspace must be removed"
         );
-        let store = MemoryStore::open(run.cwd.join(".ax/child.sqlite3")).unwrap();
+        let store =
+            MemoryStore::open(run.state_dir.as_ref().unwrap().join("child.sqlite3")).unwrap();
         assert!(store.session(&run.session_id).unwrap().is_some());
         let memory = store
             .scoped_memories(memory::MemoryScope::Session, &run.session_id)
@@ -359,6 +372,8 @@ async fn reconnect_resumes_running_child_history_and_remaining_queue_position() 
     assert_eq!(queue.tasks[0].status, TaskStatus::Completed);
     assert_eq!(queue.tasks[1].status, TaskStatus::Running);
     let second_run = queue.tasks[1].child.clone().unwrap();
+    assert!(second_run.cwd.exists());
+    assert!(!queue.tasks[0].child.as_ref().unwrap().cwd.exists());
     let goal = queue.goal_id.clone();
     drop(first);
     let resumed_provider = provider(false, false, false);
@@ -618,6 +633,7 @@ async fn child_workspace_excludes_controller_store_and_rejects_cross_workspace_f
     assert!(!child.run.cwd.join("sessions").exists());
     let context = tool::RunContext {
         cwd: child.run.cwd.clone(),
+        state_dir: child.run.state_dir.clone().unwrap(),
         session_id: child.run.session_id.clone(),
         memory_scope: child.run.memory_scope.clone(),
         input: "isolated files".into(),
@@ -641,5 +657,443 @@ async fn child_workspace_excludes_controller_store_and_rejects_cross_workspace_f
     assert_eq!(
         std::fs::read_to_string(fixture.host.source.join("project.txt")).unwrap(),
         "controller baseline"
+    );
+}
+
+#[tokio::test]
+async fn snapshot_honors_nested_gitignore_and_axignore_with_negation() {
+    let fixture = Fixture::new();
+    let source = &fixture.host.source;
+    std::fs::create_dir_all(source.join("nested")).unwrap();
+    for (path, content) in [
+        (".gitignore", "*.cache\n!keep.cache\n"),
+        (".axignore", "private.txt\n"),
+        ("nested/.axignore", "private-nested.txt\n"),
+        ("private.txt", "secret"),
+        ("nested/private-nested.txt", "secret"),
+        ("skip.cache", "cache"),
+        ("keep.cache", "input"),
+        (".hidden-input", "input"),
+    ] {
+        std::fs::write(source.join(path), content).unwrap();
+    }
+    let controller = fixture.kernel(provider(false, false, false));
+    let child = fixture
+        .host
+        .prepare(&controller, "filtered", None)
+        .await
+        .unwrap();
+    for path in ["private.txt", "nested/private-nested.txt", "skip.cache"] {
+        assert!(!child.run.cwd.join(path).exists(), "{path}");
+    }
+    assert!(child.run.cwd.join("keep.cache").exists());
+    assert!(child.run.cwd.join(".hidden-input").exists());
+    assert!(!child.run.cwd.join(".ax").exists());
+    assert!(
+        child
+            .run
+            .state_dir
+            .as_ref()
+            .unwrap()
+            .join("child.sqlite3")
+            .exists()
+    );
+}
+
+fn init_git(source: &Path) {
+    for args in [
+        vec!["init"],
+        vec!["config", "user.email", "test@example.invalid"],
+        vec!["config", "user.name", "AX Test"],
+        vec!["add", "."],
+        vec!["commit", "-m", "baseline"],
+    ] {
+        assert!(
+            git(
+                source,
+                &args.iter().map(std::ffi::OsStr::new).collect::<Vec<_>>()
+            )
+            .unwrap()
+            .status
+            .success()
+        );
+    }
+}
+
+#[tokio::test]
+async fn git_dirty_binary_patch_covers_staged_unstaged_rename_delete_and_untracked() {
+    let fixture = Fixture::new();
+    let source = &fixture.host.source;
+    for (path, content) in [
+        ("delete.txt", "gone"),
+        ("rename.txt", "renamed"),
+        ("private.txt", "private"),
+    ] {
+        std::fs::write(source.join(path), content).unwrap();
+    }
+    std::fs::write(source.join("binary.bin"), [0, 1, 2, 0]).unwrap();
+    init_git(source);
+    std::fs::write(source.join("project.txt"), "staged").unwrap();
+    assert!(
+        git(source, &["add", "project.txt"].map(std::ffi::OsStr::new))
+            .unwrap()
+            .status
+            .success()
+    );
+    std::fs::write(source.join("project.txt"), "staged plus unstaged").unwrap();
+    assert!(
+        git(
+            source,
+            &["mv", "rename.txt", "renamed.txt"].map(std::ffi::OsStr::new)
+        )
+        .unwrap()
+        .status
+        .success()
+    );
+    std::fs::remove_file(source.join("delete.txt")).unwrap();
+    std::fs::write(source.join("binary.bin"), [0, 9, 8, 0, 7]).unwrap();
+    std::fs::write(source.join(".gitignore"), "*.cache\n").unwrap();
+    std::fs::write(source.join(".axignore"), "private.txt\n").unwrap();
+    std::fs::write(source.join("skip.cache"), "cache").unwrap();
+    std::fs::write(source.join("new.txt"), "untracked").unwrap();
+    let controller = fixture.kernel(provider(false, false, false));
+    let mut child = fixture
+        .host
+        .prepare(&controller, "patch", None)
+        .await
+        .unwrap();
+    assert_eq!(
+        std::fs::read(child.run.cwd.join("binary.bin")).unwrap(),
+        [0, 9, 8, 0, 7]
+    );
+    assert_eq!(
+        std::fs::read_to_string(child.run.cwd.join("project.txt")).unwrap(),
+        "staged plus unstaged"
+    );
+    assert!(child.run.cwd.join("renamed.txt").exists());
+    for path in ["rename.txt", "delete.txt", "skip.cache", "private.txt"] {
+        assert!(!child.run.cwd.join(path).exists(), "{path}");
+    }
+    assert!(child.run.cwd.join("new.txt").exists());
+    let run = child.run.clone();
+    child
+        .checkpoint
+        .finish(&ChildOutcome {
+            success: true,
+            output: "durable result".into(),
+        })
+        .unwrap();
+    assert!(!run.cwd.exists());
+    let worktrees = git(
+        source,
+        &["worktree", "list", "--porcelain"].map(std::ffi::OsStr::new),
+    )
+    .unwrap();
+    assert!(
+        !String::from_utf8_lossy(&worktrees.stdout)
+            .contains(&run.cwd.to_string_lossy().replace('\\', "/"))
+    );
+    drop(child);
+    let recovered = fixture
+        .host
+        .prepare(&controller, "patch", Some(&run))
+        .await
+        .unwrap();
+    assert_eq!(recovered.terminal.unwrap().output, "durable result");
+    assert!(
+        !run.cwd.exists(),
+        "receipt recovery must not provision again"
+    );
+}
+
+#[tokio::test]
+async fn gc_expires_unleased_interrupted_workspace_but_preserves_history_and_active_leases() {
+    let fixture = Fixture::new();
+    let controller = fixture.kernel(provider(false, false, false));
+    let active = fixture
+        .host
+        .prepare(&controller, "active", None)
+        .await
+        .unwrap();
+    let abandoned = fixture
+        .host
+        .prepare(&controller, "abandoned", None)
+        .await
+        .unwrap();
+    let abandoned_run = abandoned.run.clone();
+    drop(abandoned);
+    for run in [&active.run, &abandoned_run] {
+        let state = run.state_dir.as_ref().unwrap();
+        let mut manifest = workspace::read_manifest(state).unwrap();
+        manifest.touched = 0;
+        workspace::write_manifest(state, &manifest).unwrap();
+    }
+    workspace::gc(
+        &fixture.host.root,
+        WorkspacePolicy {
+            ttl_secs: 1,
+            ..fixture.host.policy
+        },
+    )
+    .unwrap();
+    assert!(
+        active.run.cwd.exists(),
+        "active process lease prevents GC even with old heartbeat"
+    );
+    assert!(!abandoned_run.cwd.exists());
+    assert!(
+        abandoned_run
+            .state_dir
+            .as_ref()
+            .unwrap()
+            .join("child.sqlite3")
+            .exists()
+    );
+    assert_eq!(
+        workspace::read_manifest(abandoned_run.state_dir.as_ref().unwrap())
+            .unwrap()
+            .status,
+        "expired"
+    );
+    let expired = fixture
+        .host
+        .prepare(&controller, "abandoned", Some(&abandoned_run))
+        .await
+        .unwrap();
+    let outcome = expired.terminal.unwrap();
+    assert!(!outcome.success);
+    assert!(outcome.output.contains("expired"));
+}
+
+#[tokio::test]
+async fn quota_rejection_cleans_partial_workspace_and_admission_recovers_after_cleanup() {
+    let mut fixture = Fixture::new();
+    std::fs::write(fixture.host.source.join("large.bin"), vec![0; 1024]).unwrap();
+    Arc::get_mut(&mut fixture.host).unwrap().policy = WorkspacePolicy {
+        workspace_bytes: 2048,
+        total_bytes: 1600,
+        ttl_secs: 3600,
+    };
+    let controller = fixture.kernel(provider(false, false, false));
+    let mut first = fixture
+        .host
+        .prepare(&controller, "first", None)
+        .await
+        .unwrap();
+    assert!(
+        fixture
+            .host
+            .prepare(&controller, "no room", None)
+            .await
+            .is_err()
+    );
+    first
+        .checkpoint
+        .finish(&ChildOutcome {
+            success: false,
+            output: "failed but recorded".into(),
+        })
+        .unwrap();
+    assert!(!first.run.cwd.exists());
+    let next = fixture
+        .host
+        .prepare(&controller, "room reclaimed", None)
+        .await
+        .unwrap();
+    assert!(next.run.cwd.exists());
+    drop(next);
+    drop(first);
+    drop(controller);
+    Arc::get_mut(&mut fixture.host)
+        .unwrap()
+        .policy
+        .workspace_bytes = 10;
+    let controller = fixture.kernel(provider(false, false, false));
+    assert!(
+        fixture
+            .host
+            .prepare(&controller, "too large", None)
+            .await
+            .is_err()
+    );
+}
+
+struct QuotaProvider {
+    inner: Arc<Provider>,
+}
+#[async_trait]
+impl ModelProvider for QuotaProvider {
+    fn name(&self) -> &'static str {
+        "quota-test"
+    }
+    fn model_id(&self) -> &'static str {
+        "quota-test"
+    }
+    fn context_window(&self) -> usize {
+        100_000
+    }
+    async fn complete(&self, request: ModelRequest) -> Result<ModelResponse, ModelError> {
+        if request
+            .messages
+            .iter()
+            .any(|m| m.role == model::Role::User && m.content == "child 1")
+        {
+            return Ok(call(
+                "oversize",
+                "filesystem",
+                json!({"operation":"write","path":"large.bin","content":"x".repeat(4096)}),
+            ));
+        }
+        self.inner.complete(request).await
+    }
+}
+#[tokio::test]
+async fn tool_growth_quota_fails_only_that_child_then_reclaims_disk() {
+    let mut fixture = Fixture::new();
+    Arc::get_mut(&mut fixture.host)
+        .unwrap()
+        .policy
+        .workspace_bytes = 1024;
+    let mut kernel = fixture.kernel(Arc::new(QuotaProvider {
+        inner: provider(false, false, false),
+    }));
+    kernel.run_turn(input(2), |_| {}).await.unwrap();
+    let tasks = &kernel.task_queue().unwrap().tasks;
+    assert_eq!(tasks[0].status, TaskStatus::Failed);
+    assert!(tasks[0].failure_reason.as_ref().unwrap().contains("quota"));
+    assert_eq!(tasks[1].status, TaskStatus::Completed);
+    for task in tasks {
+        assert!(!task.child.as_ref().unwrap().cwd.exists());
+    }
+}
+
+#[tokio::test]
+async fn legacy_workspace_store_migrates_before_resume_and_terminal_cleanup() {
+    let fixture = Fixture::new();
+    let controller = fixture.kernel(provider(false, false, false));
+    let mut child = fixture
+        .host
+        .prepare(&controller, "child 1", None)
+        .await
+        .unwrap();
+    child.checkpoint.save(&[Message::user("child 1")]).unwrap();
+    let mut legacy = child.run.clone();
+    let state = legacy.state_dir.take().unwrap();
+    drop(child);
+    let old = legacy.cwd.join(".ax");
+    std::fs::create_dir_all(&old).unwrap();
+    for entry in std::fs::read_dir(&state).unwrap() {
+        let entry = entry.unwrap();
+        if matches!(
+            entry.file_name().to_str(),
+            Some("workspace.lock" | "workspace.json")
+        ) {
+            continue;
+        }
+        std::fs::rename(entry.path(), old.join(entry.file_name())).unwrap();
+    }
+    let model = provider(false, false, false);
+    let controller = fixture.kernel(model.clone());
+    let mut recovered = fixture
+        .host
+        .prepare(&controller, "child 1", Some(&legacy))
+        .await
+        .unwrap();
+    assert_eq!(recovered.run.state_dir.as_ref(), Some(&state));
+    let mut checkpoint = recovered.checkpoint;
+    let output = AgentSupervisor::run_child(
+        &mut recovered.kernel,
+        "child 1",
+        Box::new(|_| {}),
+        Box::new(|messages| checkpoint.save(messages)),
+    )
+    .await
+    .unwrap();
+    checkpoint
+        .finish(&ChildOutcome {
+            success: true,
+            output,
+        })
+        .unwrap();
+    assert!(!legacy.cwd.exists());
+    let store = MemoryStore::open(state.join("child.sqlite3")).unwrap();
+    let messages = store
+        .load_messages(&legacy.session_id, None, u32::MAX)
+        .unwrap();
+    assert_eq!(
+        messages
+            .iter()
+            .filter(|m| m.role == memory::MessageRole::User)
+            .count(),
+        1
+    );
+    assert!(
+        store
+            .latest_agent_state(&legacy.session_id, OUTCOME_PREFIX)
+            .unwrap()
+            .is_some()
+    );
+}
+
+#[tokio::test]
+async fn gc_rejects_manifest_paths_outside_child_directory() {
+    let fixture = Fixture::new();
+    let controller = fixture.kernel(provider(false, false, false));
+    let child = fixture
+        .host
+        .prepare(&controller, "owned", None)
+        .await
+        .unwrap();
+    let state = child.run.state_dir.clone().unwrap();
+    drop(child);
+    let mut manifest = workspace::read_manifest(&state).unwrap();
+    manifest.cwd = fixture.host.source.clone();
+    manifest.status = "failed".into();
+    workspace::write_manifest(&state, &manifest).unwrap();
+    assert!(workspace::cleanup(&state).is_err());
+    workspace::gc(&fixture.host.root, fixture.host.policy).unwrap();
+    assert!(fixture.host.source.join("project.txt").exists());
+    let next = fixture
+        .host
+        .prepare(&controller, "independent child", None)
+        .await
+        .unwrap();
+    assert!(
+        next.run.cwd.exists(),
+        "deferred GC must not block independent children"
+    );
+}
+
+#[tokio::test]
+async fn resume_over_quota_child_persists_failure_before_cleanup() {
+    let mut fixture = Fixture::new();
+    Arc::get_mut(&mut fixture.host)
+        .unwrap()
+        .policy
+        .workspace_bytes = 1024;
+    let controller = fixture.kernel(provider(false, false, false));
+    let child = fixture
+        .host
+        .prepare(&controller, "interrupted", None)
+        .await
+        .unwrap();
+    let run = child.run.clone();
+    std::fs::write(run.cwd.join("large.bin"), vec![0; 4096]).unwrap();
+    drop(child);
+    let recovered = fixture
+        .host
+        .prepare(&controller, "interrupted", Some(&run))
+        .await
+        .unwrap();
+    let outcome = recovered.terminal.unwrap();
+    assert!(!outcome.success);
+    assert!(outcome.output.contains("quota"));
+    assert!(!run.cwd.exists());
+    let store = MemoryStore::open(run.state_dir.unwrap().join("child.sqlite3")).unwrap();
+    assert!(
+        store
+            .latest_agent_state(&run.session_id, OUTCOME_PREFIX)
+            .unwrap()
+            .is_some()
     );
 }

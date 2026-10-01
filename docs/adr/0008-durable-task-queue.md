@@ -45,3 +45,11 @@ executor. Tools explicitly bind child scope instead of sharing parent session
 state. Child terminal receipts precede controller advancement for reconnect
 recovery. Local child failures advance independent work; global controller stops
 remain terminal/suspended as before. No large planner or fixed prompt is added.
+
+Local child persistent state now lives outside the disposable workspace. Git inputs
+are HEAD plus a binary dirty patch and filtered untracked files; non-Git inputs use
+filtered snapshots. Terminal receipts allow immediate workspace removal without
+breaking controller recovery. Leased running/interrupted workspaces alone remain
+resumable; bounded admission/checkpoint quotas and lazy expiry GC limit their disk
+usage while preserving raw history. GC never relies solely on an old heartbeat to
+delete a workspace that is leased by a running process.

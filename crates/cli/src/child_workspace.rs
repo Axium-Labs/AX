@@ -1,0 +1,428 @@
+//! Disposable child workspaces: Git overlays, filtered snapshots and bounded GC.
+use super::{absolute_path, git};
+use fs2::FileExt;
+use serde::{Deserialize, Serialize};
+use std::{
+    ffi::OsStr,
+    fs::File,
+    io::{self, Write},
+    path::{Path, PathBuf},
+    time::{SystemTime, UNIX_EPOCH},
+};
+
+#[derive(Clone, Copy)]
+pub(crate) struct Policy {
+    pub workspace_bytes: u64,
+    pub total_bytes: u64,
+    pub ttl_secs: u64,
+}
+impl Default for Policy {
+    fn default() -> Self {
+        fn value(name: &str, default: u64) -> u64 {
+            std::env::var(name)
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .filter(|n| *n > 0)
+                .unwrap_or(default)
+        }
+        Self {
+            workspace_bytes: value("AX_CHILD_WORKSPACE_QUOTA_BYTES", 2 * 1024 * 1024 * 1024),
+            total_bytes: value("AX_CHILD_TOTAL_QUOTA_BYTES", 8 * 1024 * 1024 * 1024),
+            ttl_secs: value("AX_CHILD_WORKSPACE_TTL_SECS", 7 * 24 * 3600),
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+pub(super) struct Manifest {
+    pub cwd: PathBuf,
+    pub repository: Option<PathBuf>,
+    pub status: String,
+    pub touched: u64,
+}
+pub(super) fn now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+pub(super) fn read_manifest(state: &Path) -> io::Result<Manifest> {
+    serde_json::from_slice(&std::fs::read(state.join("workspace.json"))?).map_err(io::Error::other)
+}
+pub(super) fn write_manifest(state: &Path, manifest: &Manifest) -> io::Result<()> {
+    let temporary = state.join("workspace.json.tmp");
+    let mut file = File::create(&temporary)?;
+    file.write_all(&serde_json::to_vec(manifest)?)?;
+    file.sync_all()?;
+    std::fs::rename(temporary, state.join("workspace.json"))
+}
+pub(super) fn lease(state: &Path) -> io::Result<File> {
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(state.join("workspace.lock"))?;
+    file.try_lock_exclusive()?;
+    Ok(file)
+}
+fn safe_workspace(state: &Path, cwd: &Path) -> io::Result<()> {
+    // Reject corrupt/traversing manifests, symlinked parent directories and roots.
+    let parent = state
+        .parent()
+        .ok_or_else(|| io::Error::other("invalid child state directory"))?;
+    if cwd != parent.join("workspace")
+        || cwd
+            .components()
+            .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
+        return Err(io::Error::other(
+            "child workspace outside owned child directory",
+        ));
+    }
+    if cwd.exists() && !absolute_path(cwd)?.starts_with(absolute_path(parent)?) {
+        return Err(io::Error::other(
+            "child workspace link escapes owned directory",
+        ));
+    }
+    Ok(())
+}
+pub(super) fn cleanup(state: &Path) -> io::Result<()> {
+    let manifest = read_manifest(state)?;
+    safe_workspace(state, &manifest.cwd)?;
+    let scratch = state.join("input.patch");
+    if scratch.exists() {
+        std::fs::remove_file(scratch)?;
+    }
+    if manifest.cwd.exists() {
+        if let Some(repository) = &manifest.repository {
+            let result = git(
+                repository,
+                &[
+                    OsStr::new("worktree"),
+                    OsStr::new("remove"),
+                    OsStr::new("--force"),
+                    manifest.cwd.as_os_str(),
+                ],
+            )?;
+            if !result.status.success() {
+                return Err(io::Error::other(format!(
+                    "worktree cleanup failed: {}",
+                    String::from_utf8_lossy(&result.stderr)
+                )));
+            }
+        } else {
+            std::fs::remove_dir_all(&manifest.cwd)?;
+        }
+    }
+    Ok(())
+}
+pub(super) fn gc(root: &Path, policy: Policy) -> io::Result<()> {
+    for entry in std::fs::read_dir(root)? {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir() || entry.file_type()?.is_symlink() {
+            continue;
+        }
+        let state = entry.path().join("state");
+        if !state.is_dir() || state.symlink_metadata()?.file_type().is_symlink() {
+            continue;
+        }
+        let Ok(_lease) = lease(&state) else {
+            continue;
+        };
+        let Ok(mut manifest) = read_manifest(&state) else {
+            continue;
+        };
+        let terminal = matches!(manifest.status.as_str(), "completed" | "failed" | "expired");
+        if terminal || now().saturating_sub(manifest.touched) >= policy.ttl_secs {
+            if let Err(error) = cleanup(&state) {
+                // A locked/corrupt old workspace must not fail every new child.
+                eprintln!("child workspace GC deferred: {error}");
+                continue;
+            }
+            if !terminal {
+                manifest.status = "expired".into();
+                write_manifest(&state, &manifest)?;
+            }
+        }
+    }
+    Ok(())
+}
+pub(super) fn size(path: &Path) -> io::Result<u64> {
+    if !path.exists() {
+        return Ok(0);
+    }
+    let mut bytes = 0_u64;
+    for entry in std::fs::read_dir(path)? {
+        let entry = entry?;
+        let kind = entry.file_type()?;
+        if kind.is_symlink() {
+            continue;
+        }
+        bytes = bytes.saturating_add(if kind.is_dir() {
+            size(&entry.path())?
+        } else {
+            entry.metadata()?.len()
+        });
+    }
+    Ok(bytes)
+}
+pub(super) fn check_quota(root: &Path, cwd: &Path, policy: Policy) -> io::Result<()> {
+    if size(cwd)? > policy.workspace_bytes {
+        return Err(io::Error::other("child workspace disk quota exceeded"));
+    }
+    if usage(root)? > policy.total_bytes {
+        return Err(io::Error::other(
+            "total child workspace disk quota exceeded",
+        ));
+    }
+    Ok(())
+}
+pub(super) fn usage(root: &Path) -> io::Result<u64> {
+    let mut bytes = 0_u64;
+    for entry in std::fs::read_dir(root)? {
+        let entry = entry?;
+        if entry.file_type()?.is_dir() && !entry.file_type()?.is_symlink() {
+            bytes = bytes.saturating_add(size(&entry.path().join("workspace"))?);
+        }
+    }
+    Ok(bytes)
+}
+
+fn files(source: &Path, child_root: &Path, excluded: &[PathBuf]) -> io::Result<Vec<PathBuf>> {
+    let mut walk = ignore::WalkBuilder::new(source);
+    walk.hidden(false)
+        .parents(false)
+        .require_git(false)
+        .git_global(false)
+        .git_exclude(false)
+        .add_custom_ignore_filename(".axignore");
+    let child_root = child_root.to_path_buf();
+    let excluded = excluded.to_vec();
+    walk.filter_entry(move |entry| {
+        if entry.depth() == 0 {
+            return true;
+        }
+        let name = entry.file_name().to_str().unwrap_or_default();
+        !matches!(
+            name,
+            ".git"
+                | ".ax"
+                | ".workbuddy"
+                | "target"
+                | "node_modules"
+                | "release"
+                | "dist"
+                | "build"
+                | ".venv"
+        ) && !entry.path().starts_with(&child_root)
+            && !excluded.iter().any(|root| entry.path().starts_with(root))
+            && !entry.path_is_symlink()
+    });
+    walk.build()
+        .filter_map(|entry| match entry {
+            Ok(entry) if entry.file_type().is_some_and(|t| t.is_file()) => {
+                Some(Ok(entry.into_path()))
+            }
+            Ok(_) => None,
+            Err(error) => Some(Err(io::Error::other(error))),
+        })
+        .collect()
+}
+fn copy_files(
+    source: &Path,
+    destination: &Path,
+    paths: &[PathBuf],
+    max_bytes: u64,
+) -> io::Result<()> {
+    let mut bytes = 0_u64;
+    for path in paths {
+        bytes = bytes.saturating_add(path.metadata()?.len());
+        if bytes > max_bytes {
+            return Err(io::Error::other("child snapshot disk quota exceeded"));
+        }
+        let destination = destination.join(path.strip_prefix(source).map_err(io::Error::other)?);
+        std::fs::create_dir_all(destination.parent().unwrap())?;
+        std::fs::copy(path, destination)?;
+    }
+    Ok(())
+}
+
+/// Only untracked files are copied for Git; tracked content comes from HEAD + patch.
+pub(super) fn provision(
+    source: &Path,
+    destination: &Path,
+    root: &Path,
+    excluded: &[PathBuf],
+    state: &Path,
+    policy: Policy,
+) -> io::Result<()> {
+    let head = git(
+        source,
+        &[
+            OsStr::new("rev-parse"),
+            OsStr::new("--verify"),
+            OsStr::new("HEAD"),
+        ],
+    );
+    let repository = head.as_ref().is_ok_and(|o| o.status.success());
+    let paths = files(source, root, excluded)?;
+    std::fs::create_dir_all(destination.parent().unwrap())?;
+    if repository {
+        // Require the project root: silently applying a subdirectory patch would be incorrect.
+        let top = git(
+            source,
+            &[OsStr::new("rev-parse"), OsStr::new("--show-toplevel")],
+        )?;
+        let repository = absolute_path(Path::new(String::from_utf8_lossy(&top.stdout).trim()))?;
+        if repository != source {
+            return Err(io::Error::other("child Git source must be repository root"));
+        }
+        // Preflight tracked checkout size before allocating the worktree.
+        let tree = git(
+            source,
+            &[
+                OsStr::new("ls-tree"),
+                OsStr::new("-r"),
+                OsStr::new("-l"),
+                OsStr::new("HEAD"),
+            ],
+        )?;
+        let bytes: u64 = String::from_utf8_lossy(&tree.stdout)
+            .lines()
+            .filter_map(|line| line.split_whitespace().nth(3)?.parse::<u64>().ok())
+            .sum();
+        if bytes > policy.workspace_bytes {
+            return Err(io::Error::other("child Git checkout disk quota exceeded"));
+        }
+        let mut manifest = read_manifest(state)?;
+        manifest.repository = Some(repository);
+        write_manifest(state, &manifest)?;
+        let result = git(
+            source,
+            &[
+                OsStr::new("worktree"),
+                OsStr::new("add"),
+                OsStr::new("--detach"),
+                destination.as_os_str(),
+                OsStr::new(String::from_utf8_lossy(&head.unwrap().stdout).trim()),
+            ],
+        )?;
+        if !result.status.success() {
+            return Err(io::Error::other(
+                String::from_utf8_lossy(&result.stderr).into_owned(),
+            ));
+        }
+        overlay_git(source, destination, state, paths, policy)?;
+    } else {
+        std::fs::create_dir_all(destination)?;
+        copy_files(source, destination, &paths, policy.workspace_bytes)?;
+    }
+    // Explicit exclusions and .axignore also apply to tracked checkout files.
+    let allowed = files(destination, &destination.join(".ax"), &[])?
+        .into_iter()
+        .collect::<std::collections::HashSet<_>>();
+    prune_ignored(destination, destination, &allowed, source, excluded)?;
+    check_quota(root, destination, policy)
+}
+fn overlay_git(
+    source: &Path,
+    destination: &Path,
+    state: &Path,
+    paths: Vec<PathBuf>,
+    policy: Policy,
+) -> io::Result<()> {
+    let patch = git(
+        source,
+        &[
+            OsStr::new("diff"),
+            OsStr::new("--binary"),
+            OsStr::new("--full-index"),
+            OsStr::new("HEAD"),
+            OsStr::new("--"),
+        ],
+    )?;
+    if !patch.status.success() {
+        return Err(io::Error::other("cannot capture controller dirty patch"));
+    }
+    if !patch.stdout.is_empty() {
+        if size(destination)?.saturating_add(patch.stdout.len() as u64) > policy.workspace_bytes {
+            return Err(io::Error::other("child dirty patch disk quota exceeded"));
+        }
+        let patch_path = state.join("input.patch");
+        std::fs::write(&patch_path, patch.stdout)?;
+        let result = git(
+            destination,
+            &[
+                OsStr::new("apply"),
+                OsStr::new("--binary"),
+                patch_path.as_os_str(),
+            ],
+        );
+        // Remove scratch input even when Git fails to apply it.
+        std::fs::remove_file(patch_path)?;
+        let result = result?;
+        if !result.status.success() {
+            return Err(io::Error::other(format!(
+                "cannot apply controller dirty patch: {}",
+                String::from_utf8_lossy(&result.stderr)
+            )));
+        }
+    }
+    let untracked = git(
+        source,
+        &[
+            OsStr::new("ls-files"),
+            OsStr::new("--others"),
+            OsStr::new("--exclude-standard"),
+            OsStr::new("-z"),
+        ],
+    )?;
+    if !untracked.status.success() {
+        return Err(io::Error::other("cannot enumerate untracked input"));
+    }
+    let untracked = untracked
+        .stdout
+        .split(|b| *b == 0)
+        .filter(|s| !s.is_empty())
+        .map(|s| {
+            std::str::from_utf8(s)
+                .map(|s| source.join(s))
+                .map_err(io::Error::other)
+        })
+        .collect::<io::Result<std::collections::HashSet<_>>>()?;
+    let paths = paths
+        .into_iter()
+        .filter(|p| untracked.contains(p))
+        .collect::<Vec<_>>();
+    copy_files(
+        source,
+        destination,
+        &paths,
+        policy.workspace_bytes.saturating_sub(size(destination)?),
+    )?;
+    Ok(())
+}
+
+fn prune_ignored(
+    directory: &Path,
+    destination: &Path,
+    allowed: &std::collections::HashSet<PathBuf>,
+    source: &Path,
+    excluded: &[PathBuf],
+) -> io::Result<()> {
+    for entry in std::fs::read_dir(directory)? {
+        let entry = entry?;
+        if entry.file_name() == ".git" {
+            continue;
+        }
+        let path = entry.path();
+        let original = source.join(path.strip_prefix(destination).map_err(io::Error::other)?);
+        if entry.file_type()?.is_dir() {
+            prune_ignored(&path, destination, allowed, source, excluded)?;
+        } else if !allowed.contains(&path) || excluded.iter().any(|p| original.starts_with(p)) {
+            std::fs::remove_file(path)?;
+        }
+    }
+    Ok(())
+}

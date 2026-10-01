@@ -229,7 +229,7 @@ async fn execute_shell(
     if let Some(context) = context {
         command
             .current_dir(&context.cwd)
-            .env("AX_HOME", context.cwd.join(".ax"))
+            .env("AX_HOME", &context.state_dir)
             .env("AX_SESSION_ID", &context.session_id)
             .env("AX_MEMORY_SCOPE", &context.memory_scope);
     }

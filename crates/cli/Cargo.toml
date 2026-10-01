@@ -10,6 +10,8 @@ name = "ax"
 path = "src/main.rs"
 
 [dependencies]
+ignore = "0.4"
+fs2 = "0.4"
 anyhow.workspace = true
 rusqlite.workspace = true
 async-trait.workspace = true

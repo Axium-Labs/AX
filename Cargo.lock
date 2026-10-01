@@ -142,6 +142,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "bstr"
+version = "1.13.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6bb31b46c14244e20ee9984b11bf5c992b91fb6939fea616e3512c8baecdbe5f"
+dependencies = [
+ "memchr",
+ "serde_core",
+]
+
+[[package]]
 name = "bumpalo"
 version = "3.20.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -249,7 +259,7 @@ checksum = "1c133bc6a41be0d194c306b5506d15e6feeea7b1d6604bd3f8310dfb2ca96486"
 
 [[package]]
 name = "cli"
-version = "0.2.8"
+version = "0.2.9"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -259,7 +269,9 @@ dependencies = [
  "ed25519-dalek",
  "evolution",
  "flate2",
+ "fs2",
  "futures-util",
+ "ignore",
  "mcp",
  "memory",
  "model",
@@ -362,6 +374,25 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "01a7799fd6b852db0e61728dde9a204c423b44d689dbd432522543614b490e78"
 dependencies = [
  "cfg-if",
+]
+
+[[package]]
+name = "crossbeam-deque"
+version = "0.8.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "622f3fc73690be383c7214310406f28a90e6edeadc3cea882f9d71e495b9711a"
+dependencies = [
+ "crossbeam-epoch",
+ "crossbeam-utils",
+]
+
+[[package]]
+name = "crossbeam-epoch"
+version = "0.9.21"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dc74980687109a3b14c72fd458107bf0baa1da1a1a805e178d15501ba9b86d9d"
+dependencies = [
+ "crossbeam-utils",
 ]
 
 [[package]]
@@ -552,7 +583,7 @@ dependencies = [
 
 [[package]]
 name = "evolution"
-version = "0.2.8"
+version = "0.2.9"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -630,6 +661,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cb4cb245038516f5f85277875cdaa4f7d2c9a0fa0468de06ed190163b1581fcf"
 dependencies = [
  "percent-encoding",
+]
+
+[[package]]
+name = "fs2"
+version = "0.4.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9564fc758e15025b46aa6643b1b77d047d1a56a1aea6e01002ac0c7026876213"
+dependencies = [
+ "libc",
+ "winapi",
 ]
 
 [[package]]
@@ -748,6 +789,19 @@ dependencies = [
  "r-efi 6.0.0",
  "rand_core 0.10.1",
  "wasm-bindgen",
+]
+
+[[package]]
+name = "globset"
+version = "0.4.20"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "07c34a9410465b45bd9787443bc7370f37735bad04b0f0cd57ff1a3186c98988"
+dependencies = [
+ "aho-corasick",
+ "bstr",
+ "log",
+ "regex-automata",
+ "regex-syntax",
 ]
 
 [[package]]
@@ -1025,6 +1079,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "ignore"
+version = "0.4.33"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "00b69833ed729dc5aa7d19541d96d6cf8e9137194207a04916d658e43168402f"
+dependencies = [
+ "crossbeam-deque",
+ "globset",
+ "log",
+ "memchr",
+ "regex-automata",
+ "same-file",
+ "walkdir",
+ "winapi-util",
+]
+
+[[package]]
 name = "indexmap"
 version = "2.14.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1145,7 +1215,7 @@ dependencies = [
 
 [[package]]
 name = "lexical"
-version = "0.2.8"
+version = "0.2.9"
 dependencies = [
  "unicode-normalization",
 ]
@@ -1240,7 +1310,7 @@ dependencies = [
 
 [[package]]
 name = "mcp"
-version = "0.2.8"
+version = "0.2.9"
 dependencies = [
  "async-trait",
  "futures-util",
@@ -1262,7 +1332,7 @@ checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
 name = "memory"
-version = "0.2.8"
+version = "0.2.9"
 dependencies = [
  "lexical",
  "rusqlite",
@@ -1298,7 +1368,7 @@ dependencies = [
 
 [[package]]
 name = "model"
-version = "0.2.8"
+version = "0.2.9"
 dependencies = [
  "async-trait",
  "base64",
@@ -1754,7 +1824,7 @@ dependencies = [
 
 [[package]]
 name = "runtime-core"
-version = "0.2.8"
+version = "0.2.9"
 dependencies = [
  "async-trait",
  "futures-util",
@@ -2064,7 +2134,7 @@ checksum = "8ee5873ec9cce0195efcb7a4e9507a04cd49aec9c83d0389df45b1ef7ba2e649"
 
 [[package]]
 name = "skill"
-version = "0.2.8"
+version = "0.2.9"
 dependencies = [
  "lexical",
  "serde",
@@ -2403,7 +2473,7 @@ checksum = "7d56353a2a665ad0f41a421187180aab746c8c325620617ad883a99a1cbe66d2"
 
 [[package]]
 name = "tool"
-version = "0.2.8"
+version = "0.2.9"
 dependencies = [
  "async-trait",
  "base64",

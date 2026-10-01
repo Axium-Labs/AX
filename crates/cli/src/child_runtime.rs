@@ -13,6 +13,7 @@ pub(crate) struct LocalChildHost {
     pub source: PathBuf,
     pub root: PathBuf,
     pub excluded: Vec<PathBuf>,
+    pub policy: WorkspacePolicy,
 }
 
 fn failure(error: impl std::fmt::Display) -> AgentError {
@@ -49,122 +50,18 @@ fn git(source: &Path, args: &[&std::ffi::OsStr]) -> std::io::Result<std::process
     command.output()
 }
 
-fn provision_workspace(
-    source: &Path,
-    destination: &Path,
-    child_root: &Path,
-    excluded: &[PathBuf],
-) -> std::io::Result<()> {
-    use std::ffi::OsStr;
-    std::fs::create_dir_all(destination.parent().unwrap())?;
-    // Keep native Git semantics when available, with a snapshot fallback for
-    // non-Git projects or unavailable Git. Existing runtime/scripts are copied.
-    let is_repo = git(
-        source,
-        &[
-            OsStr::new("rev-parse"),
-            OsStr::new("--verify"),
-            OsStr::new("HEAD"),
-        ],
-    )
-    .is_ok_and(|output| output.status.success());
-    if is_repo
-        && git(
-            source,
-            &[
-                OsStr::new("worktree"),
-                OsStr::new("add"),
-                OsStr::new("--detach"),
-                destination.as_os_str(),
-                OsStr::new("HEAD"),
-            ],
-        )
-        .is_ok_and(|output| output.status.success())
-    {
-        let deleted = git(
-            source,
-            &[
-                OsStr::new("diff"),
-                OsStr::new("--name-only"),
-                OsStr::new("--diff-filter=D"),
-                OsStr::new("-z"),
-                OsStr::new("HEAD"),
-            ],
-        )?;
-        if !deleted.status.success() {
-            return Err(std::io::Error::other(
-                "cannot snapshot controller deletions",
-            ));
-        }
-        for file in deleted
-            .stdout
-            .split(|byte| *byte == 0)
-            .filter(|file| !file.is_empty())
-        {
-            let name = std::str::from_utf8(file).map_err(std::io::Error::other)?;
-            let path = destination.join(name);
-            if path.starts_with(destination) && path.is_file() {
-                std::fs::remove_file(path)?;
-            }
-        }
-    }
-    copy_workspace(source, destination, child_root, excluded)
-}
-
-/// Each snapshot starts from the controller workspace, never a sibling workspace.
-fn copy_workspace(
-    source: &Path,
-    destination: &Path,
-    child_root: &Path,
-    excluded: &[PathBuf],
-) -> std::io::Result<()> {
-    std::fs::create_dir_all(destination)?;
-    for entry in std::fs::read_dir(source)? {
-        let entry = entry?;
-        let path = entry.path();
-        if entry.file_name() == ".git" {
-            continue;
-        }
-        if excluded.iter().any(|root| path.starts_with(root))
-            || path.starts_with(child_root)
-            || entry.file_type()?.is_symlink()
-        {
-            continue;
-        }
-        if entry.file_type()?.is_dir() {
-            if matches!(
-                entry.file_name().to_str(),
-                Some(
-                    ".git"
-                        | ".ax"
-                        | ".workbuddy"
-                        | "target"
-                        | "node_modules"
-                        | "release"
-                        | "dist"
-                        | "build"
-                        | ".venv"
-                )
-            ) {
-                continue;
-            }
-            copy_workspace(
-                &path,
-                &destination.join(entry.file_name()),
-                child_root,
-                excluded,
-            )?;
-        } else {
-            std::fs::copy(&path, destination.join(entry.file_name()))?;
-        }
-    }
-    Ok(())
-}
+#[path = "child_workspace.rs"]
+mod workspace;
+pub(crate) use workspace::Policy as WorkspacePolicy;
 
 struct SessionCheckpoint {
     database: PathBuf,
     session: String,
     saved: usize,
+    state: PathBuf,
+    root: PathBuf,
+    policy: workspace::Policy,
+    _lease: std::fs::File,
 }
 impl ChildCheckpoint for SessionCheckpoint {
     fn save(&mut self, messages: &[Message]) -> Result<(), AgentError> {
@@ -191,6 +88,11 @@ impl ChildCheckpoint for SessionCheckpoint {
                 .map_err(failure)?;
             self.saved += 1;
         }
+        drop(store);
+        let mut manifest = workspace::read_manifest(&self.state).map_err(failure)?;
+        manifest.touched = workspace::now();
+        workspace::write_manifest(&self.state, &manifest).map_err(failure)?;
+        workspace::check_quota(&self.root, &manifest.cwd, self.policy).map_err(failure)?;
         Ok(())
     }
     fn finish(&mut self, outcome: &ChildOutcome) -> Result<(), AgentError> {
@@ -209,7 +111,201 @@ impl ChildCheckpoint for SessionCheckpoint {
                 },
             )
             .map_err(failure)?;
+        drop(store);
+        let mut manifest = workspace::read_manifest(&self.state).map_err(failure)?;
+        manifest.status = if outcome.success {
+            "completed"
+        } else {
+            "failed"
+        }
+        .into();
+        manifest.touched = workspace::now();
+        workspace::write_manifest(&self.state, &manifest).map_err(failure)?;
+        // Receipt is durable before workspace deletion; cleanup errors can be retried by GC.
+        if let Err(error) = workspace::cleanup(&self.state) {
+            eprintln!("child workspace cleanup deferred: {error}");
+        }
         Ok(())
+    }
+}
+impl Drop for SessionCheckpoint {
+    fn drop(&mut self) {
+        if let Ok(mut manifest) = workspace::read_manifest(&self.state)
+            && manifest.status == "running"
+        {
+            manifest.status = "interrupted".into();
+            manifest.touched = workspace::now();
+            let _ = workspace::write_manifest(&self.state, &manifest);
+        }
+    }
+}
+
+type ChildStorage = (ChildRun, PathBuf, PathBuf, std::fs::File);
+
+fn restore_saved(root: &Path, run: &ChildRun) -> Result<ChildStorage, AgentError> {
+    let mut run = run.clone();
+    // Legacy child stores move out of cwd before lifecycle cleanup is enabled.
+    let parent = run
+        .cwd
+        .parent()
+        .ok_or_else(|| failure("invalid saved child cwd"))?;
+    if parent.parent() != Some(root) || run.cwd != parent.join("workspace") {
+        return Err(failure("saved child workspace is outside child root"));
+    }
+    if absolute_path(parent).map_err(failure)?.parent() != Some(root) {
+        return Err(failure(
+            "saved child directory follows a link outside child root",
+        ));
+    }
+    let state = parent.join("state");
+    if state
+        .symlink_metadata()
+        .is_ok_and(|m| m.file_type().is_symlink())
+    {
+        return Err(failure("saved child state directory is a symlink"));
+    }
+    std::fs::create_dir_all(&state).map_err(failure)?;
+    let lease = workspace::lease(&state).map_err(failure)?;
+    if run.state_dir.is_none() {
+        let legacy = run.cwd.join(".ax");
+        if legacy.exists() {
+            for entry in std::fs::read_dir(&legacy).map_err(failure)? {
+                let entry = entry.map_err(failure)?;
+                if matches!(
+                    entry.file_name().to_str(),
+                    Some("workspace.lock" | "workspace.json" | "workspace.json.tmp")
+                ) {
+                    continue;
+                }
+                std::fs::rename(entry.path(), state.join(entry.file_name())).map_err(failure)?;
+            }
+        }
+        run.state_dir = Some(state.clone());
+        let repository = git(
+            &run.cwd,
+            &[
+                std::ffi::OsStr::new("rev-parse"),
+                std::ffi::OsStr::new("--path-format=absolute"),
+                std::ffi::OsStr::new("--git-common-dir"),
+            ],
+        )
+        .ok()
+        .filter(|o| o.status.success())
+        .and_then(|o| {
+            PathBuf::from(String::from_utf8_lossy(&o.stdout).trim())
+                .parent()
+                .map(Path::to_path_buf)
+        });
+        workspace::write_manifest(
+            &state,
+            &workspace::Manifest {
+                cwd: run.cwd.clone(),
+                repository,
+                status: "interrupted".into(),
+                touched: workspace::now(),
+            },
+        )
+        .map_err(failure)?;
+    } else if run.state_dir.as_ref() != Some(&state) {
+        return Err(failure("saved child state directory is outside child root"));
+    }
+    Ok((run, state.join("child.sqlite3"), state, lease))
+}
+impl LocalChildHost {
+    async fn provision_new(
+        &self,
+        input: &str,
+        root: &Path,
+        budget: runtime_core::ExecutionBudget,
+    ) -> Result<ChildStorage, AgentError> {
+        let policy = self.policy;
+        let source = absolute_path(&self.source).map_err(failure)?;
+        let excluded = self
+            .excluded
+            .iter()
+            .filter_map(|path| absolute_path(path).ok())
+            .collect::<Vec<_>>();
+        let provision_root = root.to_path_buf();
+        let title = input.to_owned();
+        let (cwd, state, database, session_id, lease) =
+            tokio::task::spawn_blocking(move || -> Result<_, AgentError> {
+                // Serialize admission/GC across controllers sharing this root.
+                use fs2::FileExt;
+                let admission = std::fs::OpenOptions::new()
+                    .create(true)
+                    .truncate(false)
+                    .read(true)
+                    .write(true)
+                    .open(provision_root.join("admission.lock"))
+                    .map_err(failure)?;
+                admission.lock_exclusive().map_err(failure)?;
+                workspace::gc(&provision_root, policy).map_err(failure)?;
+                let available = policy
+                    .total_bytes
+                    .saturating_sub(workspace::usage(&provision_root).map_err(failure)?);
+                if available == 0 {
+                    return Err(failure("total child workspace disk quota exceeded"));
+                }
+                let provision_policy = workspace::Policy {
+                    workspace_bytes: policy.workspace_bytes.min(available),
+                    ..policy
+                };
+                let directory = provision_root.join(uuid::Uuid::new_v4().to_string());
+                let state = directory.join("state");
+                let cwd = directory.join("workspace");
+                std::fs::create_dir_all(&state).map_err(failure)?;
+                let lease = workspace::lease(&state).map_err(failure)?;
+                workspace::write_manifest(
+                    &state,
+                    &workspace::Manifest {
+                        cwd: cwd.clone(),
+                        repository: None,
+                        status: "running".into(),
+                        touched: workspace::now(),
+                    },
+                )
+                .map_err(failure)?;
+                if let Err(error) = workspace::provision(
+                    &source,
+                    &cwd,
+                    &provision_root,
+                    &excluded,
+                    &state,
+                    provision_policy,
+                ) {
+                    let mut manifest = workspace::read_manifest(&state).map_err(failure)?;
+                    manifest.status = "failed".into();
+                    workspace::write_manifest(&state, &manifest).map_err(failure)?;
+                    let _ = workspace::cleanup(&state);
+                    return Err(AgentError::Tool(tool::ToolError::Execution(
+                        error.to_string(),
+                    )));
+                }
+                let database = state.join("child.sqlite3");
+                let session =
+                    MemoryStore::open(&database).and_then(|store| store.create_session(&title));
+                match session {
+                    Ok(session) => Ok((cwd, state, database, session.id, lease)),
+                    Err(error) => {
+                        let mut manifest = workspace::read_manifest(&state).map_err(failure)?;
+                        manifest.status = "failed".into();
+                        workspace::write_manifest(&state, &manifest).map_err(failure)?;
+                        let _ = workspace::cleanup(&state);
+                        Err(failure(error))
+                    }
+                }
+            })
+            .await
+            .map_err(|e| AgentError::WorkerJoin(e.to_string()))??;
+        let run = ChildRun {
+            goal_id: format!("child-{session_id}"),
+            memory_scope: format!("child:{session_id}"),
+            execution_budget: Some(budget),
+            session_id,
+            cwd,
+            state_dir: Some(state.clone()),
+        };
+        Ok((run, database, state, lease))
     }
 }
 
@@ -221,44 +317,14 @@ impl ChildHost for LocalChildHost {
         input: &str,
         previous: Option<&ChildRun>,
     ) -> Result<PreparedChild, AgentError> {
-        let (run, database) = if let Some(run) = previous {
-            if !run.cwd.is_dir() {
-                return Err(AgentError::Tool(tool::ToolError::Execution(
-                    "saved child workspace is missing".into(),
-                )));
-            }
-            (run.clone(), run.cwd.join(".ax/child.sqlite3"))
+        std::fs::create_dir_all(&self.root).map_err(failure)?;
+        let root = absolute_path(&self.root).map_err(failure)?;
+        let policy = self.policy;
+        let (run, database, state, lease) = if let Some(run) = previous {
+            restore_saved(&root, run)?
         } else {
-            std::fs::create_dir_all(&self.root).map_err(failure)?;
-            let root = absolute_path(&self.root).map_err(failure)?;
-            let cwd = root
-                .join(uuid::Uuid::new_v4().to_string())
-                .join("workspace");
-            let source = absolute_path(&self.source).map_err(failure)?;
-            let excluded = self
-                .excluded
-                .iter()
-                .filter_map(|path| absolute_path(path).ok())
-                .collect::<Vec<_>>();
-            let destination = cwd.clone();
-            tokio::task::spawn_blocking(move || {
-                provision_workspace(&source, &destination, &root, &excluded)
-            })
-            .await
-            .map_err(|e| AgentError::WorkerJoin(e.to_string()))?
-            .map_err(|e| AgentError::Tool(tool::ToolError::Execution(e.to_string())))?;
-            let database = cwd.join(".ax/child.sqlite3");
-            std::fs::create_dir_all(database.parent().unwrap()).map_err(failure)?;
-            let store = MemoryStore::open(&database).map_err(failure)?;
-            let session = store.create_session(input).map_err(failure)?;
-            let run = ChildRun {
-                goal_id: format!("child-{}", session.id),
-                memory_scope: format!("child:{}", session.id),
-                execution_budget: Some(controller.child_execution_budget()),
-                session_id: session.id,
-                cwd,
-            };
-            (run, database)
+            self.provision_new(input, &root, controller.child_execution_budget())
+                .await?
         };
         let store = MemoryStore::open(&database).map_err(failure)?;
         if store.session(&run.session_id).map_err(failure)?.is_none() {
@@ -277,10 +343,9 @@ impl ChildHost for LocalChildHost {
                 .map_err(failure)
             })
             .transpose()?;
-        let mut messages = store
+        let messages = store
             .load_messages(&run.session_id, None, u32::MAX)
             .map_err(failure)?;
-        messages.reverse();
         let mut messages = messages
             .into_iter()
             .filter_map(|message| serde_json::from_value::<Message>(message.metadata).ok())
@@ -291,9 +356,50 @@ impl ChildHost for LocalChildHost {
         if terminal.is_none() {
             terminal = runtime_core::child::terminal_outcome(&messages);
         }
+        drop(store);
+        let mut manifest = workspace::read_manifest(&state).map_err(failure)?;
+        if terminal.is_none() {
+            let failure_reason = if manifest.status == "expired" || !run.cwd.is_dir() {
+                Some(
+                    "saved child workspace expired or missing; durable history retained".to_owned(),
+                )
+            } else {
+                workspace::check_quota(&root, &run.cwd, policy)
+                    .err()
+                    .map(|error| error.to_string())
+            };
+            if let Some(output) = failure_reason {
+                terminal = Some(ChildOutcome {
+                    success: false,
+                    output,
+                });
+            }
+        }
+        if let Some(outcome) = &terminal {
+            // Includes a crash between durable final history and receipt creation.
+            let mut checkpoint = SessionCheckpoint {
+                database: database.clone(),
+                session: run.session_id.clone(),
+                saved: 0,
+                state: state.clone(),
+                root: root.clone(),
+                policy,
+                _lease: lease,
+            };
+            checkpoint.finish(outcome)?;
+            return Ok(PreparedChild {
+                kernel: controller.fork_child(run.clone(), input, vec![]),
+                run,
+                checkpoint: Box::new(checkpoint),
+                terminal,
+            });
+        }
+        manifest.status = "running".into();
+        manifest.touched = workspace::now();
+        workspace::write_manifest(&state, &manifest).map_err(failure)?;
         messages.insert(0, Message::system(format!("[ax-child-runtime]\n{}", serde_json::json!({
             "session_id":run.session_id,"cwd":run.cwd,"memory_scope":run.memory_scope,
-            "platform":std::env::consts::OS,"shell":if cfg!(windows) { "Windows PowerShell 5.1" } else { "POSIX sh" }
+            "state_dir":run.state_dir,"platform":std::env::consts::OS,"shell":if cfg!(windows) { "Windows PowerShell 5.1" } else { "POSIX sh" }
         }))));
         let kernel = controller.fork_child(run.clone(), input, messages);
         Ok(PreparedChild {
@@ -301,6 +407,10 @@ impl ChildHost for LocalChildHost {
                 database,
                 session: run.session_id.clone(),
                 saved: 0,
+                state,
+                root,
+                policy,
+                _lease: lease,
             }),
             run,
             kernel,

@@ -11,6 +11,9 @@ pub struct ChildRun {
     pub session_id: String,
     pub cwd: PathBuf,
     pub memory_scope: String,
+    /// Durable store outside the disposable workspace; None for legacy runs.
+    #[serde(default)]
+    pub state_dir: Option<PathBuf>,
     #[serde(default)]
     pub execution_budget: Option<crate::ExecutionBudget>,
 }
@@ -119,6 +122,7 @@ impl AgentKernel {
     pub fn fork_child(&self, run: ChildRun, input: &str, messages: Vec<Message>) -> Self {
         let context = tool::RunContext {
             cwd: run.cwd.clone(),
+            state_dir: run.state_dir.clone().unwrap_or_else(|| run.cwd.join(".ax")),
             session_id: run.session_id.clone(),
             memory_scope: run.memory_scope.clone(),
             input: input.to_owned(),

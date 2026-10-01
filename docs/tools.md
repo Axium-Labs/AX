@@ -3,6 +3,23 @@
 This document covers AX's built-in tools, how tools declare their permission
 requirements, and how the runtime and UI enforce them.
 
+## Agent environment and Crew terminal shell
+
+`ax environment` shows execution settings. On Windows, `ax environment native`
+runs AX directly; `ax environment wsl` runs Linux AX in the default WSL
+distribution. WSL selection first checks `~/.local/bin/ax --version`; install
+the Linux AX binary there before selecting WSL. `/environment` opens the same
+settings in the TUI. Changes take effect on the next AX launch.
+
+The Windows launcher forwards stdio, exit status, the workspace and path flags
+to Linux AX. It maps the shared `AX_HOME` and ACP session `cwd` through
+`wslpath`. Agent shell commands use the Linux runtime's shell in WSL.
+
+`ax environment --terminal-shell powershell|cmd|git-bash|wsl` independently
+selects the shell for new Crew integrated terminals. Crew exposes both settings
+under Settings > AX and validates the chosen terminal program before saving.
+Existing processes and terminals keep their current environment.
+
 ## Tool model
 
 A **`Tool`** (`crates/tool`) is a named callable with a JSON input schema. The
@@ -304,5 +321,6 @@ For isolated children, `Tool::fork_for_run` must rebind extension state to the
 provided `RunContext`. Built-in workspace tools reject file paths outside that
 child root, including symlink escapes, and resolve resource leases to the bound
 paths. Shell inherits installed runtimes/PATH but launches with the child cwd
-and child AX_HOME/session/memory environment. Tool execution keeps ordinary
+and child AX_HOME/session/memory environment. AX_HOME and memory databases bind
+to `RunContext.state_dir`, outside the disposable workspace. Tool execution keeps ordinary
 approval rules and the existing DAG. This does not introduce an OS container.

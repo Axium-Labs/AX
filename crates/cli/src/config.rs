@@ -33,10 +33,38 @@ pub(crate) fn config_path() -> PathBuf {
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct AxConfig {
+    #[serde(default)]
+    pub execution: ExecutionConfig,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<ModelConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inference: Option<InferenceConfig>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct ExecutionConfig {
+    #[serde(default)]
+    pub environment: AgentEnvironment,
+    #[serde(default)]
+    pub terminal_shell: TerminalShell,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, clap::ValueEnum)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentEnvironment {
+    #[default]
+    Native,
+    Wsl,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, clap::ValueEnum)]
+#[serde(rename_all = "snake_case")]
+pub enum TerminalShell {
+    #[default]
+    Powershell,
+    Cmd,
+    GitBash,
+    Wsl,
 }
 
 /// The last model selection AX successfully switched to via `/model`.

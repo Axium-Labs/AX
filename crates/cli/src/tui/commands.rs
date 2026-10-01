@@ -143,6 +143,12 @@ pub static SLASH_COMMANDS: &[SlashCommandDef] = &[
         SlashPresentation::InfoPanel,
         None,
     ),
+    cmd(
+        "/environment",
+        "select agent environment and terminal shell",
+        SlashPresentation::Manager,
+        None,
+    ),
     cmd("/exit", "exit AX", SlashPresentation::DirectAction, None),
 ];
 
@@ -152,6 +158,28 @@ pub fn filter_commands(token: &str) -> Vec<&'static SlashCommandDef> {
         .iter()
         .filter(|c| token.is_empty() || c.name.trim_start_matches('/').contains(&token))
         .collect()
+}
+
+fn execution_settings() -> Result<Box<dyn super::bottom_pane::PaneView>> {
+    let config = AxConfig::load()?;
+    Ok(SurfaceView::manager(
+        "Execution settings",
+        "execution",
+        vec!["Changes apply to new AX processes and Crew terminals.".into()],
+        vec![
+            SurfaceItem {
+                id: "environment".into(),
+                label: "Agent environment".into(),
+                value: format!("{:?}", config.execution.environment),
+            },
+            SurfaceItem {
+                id: "terminal_shell".into(),
+                label: "Integrated terminal shell".into(),
+                value: format!("{:?}", config.execution.terminal_shell),
+            },
+        ],
+        "Enter select · Esc close",
+    ))
 }
 
 pub(super) async fn execute_slash(
@@ -219,6 +247,7 @@ pub(super) async fn execute_slash(
         "/mcp" => open_mcp(state, pane).await?,
         "/permissions" => pane.push_view(permissions(&state.permissions)),
         "/status" => pane.push_view(status_panel(state, selection, app)),
+        "/environment" => pane.push_view(execution_settings()?),
         other => {
             if let Some(term) = other.strip_prefix("/model ") {
                 open_model_picker(state, selection, app, pane, Some(term.trim()));
@@ -847,7 +876,62 @@ pub(super) async fn apply_modal_action(
             open_session_picker(state, app, pane)?;
         }
         ModalAction::SurfaceSelected { surface, id } => {
-            if let Some(name) = surface.strip_prefix("memory-items:") {
+            if surface == "execution" {
+                let options: Vec<(&str, &str)> = if id == "environment" {
+                    vec![
+                        ("native", "Windows native"),
+                        ("wsl", "Windows Subsystem for Linux"),
+                    ]
+                } else {
+                    vec![
+                        ("powershell", "PowerShell"),
+                        ("cmd", "Command Prompt"),
+                        ("git_bash", "Git Bash"),
+                        ("wsl", "WSL"),
+                    ]
+                };
+                pane.push_view(SurfaceView::manager(
+                    "Select environment / shell",
+                    format!("execution:{id}"),
+                    vec![],
+                    options
+                        .into_iter()
+                        .map(|(id, label)| SurfaceItem {
+                            id: id.into(),
+                            label: label.into(),
+                            value: String::new(),
+                        })
+                        .collect(),
+                    "Enter select · Esc back",
+                ));
+            } else if surface.starts_with("execution:") {
+                use crate::config::{AgentEnvironment, TerminalShell};
+                let result = if surface == "execution:environment" {
+                    crate::execution::select(
+                        Some(if id == "wsl" {
+                            AgentEnvironment::Wsl
+                        } else {
+                            AgentEnvironment::Native
+                        }),
+                        None,
+                    )
+                } else {
+                    crate::execution::select(
+                        None,
+                        Some(match id.as_str() {
+                            "cmd" => TerminalShell::Cmd,
+                            "git_bash" => TerminalShell::GitBash,
+                            "wsl" => TerminalShell::Wsl,
+                            _ => TerminalShell::Powershell,
+                        }),
+                    )
+                };
+                match result {
+                    Ok(_) => app.push(TranscriptKind::Status, "Saved. Agent environment applies on the next AX launch; terminal shell applies to new Crew terminals."),
+                    Err(error) => app.push(TranscriptKind::Error, error.to_string()),
+                }
+                pane.push_view(execution_settings()?);
+            } else if let Some(name) = surface.strip_prefix("memory-items:") {
                 memories::open_record(state, name, &id, pane)?;
             } else if let Some(reference) = surface.strip_prefix("memory-record:") {
                 memories::action(state, reference, &id, pane, app)?;

@@ -298,13 +298,27 @@ receive the controller queue or siblings' messages. The controller makes a singl
 text-only summary request after all children are terminal. Plain single-task
 turns keep their existing loop. Embedders can opt in via `with_child_host`.
 
-`LocalChildHost` provisions a unique session and memory database per child under
-`child-runs/<id>/workspace/.ax`. Git projects use detached worktrees, overlaid with
-the controller working-copy files and deletions. Non-Git projects or unavailable
-Git use independent directory snapshots. Large build/cache directories, controller
-stores and sibling history are excluded. Each workspace remains available with
-its result; changes are not merged automatically into the controller workspace.
-Runtime/scripts in the project and installed executables remain available.
+`LocalChildHost` separates `child-runs/<id>/state` (session database, JSONL,
+terminal receipt and lifecycle manifest) from the disposable `workspace` directory.
+Git projects use detached worktrees at the captured HEAD plus a binary dirty patch
+covering staged/unstaged tracked changes, renames and deletions. Only eligible
+untracked inputs are copied; unchanged tracked files are never recursively copied
+from the controller. Non-Git projects or unavailable Git use filtered snapshots.
+Nested `.gitignore` and `.axignore` rules, including negation, exclude inputs;
+controller stores, sibling history, symlinks and build/cache directories are excluded.
+An existing Git repository with worktree/patch errors fails that child instead of
+silently copying the entire project. Runtime/scripts and installed PATH remain available.
+
+Completed/failed children persist their receipt before removing the workspace and
+Git worktree registration. Cleanup failures are retried by GC; terminal receipt
+recovery works without a workspace. Running/interrupted children retain their
+workspace for resume. Legacy `workspace/.ax` stores migrate into `state` on resume.
+File leases prevent GC from touching active children, and serialize provisioning
+across processes sharing a storage root. GC runs on child admission, removes
+terminal workspaces and expires unleased workspaces after the configured idle TTL;
+it never deletes raw session history. Expired children fail explicitly on resume
+rather than silently restarting. Workspace changes are disposable, are not merged
+back, and are not a retained artifact; durable outputs/history are in `state`.
 
 Child tools opt in through `Tool::fork_for_run(RunContext)`. File/image/search/patch
 tools bind relative paths and resource leases to the child workspace; shell
@@ -324,3 +338,13 @@ Resume reuses the saved child identity/cwd/history; terminal receipts prevent
 replaying a completed child if the controller checkpoint was interrupted.
 Unknown interrupted tool outcomes get placeholders for inspection, not automatic
 side-effect replay. Child final text is withheld from controller final output.
+
+Workspace quotas default to 2 GiB per child and 8 GiB per child-storage root;
+idle workspace TTL defaults to 7 days. Positive integer environment overrides:
+`AX_CHILD_WORKSPACE_QUOTA_BYTES`, `AX_CHILD_TOTAL_QUOTA_BYTES`,
+`AX_CHILD_WORKSPACE_TTL_SECS`. Admission preflights snapshot/Git checkout sizes
+and remaining space; each raw checkpoint checks actual workspace usage. Over-quota
+execution fails only that child, persists its failure and releases workspace space.
+These are admission/checkpoint limits, not an OS filesystem quota: a subprocess
+can temporarily exceed them between checkpoints. Durable state is excluded from
+workspace quota accounting and is preserved by GC.

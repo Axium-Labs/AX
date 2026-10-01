@@ -38,7 +38,7 @@ struct Input {
 #[async_trait]
 impl Tool for MemoryTool {
     fn fork_for_run(&self, context: &tool::RunContext) -> Option<std::sync::Arc<dyn Tool>> {
-        let database = context.cwd.join(".ax/child.sqlite3");
+        let database = context.state_dir.join("child.sqlite3");
         Some(std::sync::Arc::new(Self {
             database: database.clone(),
             global_database: database,

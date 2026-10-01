@@ -126,14 +126,10 @@ git push origin v0.2.0
 
 The workflow:
 
-1. For v0.2.8, builds Windows x64 only. Other tags build the release binary for 6 targets (Windows x86_64 + ARM64, Linux
-   musl x86_64 + ARM64, macOS x86_64 + ARM64). Linux musl targets use
-   `cargo zigbuild`.
-2. Smoke-tests each binary (`ax --version`); the aarch64 musl target runs
-   under qemu emulation on the x86_64 runner.
-3. Packages assets (`ax-<target>.tar.gz` / `.zip`) — the executable plus the
-   repository's `skills/` tree and `mcp.example.toml` — generates `SHA256SUMS`,
-   and creates/updates the GitHub Release with generated release notes.
+1. Builds the Windows x64 release binary.
+2. Packages `ax-x86_64-pc-windows-msvc.zip` with the executable, `skills/`
+   and `mcp.example.toml`; generates `SHA256SUMS` and publishes the GitHub Release.
+   The release workflow does not run tests.
 
 Installers (`scripts/install.sh`, `scripts/install.ps1`) fetch the latest
 release from GitHub and verify the archive against `SHA256SUMS`, then place the

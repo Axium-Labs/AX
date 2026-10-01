@@ -166,7 +166,7 @@ metadata (session, cwd, memory scope, platform and shell), never controller or
 sibling conversation/skill/retrieved-memory state. A resumed child reloads only
 its own raw history and raw result reader. Child queue tools are disabled so a
 child cannot accidentally orchestrate the controller queue. Parent progress
-remains compact; the summary includes child workspace/session references and
+remains compact; the summary includes child workspace/session/state references and
 concise results, without full child tool histories.
 
 `--child-timeout-secs` limits each isolated child independently; it defaults to

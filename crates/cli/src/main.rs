@@ -26,6 +26,7 @@ mod acp;
 mod auth_login;
 mod capability_import;
 mod config;
+mod execution;
 mod crew_device;
 mod evolution;
 mod file_reference;
@@ -106,6 +107,13 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Show or select the agent environment and Crew terminal shell.
+    Environment {
+        #[arg(value_enum)]
+        environment: Option<config::AgentEnvironment>,
+        #[arg(long, value_enum)]
+        terminal_shell: Option<config::TerminalShell>,
+    },
     /// Manage AX provider credentials.
     Auth {
         #[command(subcommand)]
@@ -1175,6 +1183,16 @@ async fn main() -> Result<()> {
         }
         return update::run().await;
     }
+    if let Some(Command::Environment {
+        environment,
+        terminal_shell,
+    }) = cli.command
+    {
+        return execution::configure(environment, terminal_shell);
+    }
+    if let Some(code) = execution::launch(&cli)? {
+        std::process::exit(code);
+    }
     let cwd = std::env::current_dir()?;
     let (data_dir, skills_dir) =
         storage_location::initialize(&cwd, cli.data_dir.clone(), cli.skills_dir.clone())?;
@@ -1204,6 +1222,7 @@ async fn main() -> Result<()> {
     match cli.command {
         Some(
             Command::Acp
+            | Command::Environment { .. }
             | Command::Crew { .. }
             | Command::Auth { .. }
             | Command::Skill { .. }
@@ -1446,6 +1465,7 @@ where
         state.ensure_session(prompt)?;
     }
     let child_host = Arc::new(child_runtime::LocalChildHost {
+        policy: child_runtime::WorkspacePolicy::default(),
         source: state.project_root.clone(),
         root: state.data_dir.join("child-runs"),
         excluded: vec![

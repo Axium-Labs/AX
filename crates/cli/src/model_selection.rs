@@ -660,6 +660,7 @@ mod tests {
         let root = std::env::temp_dir().join(format!("ax-config-{}", std::process::id()));
         let path = root.join("config.json");
         let config = AxConfig {
+            execution: crate::config::ExecutionConfig::default(),
             model: Some(ModelConfig {
                 provider: "deepseek".to_owned(),
                 model: "deepseek-flash".to_owned(),
