@@ -224,3 +224,20 @@ resurrecting the queue. Disconnect alone preserves resumable work.
 Full state and archive messages are excluded from model-visible context. Provider
 changes preserve queue metadata. Interrupted tool calls retain existing recovery
 placeholders and do not replay side effects.
+
+### Child session persistence
+
+Queued tasks optionally contain a `child` descriptor (`goal_id`, `session_id`,
+`cwd`, `memory_scope`, execution budget). Identity is checkpointed in the controller queue before
+child execution. Each child owns `workspace/.ax/child.sqlite3` and its separate
+JSONL session stream. Raw model/tool messages are append-only there and do not
+inflate controller queue snapshots. Global/project/session memory tool operations
+all bind to this child store and its unique owners.
+
+`[ax-child-outcome]` is a terminal receipt saved before advancing the controller.
+A reconnect with a running descriptor loads the same workspace and session;
+a receipt returns the recorded result without another child model/tool call.
+A durable final assistant message also recovers this receipt when interruption
+occurs just before receipt writing. Pending children get fresh identities;
+completed/failed entries are never restarted. Controller stores/session streams
+are excluded when copying workspace files.

@@ -79,7 +79,10 @@ documented in [web-latency.md](web-latency.md).
    `permission()`, and explicit read/write resources through `resources()`).
    Unknown effects use a global exclusive resource lease; declaration is
    required to gain safe parallelism. See [tools.md](tools.md#concurrency).
-2. Register it in the composition root's registry (`cli::tools` in
+2. If the tool supports isolated child runs, implement `fork_for_run` and bind
+   all workspace/session/memory/process state to the supplied `RunContext`.
+   Otherwise it is omitted from child registries.
+3. Register it in the composition root's registry (`cli::tools` in
    `crates/cli/src/main.rs`).
 
 ### A new MCP transport
@@ -123,7 +126,7 @@ git push origin v0.2.0
 
 The workflow:
 
-1. For v0.2.7, builds Windows x64 only. Other tags build the release binary for 6 targets (Windows x86_64 + ARM64, Linux
+1. For v0.2.8, builds Windows x64 only. Other tags build the release binary for 6 targets (Windows x86_64 + ARM64, Linux
    musl x86_64 + ARM64, macOS x86_64 + ARM64). Linux musl targets use
    `cargo zigbuild`.
 2. Smoke-tests each binary (`ax --version`); the aarch64 musl target runs

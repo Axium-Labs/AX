@@ -95,6 +95,71 @@ fn native_decode(_bytes: &[u8]) -> Option<String> {
 
 pub struct ShellTool;
 
+struct ChildShell {
+    context: crate::RunContext,
+}
+
+fn shell_description() -> &'static str {
+    if cfg!(windows) {
+        "Run commands using Windows PowerShell 5.1 (powershell.exe), platform=windows. Use PowerShell syntax: no bash heredocs (python - <<'PY'), && or ||. Use a PowerShell here-string piped to python, or python -c; run dependent commands separately. Shell execution requires approval."
+    } else {
+        "Run commands using POSIX sh, platform=unix. Shell execution requires approval."
+    }
+}
+
+fn validate_command(command: &str, windows: bool) -> Result<(), ToolError> {
+    if command.trim().is_empty() {
+        return Err(ToolError::InvalidInput("command must not be empty".into()));
+    }
+    if windows {
+        // Check operators outside quotes; quoted Python/string contents remain valid.
+        let mut quote = None;
+        let mut chars = command.chars().peekable();
+        while let Some(ch) = chars.next() {
+            if ch == '`' {
+                chars.next();
+                continue;
+            }
+            if let Some(current) = quote {
+                if ch == current {
+                    quote = None;
+                }
+                continue;
+            }
+            if ch == '\'' || ch == '"' {
+                quote = Some(ch);
+                continue;
+            }
+            if matches!(ch, '&' | '|' | '<') && chars.peek() == Some(&ch) {
+                return Err(ToolError::InvalidInput("platform=windows; shell=Windows PowerShell 5.1: bash heredocs, && and || are unsupported. Use PowerShell here-strings or separate commands.".into()));
+            }
+        }
+    }
+    Ok(())
+}
+
+#[async_trait]
+impl Tool for ChildShell {
+    fn name(&self) -> &'static str {
+        "shell"
+    }
+    fn description(&self) -> &str {
+        shell_description()
+    }
+    fn input_schema(&self) -> Value {
+        ShellTool.input_schema()
+    }
+    fn capability(&self, input: &Value) -> crate::Capability {
+        ShellTool.capability(input)
+    }
+    fn safety(&self, input: &Value) -> SafetyLevel {
+        ShellTool.safety(input)
+    }
+    async fn execute(&self, input: Value) -> Result<String, ToolError> {
+        execute_shell(input, Some(&self.context)).await
+    }
+}
+
 #[derive(Deserialize)]
 struct ShellInput {
     command: String,
@@ -103,19 +168,24 @@ struct ShellInput {
 #[async_trait]
 #[allow(clippy::unnecessary_literal_bound)]
 impl Tool for ShellTool {
-    fn name(&self) -> &str {
+    fn fork_for_run(&self, context: &crate::RunContext) -> Option<std::sync::Arc<dyn Tool>> {
+        Some(std::sync::Arc::new(ChildShell {
+            context: context.clone(),
+        }))
+    }
+    fn name(&self) -> &'static str {
         "shell"
     }
 
     fn description(&self) -> &str {
-        "Run a shell command in the current working directory. Shell execution always requires approval."
+        shell_description()
     }
 
     fn input_schema(&self) -> Value {
         json!({
             "type": "object",
             "properties": {
-                "command": { "type": "string", "description": "Command to execute" }
+                "command": { "type": "string", "description": shell_description() }
             },
             "required": ["command"],
             "additionalProperties": false
@@ -131,46 +201,56 @@ impl Tool for ShellTool {
     }
 
     async fn execute(&self, input: Value) -> Result<String, ToolError> {
-        let input: ShellInput = serde_json::from_value(input)
-            .map_err(|error| ToolError::InvalidInput(error.to_string()))?;
-        if input.command.trim().is_empty() {
-            return Err(ToolError::InvalidInput(
-                "command must not be empty".to_owned(),
-            ));
-        }
+        execute_shell(input, None).await
+    }
+}
 
-        #[cfg(windows)]
-        let mut command = {
-            let mut command = Command::new("powershell");
-            command.args(["-NoLogo", "-NoProfile", "-Command", &input.command]);
-            command
-        };
-        #[cfg(not(windows))]
-        let mut command = {
-            let mut command = Command::new("sh");
-            command.args(["-lc", &input.command]);
-            command
-        };
+async fn execute_shell(
+    input: Value,
+    context: Option<&crate::RunContext>,
+) -> Result<String, ToolError> {
+    let input: ShellInput = serde_json::from_value(input)
+        .map_err(|error| ToolError::InvalidInput(error.to_string()))?;
+    validate_command(&input.command, cfg!(windows))?;
 
-        let output = command
-            .kill_on_drop(true)
-            .stdin(Stdio::null())
-            .output()
-            .await
-            .map_err(|error| ToolError::Execution(error.to_string()))?;
-        let stdout = decode(&output.stdout);
-        let stderr = decode(&output.stderr);
-        let text = format!(
-            "exit_code: {}\nstdout:\n{}\nstderr:\n{}",
-            output.status.code().unwrap_or(-1),
-            stdout,
-            stderr
-        );
-        if output.status.success() {
-            Ok(text)
-        } else {
-            Err(ToolError::Execution(text))
-        }
+    #[cfg(windows)]
+    let mut command = {
+        let mut command = Command::new("powershell");
+        command.args(["-NoLogo", "-NoProfile", "-Command", &input.command]);
+        command
+    };
+    #[cfg(not(windows))]
+    let mut command = {
+        let mut command = Command::new("sh");
+        command.args(["-lc", &input.command]);
+        command
+    };
+
+    if let Some(context) = context {
+        command
+            .current_dir(&context.cwd)
+            .env("AX_HOME", context.cwd.join(".ax"))
+            .env("AX_SESSION_ID", &context.session_id)
+            .env("AX_MEMORY_SCOPE", &context.memory_scope);
+    }
+    let output = command
+        .kill_on_drop(true)
+        .stdin(Stdio::null())
+        .output()
+        .await
+        .map_err(|error| ToolError::Execution(error.to_string()))?;
+    let stdout = decode(&output.stdout);
+    let stderr = decode(&output.stderr);
+    let text = format!(
+        "exit_code: {}\nstdout:\n{}\nstderr:\n{}",
+        output.status.code().unwrap_or(-1),
+        stdout,
+        stderr
+    );
+    if output.status.success() {
+        Ok(text)
+    } else {
+        Err(ToolError::Execution(text))
     }
 }
 
@@ -185,6 +265,26 @@ mod tests {
             .await
             .unwrap_err();
         assert!(error.to_string().contains("exit_code: 7"));
+    }
+
+    #[test]
+    fn windows_schema_and_validation_expose_real_shell_and_reject_bash_operators() {
+        assert!(super::validate_command("python - <<'PY'\nprint(1)\nPY", true).is_err());
+        assert!(super::validate_command("python -c 'print(1)' && echo done", true).is_err());
+        assert!(super::validate_command("echo failed || exit 1", true).is_err());
+        assert!(super::validate_command(r#"python -c "print('a && b')""#, true).is_ok());
+        assert!(super::validate_command("@'\nprint(1)\n'@ | python -", true).is_ok());
+        assert!(super::validate_command("true && echo ok", false).is_ok());
+        if cfg!(windows) {
+            use crate::Tool;
+            assert!(super::ShellTool.description().contains("platform=windows"));
+            assert!(
+                super::ShellTool.input_schema()["properties"]["command"]["description"]
+                    .as_str()
+                    .unwrap()
+                    .contains("PowerShell 5.1")
+            );
+        }
     }
 
     #[test]

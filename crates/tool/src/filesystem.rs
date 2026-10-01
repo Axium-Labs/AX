@@ -23,10 +23,15 @@ enum FilesystemInput {
     },
 }
 
-
 #[async_trait]
 #[allow(clippy::unnecessary_literal_bound)]
 impl Tool for FilesystemTool {
+    fn fork_for_run(&self, context: &crate::RunContext) -> Option<std::sync::Arc<dyn Tool>> {
+        Some(std::sync::Arc::new(crate::WorkspaceTool::new(
+            std::sync::Arc::new(FilesystemTool),
+            context.cwd.clone(),
+        )))
+    }
     fn name(&self) -> &str {
         "filesystem"
     }

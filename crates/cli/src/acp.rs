@@ -817,6 +817,8 @@ pub async fn run(cli: &Cli, data_dir: PathBuf, skills_dir: PathBuf) -> Result<()
                     .get(&session_id)
                     .cloned();
                 let task_cwd = cwd.clone();
+                let task_budget = crate::execution_budget(cli);
+                let task_child_timeout = cli.child_timeout_secs;
                 let task = tokio::spawn(async move {
                     let result: Result<String> = async {
                         let mut state =
@@ -825,6 +827,8 @@ pub async fn run(cli: &Cli, data_dir: PathBuf, skills_dir: PathBuf) -> Result<()
                         apply_mcp_names(&mut state, task_mcp_names.as_ref())?;
                         state.allowed_skills = task_skills_allowed;
                         state.next_goal_turn = goal_turn;
+                        state.execution_budget = task_budget;
+                        state.child_timeout_secs = task_child_timeout;
                         let budget = context_budget(&selection, &[]);
                         if !state.open_session(&task_session, &budget)? {
                             return Err(anyhow!("AX session not found"));

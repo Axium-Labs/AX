@@ -9,3 +9,6 @@
 
 # Local copies of GitHub Release assets
 /release/
+
+# Local clippy/test import transcripts
+/*.log

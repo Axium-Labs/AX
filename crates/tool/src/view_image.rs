@@ -58,6 +58,12 @@ struct Input {
 
 #[async_trait]
 impl Tool for ViewImageTool {
+    fn fork_for_run(&self, context: &crate::RunContext) -> Option<std::sync::Arc<dyn Tool>> {
+        Some(std::sync::Arc::new(crate::WorkspaceTool::new(
+            std::sync::Arc::new(Self::new(context.cwd.clone())),
+            context.cwd.clone(),
+        )))
+    }
     fn resources(&self, input: &Value) -> Vec<crate::ResourceAccess> {
         input["path"].as_str().map_or_else(
             || vec![crate::ResourceAccess::exclusive()],

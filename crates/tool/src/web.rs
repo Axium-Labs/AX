@@ -577,6 +577,9 @@ const fn default_limit() -> usize {
 
 #[async_trait]
 impl Tool for WebTool {
+    fn fork_for_run(&self, _context: &crate::RunContext) -> Option<std::sync::Arc<dyn Tool>> {
+        Some(std::sync::Arc::new(Self::new()))
+    }
     fn resources(&self, _input: &Value) -> Vec<crate::ResourceAccess> {
         vec![crate::ResourceAccess::read(crate::Resource::Named(
             "web-network".into(),

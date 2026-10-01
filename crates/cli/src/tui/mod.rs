@@ -323,8 +323,9 @@ pub(super) async fn run_tui(
     mcp_config: Option<PathBuf>,
     allow_dangerous: bool,
     codex_auth: Option<PathBuf>,
-    execution_budget: runtime_core::ExecutionBudget,
+    limits: (runtime_core::ExecutionBudget, u64),
 ) -> Result<()> {
+    let (execution_budget, child_timeout_secs) = limits;
     let startup_timer = tool::telemetry::Timer::new("startup.tui");
     // Title the terminal tab/window "ax" so Windows Terminal labels this tab
     // (mirrors how pi titles its tab, e.g. "π - hzl"). Printed before raw mode
@@ -353,6 +354,10 @@ pub(super) async fn run_tui(
 
     let mut state: Option<ReplState> = Some(ReplState::new(data_dir, skills_dir, mcp_config)?);
     state.as_mut().expect("initialized state").execution_budget = execution_budget;
+    state
+        .as_mut()
+        .expect("initialized state")
+        .child_timeout_secs = child_timeout_secs;
     // Resolution steps 4-6: a single configured provider was already selected
     // automatically. Several providers open the `/model` picker and none opens
     // the login flow before any user input.

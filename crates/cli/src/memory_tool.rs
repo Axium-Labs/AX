@@ -37,6 +37,16 @@ struct Input {
 
 #[async_trait]
 impl Tool for MemoryTool {
+    fn fork_for_run(&self, context: &tool::RunContext) -> Option<std::sync::Arc<dyn Tool>> {
+        let database = context.cwd.join(".ax/child.sqlite3");
+        Some(std::sync::Arc::new(Self {
+            database: database.clone(),
+            global_database: database,
+            project: context.memory_scope.clone(),
+            session: context.session_id.clone(),
+            user_input: context.input.clone(),
+        }))
+    }
     fn resources(&self, input: &Value) -> Vec<tool::ResourceAccess> {
         let path = if input["scope"] == "global" {
             &self.global_database

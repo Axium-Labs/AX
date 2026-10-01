@@ -70,6 +70,8 @@ pub struct QueuedTask {
     pub outcome: Option<String>,
     #[serde(default)]
     pub recovery_attempts: usize,
+    #[serde(default)]
+    pub child: Option<crate::ChildRun>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -104,6 +106,7 @@ impl TaskQueue {
                     failure_reason: None,
                     outcome: None,
                     recovery_attempts: 0,
+                    child: None,
                 })
                 .collect(),
             summarized: false,
@@ -306,14 +309,14 @@ impl TaskQueue {
         queue
     }
     pub(crate) fn summary_context(&self) -> Message {
-        Message::system(format!("[ax-task-summary]\nSummarize all task outcomes and failures; execution is complete. {}", json!(self.tasks.iter().enumerate().map(|(i,t)| json!({"task":i+1,"status":t.status,"outcome":t.outcome,"failure_reason":t.failure_reason})).collect::<Vec<_>>())))
+        Message::system(format!("[ax-task-summary]\nSummarize all task outcomes and failures; execution is complete. {}", json!(self.tasks.iter().enumerate().map(|(i,t)| json!({"task":i+1,"status":t.status,"outcome":t.outcome,"failure_reason":t.failure_reason,"child":t.child})).collect::<Vec<_>>())))
     }
 }
 
 pub(crate) fn spec() -> ToolSpec {
     ToolSpec { kind: "function", function: FunctionSpec {
         name: TOOL_NAME.into(),
-        description: "For requests containing multiple explicit subtasks, initialize the internal queue before executing any work unless a queue already exists. Use this tool alone in a round. Finish the current task with completed/failed/skipped and a concise outcome. Before declaring failure, search existing workspace runner/runtime/scripts and available environments and attempt recovery. Independent tasks continue after failure. Execute current_task only; use finish for task-local completion/failure and block for a global blocker. A text-only response terminates the goal, never advances a task. Only summarize once current_task is null. For numbered requests the queue is automatic.".into(),
+        description: "The runtime can execute queued tasks automatically in isolated child runs. Each task must contain its complete explicit input. For requests containing multiple explicit subtasks, initialize the internal queue before executing any work unless a queue already exists. Use this tool alone in a round. Finish the current task with completed/failed/skipped and a concise outcome. Before declaring failure, search existing workspace runner/runtime/scripts and available environments and attempt recovery. Independent tasks continue after failure. Execute current_task only; use finish for task-local completion/failure and block for a global blocker. A text-only response terminates the goal, never advances a task. Only summarize once current_task is null. For numbered requests the queue is automatic.".into(),
         parameters: json!({"type":"object","properties":{
             "action":{"type":"string","enum":["start","finish","block","cancel"]},
             "overall_goal":{"type":"string"},"tasks":{"type":"array","minItems":2,"items":{"type":"string"}},

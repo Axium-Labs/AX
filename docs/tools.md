@@ -289,3 +289,20 @@ existing recovery placeholders.
 | Runtime scheduling and resource locks | `crates/core/src/scheduler.rs`, `crates/tool/src/resources.rs` |
 | Registry assembly, approval wiring | `crates/cli/src/main.rs` |
 | `/permissions`, `/tools` views | `crates/cli/src/tui/commands.rs`, `crates/cli/src/tui/commands/catalogs.rs` |
+
+## Shell and child runtime awareness
+
+The shell tool description and command schema expose the actual platform/shell.
+Windows uses `powershell.exe` (Windows PowerShell 5.1), not Bash or PowerShell 7.
+Commands with unquoted Bash heredoc `<<`, `&&` or `||` are rejected before process
+creation with PowerShell recovery guidance. Quoted string/Python contents are
+preserved; use PowerShell here-strings piped to Python or separate calls.
+Unix uses POSIX `sh`. The description is dynamic tool metadata, not a new system
+prompt.
+
+For isolated children, `Tool::fork_for_run` must rebind extension state to the
+provided `RunContext`. Built-in workspace tools reject file paths outside that
+child root, including symlink escapes, and resolve resource leases to the bound
+paths. Shell inherits installed runtimes/PATH but launches with the child cwd
+and child AX_HOME/session/memory environment. Tool execution keeps ordinary
+approval rules and the existing DAG. This does not introduce an OS container.

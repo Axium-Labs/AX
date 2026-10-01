@@ -1,6 +1,8 @@
 //! The provider-agnostic agent runtime kernel.
 
 mod budget;
+pub mod child;
+pub use child::{ChildCheckpoint, ChildHost, ChildOutcome, ChildRun, PreparedChild};
 mod context;
 mod scheduler;
 pub mod task_queue;
@@ -147,6 +149,9 @@ pub struct AgentKernel {
     task_queue: Option<task_queue::TaskQueue>,
     goal_id: Option<String>,
     parent_goal_id: Option<String>,
+    child_host: Option<Arc<dyn ChildHost>>,
+    child_run: Option<ChildRun>,
+    child_budget: Option<ExecutionBudget>,
 }
 
 impl AgentKernel {
@@ -175,6 +180,9 @@ impl AgentKernel {
             task_queue: None,
             goal_id: None,
             parent_goal_id: None,
+            child_host: None,
+            child_run: None,
+            child_budget: None,
         }
     }
 
@@ -267,6 +275,9 @@ impl AgentKernel {
             task_queue: None,
             goal_id: None,
             parent_goal_id: None,
+            child_host: None,
+            child_run: None,
+            child_budget: None,
         }
         .with_messages(messages);
         worker.parent_goal_id.clone_from(&self.goal_id);
@@ -712,9 +723,34 @@ impl AgentKernel {
             return Ok(cached);
         }
         (emit.lock().unwrap())(AgentEvent::TurnStarted);
-        let user = Message::user(input);
-        self.messages.push(user.clone());
-        self.raw_turn_messages.push(user);
+        if self.child_run.is_none() || !self.messages.iter().any(|m| m.role == model::Role::User) {
+            let user = Message::user(input);
+            self.messages.push(user.clone());
+            self.raw_turn_messages.push(user);
+        }
+        if self.child_run.is_some() {
+            // Never replay an interrupted call whose side effects are unknown.
+            let answered = self
+                .messages
+                .iter()
+                .filter_map(|m| m.tool_call_id.clone())
+                .collect::<std::collections::HashSet<_>>();
+            let pending = self
+                .messages
+                .iter()
+                .flat_map(|m| &m.tool_calls)
+                .filter(|call| !answered.contains(&call.id))
+                .map(|call| call.id.clone())
+                .collect::<Vec<_>>();
+            for id in pending {
+                let message = Message::tool(
+                    id,
+                    "Interrupted child call; result and side effects are unknown. Inspect workspace state before retrying.",
+                );
+                self.messages.push(message.clone());
+                self.raw_turn_messages.push(message);
+            }
+        }
         checkpoint(&self.raw_turn_messages)?;
         self.checkpoint_queue(checkpoint)?;
         let mut tool_specs = self
@@ -730,7 +766,9 @@ impl AgentKernel {
             })
             .collect::<Vec<_>>();
 
-        tool_specs.push(task_queue::spec());
+        if self.child_run.is_none() {
+            tool_specs.push(task_queue::spec());
+        }
         let mut model_failures = 0;
         let mut calls_used = 0;
         let mut steps_used = 0usize;
@@ -747,6 +785,17 @@ impl AgentKernel {
                 return Err(AgentError::StepLimit(self.budget.max_steps));
             }
             steps_used = steps_used.saturating_add(1);
+            if self.child_host.is_some()
+                && self.task_queue.as_ref().is_some_and(|q| {
+                    q.state == QueueState::Active
+                        && q.tasks
+                            .iter()
+                            .any(|t| t.status == task_queue::TaskStatus::Running)
+                })
+            {
+                self.execute_next_child(&emit, checkpoint).await?;
+                continue;
+            }
             let chars = self.context_budget().tool_result_chars();
             for message in &mut self.messages {
                 if message.role == model::Role::Tool
@@ -790,12 +839,21 @@ impl AgentKernel {
                 request_history.push(queue.summary_context());
             }
             let request_messages = request_context(&request_history, self.context_budget())?;
+            let child_summary = self.child_host.is_some()
+                && self
+                    .task_queue
+                    .as_ref()
+                    .is_some_and(|q| q.state == QueueState::Summarizing);
             let response = self
                 .provider
                 .complete_stream(
                     ModelRequest {
                         messages: request_messages,
-                        tools: tool_specs.clone(),
+                        tools: if child_summary {
+                            vec![]
+                        } else {
+                            tool_specs.clone()
+                        },
                     },
                     &mut on_delta,
                     &mut on_thinking,
@@ -808,7 +866,7 @@ impl AgentKernel {
                     response
                 }
                 Err(error)
-                    if queue_active
+                    if (queue_active || self.child_run.is_some())
                         && !matches!(
                             &error,
                             ModelError::Configuration(_)
@@ -828,6 +886,12 @@ impl AgentKernel {
             };
             let content = response.content;
             let tool_calls = response.tool_calls;
+            if child_summary && !tool_calls.is_empty() {
+                return Err(AgentError::GlobalBlocked(
+                    "all children are terminal; controller summary cannot execute more tools"
+                        .into(),
+                ));
+            }
             let mut assistant = Message::assistant(content.clone(), tool_calls.clone());
             assistant.usage = response.usage.map(|reported| serde_json::json!({"provider": self.provider.name(), "model": self.provider.model_id(), "reported": reported}));
             self.messages.push(assistant.clone());
@@ -835,6 +899,12 @@ impl AgentKernel {
             checkpoint(&self.raw_turn_messages)?;
 
             if tool_calls.is_empty() {
+                if self.child_run.is_some()
+                    && let Some(outcome) = child::terminal_outcome(&self.messages)
+                    && !outcome.success
+                {
+                    return Err(AgentError::Tool(ToolError::Execution(outcome.output)));
+                }
                 if let Some(queue) = self.task_queue.as_mut().filter(|q| q.active()) {
                     // A final response is goal-scoped. Never interpret it as one
                     // task's completion and ask again for every remaining item.
@@ -993,6 +1063,11 @@ impl AgentKernel {
     where
         H: FnMut(&[Message]) -> Result<(), AgentError> + Send,
     {
+        if let Some(run) = &self.child_run {
+            self.goal_id = Some(run.goal_id.clone());
+            self.task_queue = None;
+            return Ok(None);
+        }
         let cancel = matches!(&intent, GoalTurn::Cancel { .. });
         match intent {
             GoalTurn::New | GoalTurn::Start { .. } => {

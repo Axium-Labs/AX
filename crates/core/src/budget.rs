@@ -139,7 +139,7 @@ impl ContextBudget {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ExecutionBudget {
     /// Zero disables the corresponding limit.
     pub max_steps: usize,

@@ -288,3 +288,39 @@ so isolated worker contexts do not require manually created user sessions.
 
 Queue checkpoints use the existing AgentState path; see [context.md](context.md),
 [storage.md](storage.md) and [ADR 0008](adr/0008-durable-task-queue.md).
+
+### Automatic isolated child execution
+
+The CLI attaches a `ChildHost` to the kernel. Once a queue exists, the controller
+consumes its running/pending entries automatically, calls `AgentSupervisor::run_child`
+and collects each outcome. Children use the existing kernel loop; they do not
+receive the controller queue or siblings' messages. The controller makes a single
+text-only summary request after all children are terminal. Plain single-task
+turns keep their existing loop. Embedders can opt in via `with_child_host`.
+
+`LocalChildHost` provisions a unique session and memory database per child under
+`child-runs/<id>/workspace/.ax`. Git projects use detached worktrees, overlaid with
+the controller working-copy files and deletions. Non-Git projects or unavailable
+Git use independent directory snapshots. Large build/cache directories, controller
+stores and sibling history are excluded. Each workspace remains available with
+its result; changes are not merged automatically into the controller workspace.
+Runtime/scripts in the project and installed executables remain available.
+
+Child tools opt in through `Tool::fork_for_run(RunContext)`. File/image/search/patch
+tools bind relative paths and resource leases to the child workspace; shell
+subprocesses use an explicit cwd and child AX_HOME/session/memory environment.
+Memory operations of every scope use the child's own store. Unbound extensions
+and parent MCP processes are not silently shared; an extension must supply a
+child-scoped binding before it is available. Raw result readers are independent.
+Tool event IDs are prefixed with the child session to prevent UI collisions.
+
+Child failure, unresolved tool errors, workspace failure and child timeout record
+only that child's failure and advance the queue. Embedders can set independent
+limits through `with_child_execution_budget`; the CLI exposes `--child-timeout-secs`
+separately from the controller `--turn-timeout-secs`. Controller ExecutionBudget remains
+a global stop/suspend boundary. Controller cancellation/blocking stops consumption.
+Raw child history and a terminal receipt are persisted in the child's session.
+Resume reuses the saved child identity/cwd/history; terminal receipts prevent
+replaying a completed child if the controller checkpoint was interrupted.
+Unknown interrupted tool outcomes get placeholders for inspection, not automatic
+side-effect replay. Child final text is withheld from controller final output.

@@ -1,0 +1,645 @@
+use super::*;
+use model::{FunctionCall, ModelError, ModelProvider, ModelRequest, ModelResponse, ToolCall};
+use runtime_core::task_queue::TaskStatus;
+use runtime_core::{AgentEvent, AllowAll, ExecutionBudget, GoalTurn, QueueState};
+use serde_json::json;
+use std::sync::{Arc, Mutex};
+use tool::ToolRegistry;
+
+enum Behavior {
+    Normal,
+    FailFirst,
+    PauseSecond,
+    HangFirst,
+    SemanticPlan,
+}
+struct Provider {
+    requests: Mutex<Vec<ModelRequest>>,
+    behavior: Behavior,
+}
+#[async_trait]
+impl ModelProvider for Provider {
+    fn name(&self) -> &'static str {
+        "child-test"
+    }
+    fn model_id(&self) -> &'static str {
+        "child-test"
+    }
+    fn context_window(&self) -> usize {
+        100_000
+    }
+    async fn complete(&self, request: ModelRequest) -> Result<ModelResponse, ModelError> {
+        self.requests.lock().unwrap().push(request.clone());
+        if !request
+            .messages
+            .iter()
+            .any(|m| m.content.starts_with("[ax-child-runtime]"))
+        {
+            if matches!(self.behavior, Behavior::SemanticPlan)
+                && !request
+                    .messages
+                    .iter()
+                    .any(|m| m.content.starts_with("[ax-task-summary]"))
+            {
+                return Ok(call(
+                    "plan",
+                    "task_queue",
+                    json!({"action":"start","overall_goal":"independent work","tasks":(1..=23).map(|i| format!("child {i}")).collect::<Vec<_>>()}),
+                ));
+            }
+            return Ok(text("all children finished"));
+        }
+        let users = request
+            .messages
+            .iter()
+            .filter(|m| m.role == model::Role::User)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            users.len(),
+            1,
+            "only explicit task input, no sibling/controller history"
+        );
+        let input = &users[0].content;
+        assert!(
+            request
+                .messages
+                .iter()
+                .all(|m| !m.content.contains("controller secret"))
+        );
+        if matches!(self.behavior, Behavior::SemanticPlan) {
+            return Ok(text(&format!("outcome:{input}")));
+        }
+        if matches!(self.behavior, Behavior::HangFirst) && input == "child 2" {
+            return Ok(text("outcome:child 2"));
+        }
+        let phase = request
+            .messages
+            .iter()
+            .filter(|m| m.role == model::Role::Tool)
+            .count();
+        if matches!(self.behavior, Behavior::FailFirst) && input == "child 1" {
+            return Err(ModelError::Configuration(
+                "child 1 environment unavailable".into(),
+            ));
+        }
+        if (matches!(self.behavior, Behavior::PauseSecond) && input == "child 2" && phase == 1)
+            || (matches!(self.behavior, Behavior::HangFirst) && input == "child 1")
+        {
+            std::future::pending::<()>().await;
+        }
+        Ok(match phase {
+            0 => call(
+                "write",
+                "filesystem",
+                json!({"operation":"write","path":"result.txt","content":input}),
+            ),
+            1 => call(
+                "cwd",
+                "shell",
+                json!({"command":if cfg!(windows) { "(Get-Location).Path" } else { "pwd" }}),
+            ),
+            2 => call(
+                "remember",
+                "memory",
+                json!({"action":"set","scope":"session","key":"task","value":input,"evidence":input}),
+            ),
+            _ => text(&format!("outcome:{input}")),
+        })
+    }
+}
+fn text(content: &str) -> ModelResponse {
+    ModelResponse {
+        content: content.into(),
+        tool_calls: vec![],
+        usage: None,
+        finish_reason: None,
+    }
+}
+#[allow(clippy::needless_pass_by_value)]
+fn call(id: &str, name: &str, input: serde_json::Value) -> ModelResponse {
+    ModelResponse {
+        content: String::new(),
+        tool_calls: vec![ToolCall {
+            id: id.into(),
+            kind: "function".into(),
+            function: FunctionCall {
+                name: name.into(),
+                arguments: input.to_string(),
+            },
+        }],
+        usage: None,
+        finish_reason: None,
+    }
+}
+fn provider(fail_first: bool, pause_second: bool, hang_first: bool) -> Arc<Provider> {
+    Arc::new(Provider {
+        requests: Mutex::new(vec![]),
+        behavior: if fail_first {
+            Behavior::FailFirst
+        } else if pause_second {
+            Behavior::PauseSecond
+        } else if hang_first {
+            Behavior::HangFirst
+        } else {
+            Behavior::Normal
+        },
+    })
+}
+struct Fixture {
+    root: PathBuf,
+    host: Arc<LocalChildHost>,
+}
+impl Fixture {
+    fn new() -> Self {
+        let root = std::env::temp_dir().join(format!("ax-child-test-{}", uuid::Uuid::new_v4()));
+        let source = root.join("source");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::write(source.join("project.txt"), "controller baseline").unwrap();
+        let host = Arc::new(LocalChildHost {
+            source,
+            root: root.join("children"),
+            excluded: vec![],
+        });
+        Self { root, host }
+    }
+    fn kernel(&self, provider: Arc<dyn ModelProvider>) -> AgentKernel {
+        let mut tools = ToolRegistry::new();
+        tools.register(tool::FilesystemTool);
+        tools.register(tool::ShellTool);
+        tools.register(crate::memory_tool::MemoryTool::default());
+        AgentKernel::new(provider, tools, Arc::new(AllowAll)).with_child_host(self.host.clone())
+    }
+}
+impl Drop for Fixture {
+    fn drop(&mut self) {
+        std::fs::remove_dir_all(&self.root).unwrap();
+    }
+}
+fn input(count: usize) -> String {
+    format!(
+        "Run independent children\n{}",
+        (1..=count)
+            .map(|i| format!("{i}. child {i}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    )
+}
+fn check_isolation(kernel: &AgentKernel, provider: &Provider, count: usize) {
+    let queue = kernel.task_queue().unwrap();
+    assert_eq!(queue.state, QueueState::Completed);
+    let mut sessions = std::collections::HashSet::new();
+    let mut dirs = std::collections::HashSet::new();
+    let mut scopes = std::collections::HashSet::new();
+    for (index, task) in queue.tasks.iter().enumerate() {
+        let run = task.child.as_ref().unwrap();
+        assert!(sessions.insert(&run.session_id));
+        assert!(dirs.insert(&run.cwd));
+        assert!(scopes.insert(&run.memory_scope));
+        if task.status == TaskStatus::Failed {
+            continue;
+        }
+        let expected = format!("child {}", index + 1);
+        assert_eq!(
+            std::fs::read_to_string(run.cwd.join("result.txt")).unwrap(),
+            expected
+        );
+        let store = MemoryStore::open(run.cwd.join(".ax/child.sqlite3")).unwrap();
+        assert!(store.session(&run.session_id).unwrap().is_some());
+        let memory = store
+            .scoped_memories(memory::MemoryScope::Session, &run.session_id)
+            .unwrap();
+        assert_eq!(memory.len(), 1);
+        assert_eq!(memory[0].value, expected);
+        assert!(
+            store
+                .scoped_memories(memory::MemoryScope::Global, "global")
+                .unwrap()
+                .is_empty()
+        );
+        let messages = store
+            .load_messages(&run.session_id, None, u32::MAX)
+            .unwrap();
+        let cwd = messages
+            .iter()
+            .find(|m| m.metadata["tool_call_id"] == "cwd")
+            .unwrap();
+        let result: tool::ToolResult = serde_json::from_str(&cwd.content).unwrap();
+        assert!(
+            result
+                .raw_output
+                .contains(&run.cwd.to_string_lossy().to_string())
+        );
+        assert_eq!(
+            messages
+                .iter()
+                .filter(|m| m.role == memory::MessageRole::User)
+                .count(),
+            1
+        );
+    }
+    assert_eq!(sessions.len(), count);
+    let requests = provider.requests.lock().unwrap();
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|r| !r
+                .messages
+                .iter()
+                .any(|m| m.content.starts_with("[ax-child-runtime]")))
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn twenty_three_children_automatically_execute_in_isolated_contexts_and_finish_once() {
+    let fixture = Fixture::new();
+    let provider = provider(false, false, false);
+    let mut kernel = fixture.kernel(provider.clone());
+    kernel.push_context(Message::user("controller secret: never pass to children"));
+    kernel.push_context(Message::system("[retrieved-memory] controller secret"));
+    let mut events = vec![];
+    assert_eq!(
+        kernel
+            .run_turn(input(23), |event| events.push(event))
+            .await
+            .unwrap(),
+        "all children finished"
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| matches!(e, AgentEvent::ContentDelta { .. }))
+            .count(),
+        1
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| matches!(e, AgentEvent::TurnFinished))
+            .count(),
+        1
+    );
+    assert!(
+        kernel
+            .task_queue()
+            .unwrap()
+            .tasks
+            .iter()
+            .all(|t| t.status == TaskStatus::Completed)
+    );
+    let tool_ids = events
+        .iter()
+        .filter_map(|event| match event {
+            AgentEvent::ToolStarted { id, .. } => Some(id),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        tool_ids.len(),
+        tool_ids
+            .iter()
+            .collect::<std::collections::HashSet<_>>()
+            .len()
+    );
+    check_isolation(&kernel, &provider, 23);
+    assert!(!fixture.host.source.join("result.txt").exists());
+}
+
+#[tokio::test]
+async fn first_child_failure_does_not_stop_twenty_two_independent_children() {
+    let fixture = Fixture::new();
+    let provider = provider(true, false, false);
+    let mut kernel = fixture.kernel(provider.clone());
+    kernel.run_turn(input(23), |_| {}).await.unwrap();
+    assert_eq!(
+        kernel.task_queue().unwrap().tasks[0].status,
+        TaskStatus::Failed
+    );
+    assert!(
+        kernel.task_queue().unwrap().tasks[0]
+            .failure_reason
+            .as_ref()
+            .unwrap()
+            .contains("environment unavailable")
+    );
+    assert!(
+        kernel.task_queue().unwrap().tasks[1..]
+            .iter()
+            .all(|t| t.status == TaskStatus::Completed)
+    );
+    check_isolation(&kernel, &provider, 23);
+}
+
+#[tokio::test]
+async fn reconnect_resumes_running_child_history_and_remaining_queue_position() {
+    let fixture = Fixture::new();
+    let first_provider = provider(false, true, false);
+    let mut first = fixture.kernel(first_provider);
+    let saved = Arc::new(Mutex::new(vec![]));
+    let saved_callback = saved.clone();
+    // Generous budget: child 1 must reach a terminal state while child 2 hangs.
+    // A tight timeout here flakes when the suite runs tests in parallel.
+    assert!(
+        tokio::time::timeout(
+            std::time::Duration::from_secs(20),
+            first.run_turn_checkpointed(
+                input(23),
+                |_| {},
+                |messages| {
+                    *saved_callback.lock().unwrap() = messages.to_vec();
+                    Ok(())
+                }
+            )
+        )
+        .await
+        .is_err()
+    );
+    let queue = first.task_queue().unwrap();
+    assert_eq!(queue.tasks[0].status, TaskStatus::Completed);
+    assert_eq!(queue.tasks[1].status, TaskStatus::Running);
+    let second_run = queue.tasks[1].child.clone().unwrap();
+    let goal = queue.goal_id.clone();
+    drop(first);
+    let resumed_provider = provider(false, false, false);
+    let mut restored = fixture
+        .kernel(resumed_provider.clone())
+        .with_messages(saved.lock().unwrap().clone());
+    restored
+        .run_goal_turn("continue", GoalTurn::Resume { goal_id: goal }, |_| {})
+        .await
+        .unwrap();
+    assert_eq!(
+        restored.task_queue().unwrap().tasks[1].child.as_ref(),
+        Some(&second_run)
+    );
+    assert!(resumed_provider.requests.lock().unwrap().iter().all(|r| {
+        !r.messages
+            .iter()
+            .any(|m| m.role == model::Role::User && m.content == "child 1")
+    }));
+    check_isolation(&restored, &resumed_provider, 23);
+}
+
+#[tokio::test]
+async fn child_timeout_ends_only_that_child() {
+    let fixture = Fixture::new();
+    let provider = provider(false, false, true);
+    let mut kernel = fixture
+        .kernel(provider.clone())
+        .with_child_execution_budget(ExecutionBudget {
+            turn_timeout_secs: 1,
+            ..ExecutionBudget::default()
+        });
+    kernel.run_turn(input(2), |_| {}).await.unwrap();
+    let queue = kernel.task_queue().unwrap();
+    assert_eq!(queue.tasks[0].status, TaskStatus::Failed);
+    assert!(
+        queue.tasks[0]
+            .failure_reason
+            .as_ref()
+            .unwrap()
+            .contains("turn timeout")
+    );
+    assert_eq!(queue.tasks[1].status, TaskStatus::Completed);
+    assert_eq!(
+        provider
+            .requests
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|r| !r
+                .messages
+                .iter()
+                .any(|m| m.content.starts_with("[ax-child-runtime]")))
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn durable_child_receipt_prevents_reexecution_after_controller_checkpoint_failure() {
+    let fixture = Fixture::new();
+    let mut first = fixture.kernel(provider(false, false, false));
+    let mut saved = vec![];
+    let result = first
+        .run_turn_checkpointed(
+            input(2),
+            |_| {},
+            |messages| {
+                let queue = messages
+                    .iter()
+                    .rev()
+                    .find_map(|m| {
+                        m.content
+                            .strip_prefix(runtime_core::task_queue::STATE_PREFIX)
+                    })
+                    .map(|s| {
+                        serde_json::from_str::<runtime_core::task_queue::TaskQueue>(s).unwrap()
+                    });
+                if queue
+                    .as_ref()
+                    .is_some_and(|q| q.tasks[0].status == TaskStatus::Completed)
+                {
+                    return Err(AgentError::Persistence(
+                        "simulated disconnect before controller commit".into(),
+                    ));
+                }
+                saved = messages.to_vec();
+                Ok(())
+            },
+        )
+        .await;
+    assert!(result.is_err());
+    let goal = first.goal_id().unwrap().to_owned();
+    let resumed_provider = provider(false, false, false);
+    let mut restored = fixture
+        .kernel(resumed_provider.clone())
+        .with_messages(saved);
+    restored
+        .run_goal_turn("continue", GoalTurn::Resume { goal_id: goal }, |_| {})
+        .await
+        .unwrap();
+    assert!(resumed_provider.requests.lock().unwrap().iter().all(|r| {
+        !r.messages
+            .iter()
+            .any(|m| m.role == model::Role::User && m.content == "child 1")
+    }));
+    check_isolation(&restored, &resumed_provider, 2);
+}
+
+#[tokio::test]
+async fn git_children_have_separate_worktrees_with_controller_working_copy_changes() {
+    let fixture = Fixture::new();
+    let source = &fixture.host.source;
+    for args in [
+        vec!["init"],
+        vec!["config", "user.email", "test@example.invalid"],
+        vec!["config", "user.name", "AX Test"],
+        vec!["add", "project.txt"],
+        vec!["commit", "-m", "baseline"],
+    ] {
+        let args = args.iter().map(std::ffi::OsStr::new).collect::<Vec<_>>();
+        assert!(git(source, &args).unwrap().status.success());
+    }
+    std::fs::write(source.join("project.txt"), "uncommitted controller input").unwrap();
+    let controller = fixture.kernel(provider(false, false, false));
+    let one = fixture
+        .host
+        .prepare(&controller, "child 1", None)
+        .await
+        .unwrap();
+    let two = fixture
+        .host
+        .prepare(&controller, "child 2", None)
+        .await
+        .unwrap();
+    assert_ne!(one.run.cwd, two.run.cwd);
+    assert!(one.run.cwd.join(".git").is_file());
+    assert!(two.run.cwd.join(".git").is_file());
+    assert_eq!(
+        std::fs::read_to_string(one.run.cwd.join("project.txt")).unwrap(),
+        "uncommitted controller input"
+    );
+    std::fs::write(one.run.cwd.join("project.txt"), "first child changes").unwrap();
+    assert_eq!(
+        std::fs::read_to_string(two.run.cwd.join("project.txt")).unwrap(),
+        "uncommitted controller input"
+    );
+    assert_eq!(
+        std::fs::read_to_string(source.join("project.txt")).unwrap(),
+        "uncommitted controller input"
+    );
+}
+
+#[tokio::test]
+async fn model_created_twenty_three_task_queue_executes_children_without_finish_controls() {
+    let fixture = Fixture::new();
+    let mut provider = provider(false, false, false);
+    Arc::get_mut(&mut provider).unwrap().behavior = Behavior::SemanticPlan;
+    let mut kernel = fixture.kernel(provider.clone());
+    let mut events = vec![];
+    kernel
+        .run_turn("Execute independent jobs", |event| events.push(event))
+        .await
+        .unwrap();
+    let queue = kernel.task_queue().unwrap();
+    assert_eq!(queue.tasks.len(), 23);
+    assert!(
+        queue
+            .tasks
+            .iter()
+            .all(|task| task.status == TaskStatus::Completed && task.child.is_some())
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event, AgentEvent::TurnFinished))
+            .count(),
+        1
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event, AgentEvent::ContentDelta { .. }))
+            .count(),
+        1
+    );
+    assert_eq!(provider.requests.lock().unwrap().len(), 25); // plan + 23 children + summary
+}
+
+struct ToolFailureProvider {
+    inner: Arc<Provider>,
+}
+#[async_trait]
+impl ModelProvider for ToolFailureProvider {
+    fn name(&self) -> &'static str {
+        "tool-failure-test"
+    }
+    fn model_id(&self) -> &'static str {
+        "tool-failure-test"
+    }
+    fn context_window(&self) -> usize {
+        100_000
+    }
+    async fn complete(&self, request: ModelRequest) -> Result<ModelResponse, ModelError> {
+        if request
+            .messages
+            .iter()
+            .any(|m| m.role == model::Role::User && m.content == "child 1")
+        {
+            return Ok(
+                if request.messages.iter().any(|m| m.role == model::Role::Tool) {
+                    text("this child could not complete")
+                } else {
+                    call("fail", "shell", json!({"command":"exit 7"}))
+                },
+            );
+        }
+        self.inner.complete(request).await
+    }
+}
+
+#[tokio::test]
+async fn unresolved_child_tool_failure_is_failed_not_a_successful_text_answer() {
+    let fixture = Fixture::new();
+    let base = provider(false, false, false);
+    let mut kernel = fixture.kernel(Arc::new(ToolFailureProvider { inner: base }));
+    kernel.run_turn(input(2), |_| {}).await.unwrap();
+    let queue = kernel.task_queue().unwrap();
+    assert_eq!(queue.tasks[0].status, TaskStatus::Failed);
+    assert!(
+        queue.tasks[0]
+            .failure_reason
+            .as_ref()
+            .unwrap()
+            .contains("exit_code: 7")
+    );
+    assert_eq!(queue.tasks[1].status, TaskStatus::Completed);
+}
+
+#[tokio::test]
+async fn child_workspace_excludes_controller_store_and_rejects_cross_workspace_file_access() {
+    use tool::Tool;
+    let mut fixture = Fixture::new();
+    let database = fixture.host.source.join("memory.sqlite3");
+    let sessions = fixture.host.source.join("sessions");
+    std::fs::write(&database, "controller private memory").unwrap();
+    std::fs::create_dir_all(&sessions).unwrap();
+    std::fs::write(sessions.join("sibling.jsonl"), "sibling tool history").unwrap();
+    Arc::get_mut(&mut fixture.host).unwrap().excluded = vec![database, sessions];
+    let controller = fixture.kernel(provider(false, false, false));
+    let child = fixture
+        .host
+        .prepare(&controller, "isolated files", None)
+        .await
+        .unwrap();
+    assert!(!child.run.cwd.join("memory.sqlite3").exists());
+    assert!(!child.run.cwd.join("sessions").exists());
+    let context = tool::RunContext {
+        cwd: child.run.cwd.clone(),
+        session_id: child.run.session_id.clone(),
+        memory_scope: child.run.memory_scope.clone(),
+        input: "isolated files".into(),
+    };
+    let filesystem = tool::FilesystemTool.fork_for_run(&context).unwrap();
+    assert!(filesystem.execute(json!({"operation":"write","path":fixture.host.source.join("project.txt"),"content":"leaked"})).await.is_err());
+    assert!(
+        filesystem
+            .execute(json!({"operation":"write","path":"../sibling.txt","content":"leaked"}))
+            .await
+            .is_err()
+    );
+    filesystem
+        .execute(json!({"operation":"write","path":"child.txt","content":"owned"}))
+        .await
+        .unwrap();
+    assert_eq!(
+        std::fs::read_to_string(child.run.cwd.join("child.txt")).unwrap(),
+        "owned"
+    );
+    assert_eq!(
+        std::fs::read_to_string(fixture.host.source.join("project.txt")).unwrap(),
+        "controller baseline"
+    );
+}

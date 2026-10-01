@@ -1,6 +1,8 @@
 //! Tool contracts, registry, and lightweight built-in tools.
 
 mod filesystem;
+mod workspace;
+pub use workspace::{RunContext, WorkspaceTool};
 mod result;
 pub use result::{ResultReader, ToolResult, path_error};
 mod patch;
@@ -70,6 +72,11 @@ impl From<std::io::Error> for ToolError {
 
 #[async_trait]
 pub trait Tool: Send + Sync {
+    /// Opt in only when all state is rebound to the child's scope. Unbound tools
+    /// (including parent MCP processes) are not silently shared across children.
+    fn fork_for_run(&self, _context: &RunContext) -> Option<Arc<dyn Tool>> {
+        None
+    }
     fn name(&self) -> &str;
     fn description(&self) -> &str;
     fn input_schema(&self) -> Value;
@@ -111,6 +118,17 @@ impl ToolRegistry {
     #[must_use]
     pub fn get(&self, name: &str) -> Option<Arc<dyn Tool>> {
         self.tools.get(name).cloned()
+    }
+
+    #[must_use]
+    pub fn fork_for_run(&self, context: &RunContext) -> Self {
+        let tools = self
+            .tools
+            .values()
+            .filter_map(|tool| tool.fork_for_run(context))
+            .map(|tool| (tool.name().to_owned(), tool))
+            .collect();
+        Self { tools }
     }
 
     pub fn remove(&mut self, name: &str) {

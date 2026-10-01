@@ -160,3 +160,15 @@ resuming a blocked/completed/cancelled goal produces no duplicate output events.
 Full queue snapshots and archived goals are removed from model context.
 Worker contexts also remove the controller queue. Compaction uses the existing
 pipeline.
+
+Automatic child runs receive only their explicit task input plus small runtime
+metadata (session, cwd, memory scope, platform and shell), never controller or
+sibling conversation/skill/retrieved-memory state. A resumed child reloads only
+its own raw history and raw result reader. Child queue tools are disabled so a
+child cannot accidentally orchestrate the controller queue. Parent progress
+remains compact; the summary includes child workspace/session references and
+concise results, without full child tool histories.
+
+`--child-timeout-secs` limits each isolated child independently; it defaults to
+unlimited and never implicitly ends the controller. `--turn-timeout-secs` remains
+the global turn deadline. These options also apply to ACP child dispatch.

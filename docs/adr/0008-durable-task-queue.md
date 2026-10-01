@@ -35,3 +35,13 @@ No new planner, scheduler, database schema, dependency or startup work. Latest
 queue state is restored separately from bounded conversation context and survives
 provider changes. Semantic decomposition and dependency-based skipping still use
 the execution model's judgement. Recovery never blindly replays tool side effects.
+
+## Child execution extension
+
+A queue can attach a composition-root `ChildHost` to provision independent child
+sessions, workspaces and memory stores. The controller dispatches entries through
+`AgentSupervisor::run_child`, reusing the existing kernel loop rather than a new
+executor. Tools explicitly bind child scope instead of sharing parent session
+state. Child terminal receipts precede controller advancement for reconnect
+recovery. Local child failures advance independent work; global controller stops
+remain terminal/suspended as before. No large planner or fixed prompt is added.

@@ -1,3 +1,4 @@
+mod child_runtime;
 use std::{
     collections::HashSet,
     fs,
@@ -93,6 +94,9 @@ struct Cli {
     /// Turn timeout in seconds; 0 (default) means unlimited.
     #[arg(long, global = true, default_value_t = 0)]
     turn_timeout_secs: u64,
+    /// Timeout for each isolated child; does not end the controller. 0 is unlimited.
+    #[arg(long, global = true, default_value_t = 0)]
+    child_timeout_secs: u64,
     /// Tool timeout in seconds; 0 (default) means unlimited.
     #[arg(long, global = true, default_value_t = 0)]
     tool_timeout_secs: u64,
@@ -259,6 +263,7 @@ struct ReplState {
     permissions: PermissionStore,
     execution_budget: runtime_core::ExecutionBudget,
     next_goal_turn: runtime_core::GoalTurn,
+    child_timeout_secs: u64,
     evolution: Option<::evolution::Handle>,
     evolution_revision: u64,
 }
@@ -319,6 +324,7 @@ impl ReplState {
             permissions: PermissionStore::default(),
             execution_budget: runtime_core::ExecutionBudget::default(),
             next_goal_turn: runtime_core::GoalTurn::New,
+            child_timeout_secs: 0,
             evolution: None,
             evolution_revision: 0,
         })
@@ -389,6 +395,7 @@ impl ReplState {
             &location.root,
         )?;
         next.execution_budget = self.execution_budget;
+        next.child_timeout_secs = self.child_timeout_secs;
         if location.root.is_dir() {
             std::env::set_current_dir(&location.root)?;
         } else {
@@ -1223,6 +1230,7 @@ async fn main() -> Result<()> {
             let selection = model_selection::require_resolved(&cli)?;
             let mut state = ReplState::new(data_dir, skills_dir, cli.mcp_config.clone())?;
             state.execution_budget = budget;
+            state.child_timeout_secs = cli.child_timeout_secs;
             if let Some(session) = session
                 && !state.open_session(session, &context_budget(&selection, &[]))?
             {
@@ -1276,7 +1284,7 @@ async fn main() -> Result<()> {
                 cli.mcp_config.clone(),
                 cli.allow_dangerous,
                 cli.codex_auth.clone(),
-                budget,
+                (budget, cli.child_timeout_secs),
             )
             .await?;
         }
@@ -1437,6 +1445,24 @@ where
     } else {
         state.ensure_session(prompt)?;
     }
+    let child_host = Arc::new(child_runtime::LocalChildHost {
+        source: state.project_root.clone(),
+        root: state.data_dir.join("child-runs"),
+        excluded: vec![
+            database_path(&state.data_dir),
+            state.data_dir.join("sessions"),
+            state.data_dir.join("evolution"),
+        ],
+    });
+    let runtime = state.runtime.take().expect("runtime initialized");
+    state.runtime = Some(
+        runtime
+            .with_child_host(child_host)
+            .with_child_execution_budget(runtime_core::ExecutionBudget {
+                turn_timeout_secs: state.child_timeout_secs,
+                ..state.execution_budget
+            }),
+    );
     // Bind memory access to the current session and user request on every turn.
     let global_root = config::ax_home();
     fs::create_dir_all(&global_root)?;
@@ -1830,6 +1856,22 @@ mod project_root_tests {
 #[cfg(test)]
 mod goal_argument_tests {
     use super::*;
+
+    #[test]
+    fn child_timeout_is_separate_from_controller_turn_timeout() {
+        let cli = Cli::try_parse_from([
+            "ax",
+            "--child-timeout-secs",
+            "2",
+            "--turn-timeout-secs",
+            "60",
+            "run",
+            "goal",
+        ])
+        .unwrap();
+        assert_eq!(cli.child_timeout_secs, 2);
+        assert_eq!(execution_budget(&cli).turn_timeout_secs, 60);
+    }
 
     #[test]
     fn resume_requires_session_and_explicit_goal() {
