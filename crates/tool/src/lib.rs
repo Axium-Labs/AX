@@ -38,6 +38,8 @@ pub enum SafetyLevel {
 
 #[derive(Debug, Error)]
 pub enum ToolError {
+    #[error("global execution blocker: {0}")]
+    GlobalBlocked(String),
     #[error("unknown tool: {0}")]
     Unknown(String),
     #[error("invalid tool input: {0}")]

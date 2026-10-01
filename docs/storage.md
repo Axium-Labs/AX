@@ -206,12 +206,21 @@ legacy `config.toml`, saves the result as `config.json`, and continues.
 ## Durable task queues
 
 Queue checkpoints are ordinary `AgentState` messages prefixed `[ax-task-queue]`.
-They include the original overall goal, ordered tasks and statuses, outcomes,
-failure reasons, recovery attempts and summary/stop state. Pending/running
-entries determine the remaining queue. They use the existing JSONL-first write
-path and agent-state index; no new schema or external state files are needed.
-`latest_agent_state(session, prefix)` loads the latest checkpoint independently
-of recent-history pages and compression watermarks. Session restore fetches this
-state after context selection, and runtime construction removes full checkpoints
-from model-visible messages. Provider changes also retain the queue. Interrupted
-tool calls still use existing recovery placeholders and do not replay side effects.
+They include `goal_id`, optional `parent_goal_id`, queue lifecycle state, original
+goal, ordered tasks, failure reasons, recovery attempts and cached final response.
+Pending/running entries determine remaining work. The existing JSONL-first path
+and agent-state index persist this data without a new database schema.
+
+`latest_agent_state(session, prefix)` retrieves the latest state independently of
+history pages and compaction. Loading a session restores metadata but does not
+implicitly resume it: a new user goal supersedes an active/suspended queue and
+archives it under `[ax-task-queue-archive]`, then writes a fresh goal state head.
+Explicit resume requires the saved goal ID. Legacy snapshots acquire a stable ID
+when restored. Blocked/cancelled/completed states stay terminal across reconnect;
+execution budgets suspend the goal. ACP user cancellation waits for the aborted
+prompt task before persisting cancellation, preventing late checkpoints from
+resurrecting the queue. Disconnect alone preserves resumable work.
+
+Full state and archive messages are excluded from model-visible context. Provider
+changes preserve queue metadata. Interrupted tool calls retain existing recovery
+placeholders and do not replay side effects.

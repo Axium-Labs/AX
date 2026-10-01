@@ -153,6 +153,10 @@ space and the queue tool schema are charged to the existing `ContextBudget`;
 progress is reserved before optional history selection.
 
 The final summary request receives terminal statuses and concise outcomes once,
-after every task is completed, failed or skipped. Earlier task responses are
-checkpointed as raw history but their content deltas are withheld from final
-answer output. Compaction continues to use the existing pipeline.
+after every task is completed, failed or skipped. Explicit task completion controls
+advance execution; a text-only answer with unfinished tasks blocks the goal and
+stops further model calls. Terminal response text is cached in durable state;
+resuming a blocked/completed/cancelled goal produces no duplicate output events.
+Full queue snapshots and archived goals are removed from model context.
+Worker contexts also remove the controller queue. Compaction uses the existing
+pipeline.

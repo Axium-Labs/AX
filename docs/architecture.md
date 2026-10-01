@@ -257,26 +257,34 @@ Step-by-step guidance lives in [development.md](development.md).
 
 ## Lightweight long-task orchestration
 
-The existing model/tool Agent Loop and tool-round DAG remain the execution
-mechanisms. A small internal Task Queue recognizes top-level numbered/bulleted
-multi-task requests directly; for semantic subtasks the execution model initializes
-the queue through the `task_queue` tool schema, without a separate planner call
-or a fixed system prompt. A running queue is never replaced on resume. Tasks have
-pending/running/completed/failed/skipped states. Queue updates are isolated from
-ordinary tool rounds, so they cannot race with task execution.
+The existing Agent Loop and tool-round DAG remain the execution mechanisms. A
+small Task Queue recognizes top-level numbered/bulleted multi-task requests;
+the execution model can also initialize semantic subtasks through `task_queue`.
+There is no separate planner call or fixed orchestration system prompt.
 
-A text response finishes the current task, then advances to the next. A task
-with unresolved tool errors receives a recovery opportunity before being marked
-failed. Explicit failed outcomes also require recovery first. Recovery guidance
-asks the model to search workspace runners, runtimes, scripts and available
-environments before abandoning dependencies. Tool timeouts are local failures;
-step/tool-call/turn-time limits remain global `ExecutionBudget` limits. Transient
-provider failures get one retry before the current task fails and independent
-work continues. Provider configuration or authentication failures and persistence
-failures remain global blockers. An explicit `cancel`, `/cancel`, `取消` or
-`取消长任务` input cancels a saved queue without another model request.
+Queues belong to a `goal_id`, not a session. Ordinary user turns start a new goal,
+supersede and archive any resumable old queue, and persist a fresh state head.
+`GoalTurn::Resume` restores only the explicitly requested saved goal ID. Budget
+interruptions suspend that goal for explicit resume. CLI exposes `ax run --session
+<ID> --resume-goal <GOAL_ID> <PROMPT>` and `--cancel-goal`; ACP uses prompt metadata
+`_meta.axGoal` with `action` new/start/resume/cancel and `goal_id` where applicable.
+Successful ACP prompt responses return the goal ID in `_meta.axGoal.goal_id`.
 
-The turn emits its final answer only after all tasks reach terminal states and a
-summary model response is checkpointed. Queue state persists through the existing
-AgentState path; see [context.md](context.md) and [storage.md](storage.md), and
-[ADR 0008](adr/0008-durable-task-queue.md).
+Tasks have pending/running/completed/failed/skipped states. Explicit `finish`
+controls advance the queue; task failures require a recovery opportunity first.
+Tool failures and tool timeouts remain local, allowing independent tasks to
+continue. Recovery searches workspace runners, runtimes, scripts and available
+environments. Provider failures retry once within the goal; configuration,
+authentication, persistence and exhausted provider retries block the goal.
+
+Queue states are active/summarizing/suspended/completed/blocked/cancelled/superseded.
+Explicit global `block`/`cancel` controls and typed `ToolError::GlobalBlocked`
+stop queue consumption immediately. A text-only response never advances a task:
+with unfinished tasks it terminates the goal as blocked; after terminal tasks it
+completes the summary. The terminal response is checkpointed before output and
+cached for reconnect without another model call or repeated response events.
+Worker forks strip controller queue state and retain only parent goal identity,
+so isolated worker contexts do not require manually created user sessions.
+
+Queue checkpoints use the existing AgentState path; see [context.md](context.md),
+[storage.md](storage.md) and [ADR 0008](adr/0008-durable-task-queue.md).

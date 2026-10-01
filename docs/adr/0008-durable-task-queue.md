@@ -19,6 +19,16 @@ execution budgets global. Gate final content output and TurnFinished on terminal
 queue state plus the final summary, with cancellation and global errors allowed
 to stop execution.
 
+## Lifecycle correction
+
+Session identity is storage ownership, not goal identity. Every new top-level
+user goal gets a fresh goal ID and supersedes/archives resumable prior work.
+Resume is an explicit operation matching that ID. Task completion is an explicit
+queue transition, never inferred from a final text response. Global blockers,
+fatal errors and cancellation stop queue consumption and cache one terminal
+response; budgets suspend work. Task-local failures continue independent tasks.
+Worker forks isolate queue metadata while recording parent goal identity.
+
 ## Consequences
 
 No new planner, scheduler, database schema, dependency or startup work. Latest

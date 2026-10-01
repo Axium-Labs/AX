@@ -380,7 +380,11 @@ fn envelope(result: &Result<ToolOutput, ToolError>) -> tool::ToolResult {
         | Err(ToolError::Execution(text) | ToolError::InvalidInput(text)) => text.clone(),
         Err(error) => error.to_string(),
     };
-    tool::ToolResult::new(result.is_ok(), raw)
+    let mut envelope = tool::ToolResult::new(result.is_ok(), raw);
+    if let Err(ToolError::GlobalBlocked(reason)) = result {
+        envelope.global_blocker = Some(reason.clone());
+    }
+    envelope
 }
 
 #[derive(Default)]

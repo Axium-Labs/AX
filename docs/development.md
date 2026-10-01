@@ -123,7 +123,7 @@ git push origin v0.2.0
 
 The workflow:
 
-1. Builds the release binary for 6 targets (Windows x86_64 + ARM64, Linux
+1. For v0.2.7, builds Windows x64 only. Other tags build the release binary for 6 targets (Windows x86_64 + ARM64, Linux
    musl x86_64 + ARM64, macOS x86_64 + ARM64). Linux musl targets use
    `cargo zigbuild`.
 2. Smoke-tests each binary (`ax --version`); the aarch64 musl target runs

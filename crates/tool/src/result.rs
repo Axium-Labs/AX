@@ -61,6 +61,9 @@ impl crate::Tool for ResultReader {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ToolResult {
+    /// Explicit goal-wide failures stop queue consumption; ordinary errors are local.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub global_blocker: Option<String>,
     pub status: String,
     pub summary: String,
     pub diagnostics: Vec<Value>,
@@ -109,7 +112,7 @@ impl ToolResult {
                     .map(|line| json!({"message":line}))
                     .collect()
             });
-        Self { status: if success { "success" } else { "error" }.into(),
+        Self { global_blocker: None, status: if success { "success" } else { "error" }.into(),
             summary: if success { "Operation succeeded" } else { "Operation failed; repair the reported diagnostic locally and run the smallest relevant check before broader tests" }.into(),
             diagnostics, raw_output, truncated: parsed.as_ref().and_then(|v| v["truncated"].as_bool()).unwrap_or(false) }
     }
@@ -132,7 +135,7 @@ impl ToolResult {
             let text=diagnostic.to_string();
             if text.chars().count()>diagnostic_chars { json!({"message":text.chars().take(diagnostic_chars).collect::<String>(),"truncated":true}) } else { diagnostic.clone() }
         }).collect();
-        json!({"status":self.status,"summary":self.summary,"diagnostics":diagnostics,
+        json!({"global_blocker":self.global_blocker,"status":self.status,"summary":self.summary,"diagnostics":diagnostics,
             "output":clipped,"truncated":self.truncated || clipped.len()<cleaned.len() || cleaned != pretty,
             "raw_output_available":true}).to_string()
     }

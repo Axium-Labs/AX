@@ -3,9 +3,54 @@ use model::{FunctionSpec, Message, ToolSpec};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+pub const ARCHIVE_PREFIX: &str = "[ax-task-queue-archive]\n";
 pub const STATE_PREFIX: &str = "[ax-task-queue]\n";
 pub(crate) const PROGRESS_PREFIX: &str = "[ax-progress]\n";
 pub(crate) const TOOL_NAME: &str = "task_queue";
+
+/// Explicit caller intent; loading a session never implies resuming its goal.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(tag = "action", rename_all = "snake_case")]
+pub enum GoalTurn {
+    #[default]
+    New,
+    Start {
+        goal_id: String,
+    },
+    Resume {
+        goal_id: String,
+    },
+    Cancel {
+        goal_id: String,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum QueueState {
+    #[default]
+    Active,
+    Summarizing,
+    Suspended,
+    Completed,
+    Blocked,
+    Cancelled,
+    Superseded,
+}
+
+pub(crate) fn fresh_goal_id() -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    format!(
+        "goal-{:x}-{nanos:x}-{:x}",
+        std::process::id(),
+        COUNTER.fetch_add(1, Ordering::Relaxed)
+    )
+}
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -29,6 +74,14 @@ pub struct QueuedTask {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TaskQueue {
+    #[serde(default)]
+    pub goal_id: String,
+    #[serde(default)]
+    pub parent_goal_id: Option<String>,
+    #[serde(default)]
+    pub state: QueueState,
+    #[serde(default)]
+    pub final_response: Option<String>,
     pub overall_goal: String,
     pub tasks: Vec<QueuedTask>,
     pub summarized: bool,
@@ -38,6 +91,10 @@ pub struct TaskQueue {
 impl TaskQueue {
     pub(crate) fn new(goal: String, titles: Vec<String>) -> Self {
         let mut queue = Self {
+            goal_id: fresh_goal_id(),
+            parent_goal_id: None,
+            state: QueueState::Active,
+            final_response: None,
             overall_goal: goal,
             tasks: titles
                 .into_iter()
@@ -106,14 +163,20 @@ impl TaskQueue {
     }
 
     pub(crate) fn active(&self) -> bool {
-        !self.summarized && self.stop_reason.is_none()
+        matches!(self.state, QueueState::Active | QueueState::Summarizing)
     }
     pub(crate) fn current_mut(&mut self) -> Option<&mut QueuedTask> {
+        if self.state != QueueState::Active {
+            return None;
+        }
         self.tasks
             .iter_mut()
             .find(|task| task.status == TaskStatus::Running)
     }
     pub(crate) fn advance(&mut self) {
+        if self.state != QueueState::Active {
+            return;
+        }
         if !self
             .tasks
             .iter()
@@ -125,7 +188,48 @@ impl TaskQueue {
         {
             task.status = TaskStatus::Running;
         }
+        if !self.tasks.is_empty()
+            && !self
+                .tasks
+                .iter()
+                .any(|task| matches!(task.status, TaskStatus::Pending | TaskStatus::Running))
+        {
+            self.state = QueueState::Summarizing;
+        }
     }
+
+    pub fn stop(&mut self, state: QueueState, reason: String) {
+        if !matches!(
+            self.state,
+            QueueState::Active | QueueState::Summarizing | QueueState::Suspended
+        ) {
+            return;
+        }
+        self.state = state;
+        self.stop_reason = Some(reason);
+    }
+
+    pub fn normalize_legacy(&mut self) {
+        if self.goal_id.is_empty() {
+            use std::hash::{Hash, Hasher};
+            let mut hash = std::collections::hash_map::DefaultHasher::new();
+            self.overall_goal.hash(&mut hash);
+            for task in &self.tasks {
+                task.title.hash(&mut hash);
+            }
+            self.goal_id = format!("legacy-{:x}", hash.finish());
+        }
+        if self.state == QueueState::Active {
+            if self.summarized {
+                self.state = QueueState::Completed;
+            } else if self.stop_reason.is_some() {
+                self.state = QueueState::Cancelled;
+            } else {
+                self.advance();
+            }
+        }
+    }
+
     pub(crate) fn finish(&mut self, status: TaskStatus, reason: String) -> Result<(), String> {
         let task = self.current_mut().ok_or("no running task")?;
         if !matches!(
@@ -163,7 +267,8 @@ impl TaskQueue {
             })
         ))
     }
-    pub(crate) fn snapshot(&self) -> Message {
+    #[must_use]
+    pub fn snapshot(&self) -> Message {
         let mut state = json!(self);
         state["remaining_tasks"] = json!(
             self.tasks
@@ -179,7 +284,7 @@ impl TaskQueue {
         Message::system(format!("{STATE_PREFIX}{state}"))
     }
     pub(crate) fn restore(messages: &mut Vec<Message>) -> Option<Self> {
-        let queue = messages
+        let mut queue: Option<Self> = messages
             .iter()
             .rev()
             .filter(|m| m.role == model::Role::System)
@@ -190,8 +295,14 @@ impl TaskQueue {
             });
         messages.retain(|m| {
             m.role != model::Role::System
-                || (!m.content.starts_with(STATE_PREFIX) && !m.content.starts_with(PROGRESS_PREFIX))
+                || (!m.content.starts_with(STATE_PREFIX)
+                    && !m.content.starts_with(ARCHIVE_PREFIX)
+                    && !m.content.starts_with(PROGRESS_PREFIX)
+                    && !m.content.starts_with("[ax-recovery]"))
         });
+        if let Some(queue) = &mut queue {
+            queue.normalize_legacy();
+        }
         queue
     }
     pub(crate) fn summary_context(&self) -> Message {
@@ -202,19 +313,27 @@ impl TaskQueue {
 pub(crate) fn spec() -> ToolSpec {
     ToolSpec { kind: "function", function: FunctionSpec {
         name: TOOL_NAME.into(),
-        description: "For requests containing multiple explicit subtasks, initialize the internal queue before executing any work unless a queue already exists. Use this tool alone in a round. Finish the current task with completed/failed/skipped and a concise outcome. Before declaring failure, search existing workspace runner/runtime/scripts and available environments and attempt recovery. Independent tasks continue after failure. Execute current_task only; a text-only response ends that task and the runtime advances the queue. Only summarize once current_task is null. For numbered requests the queue is automatic.".into(),
+        description: "For requests containing multiple explicit subtasks, initialize the internal queue before executing any work unless a queue already exists. Use this tool alone in a round. Finish the current task with completed/failed/skipped and a concise outcome. Before declaring failure, search existing workspace runner/runtime/scripts and available environments and attempt recovery. Independent tasks continue after failure. Execute current_task only; use finish for task-local completion/failure and block for a global blocker. A text-only response terminates the goal, never advances a task. Only summarize once current_task is null. For numbered requests the queue is automatic.".into(),
         parameters: json!({"type":"object","properties":{
-            "action":{"type":"string","enum":["start","finish"]},
+            "action":{"type":"string","enum":["start","finish","block","cancel"]},
             "overall_goal":{"type":"string"},"tasks":{"type":"array","minItems":2,"items":{"type":"string"}},
             "status":{"type":"string","enum":["completed","failed","skipped"]},"reason":{"type":"string"}
         },"required":["action"]}),
     }}
 }
 
-pub(crate) fn apply(queue: &mut Option<TaskQueue>, input: &Value) -> Result<(), String> {
+pub(crate) fn apply(
+    queue: &mut Option<TaskQueue>,
+    input: &Value,
+    goal_id: &str,
+    parent_goal_id: Option<&str>,
+) -> Result<(), String> {
     match input["action"].as_str() {
         Some("start") => {
-            if queue.as_ref().is_some_and(TaskQueue::active) {
+            if queue
+                .as_ref()
+                .is_some_and(|q| q.goal_id != goal_id || !q.active() || !q.tasks.is_empty())
+            {
                 return Err("continue the existing queue; do not replan".into());
             }
             let goal = input["overall_goal"]
@@ -235,7 +354,10 @@ pub(crate) fn apply(queue: &mut Option<TaskQueue>, input: &Value) -> Result<(), 
             if titles.len() < 2 {
                 return Err("at least two tasks required".into());
             }
-            *queue = Some(TaskQueue::new(goal.into(), titles));
+            let mut plan = TaskQueue::new(goal.into(), titles);
+            goal_id.clone_into(&mut plan.goal_id);
+            plan.parent_goal_id = parent_goal_id.map(str::to_owned);
+            *queue = Some(plan);
             Ok(())
         }
         Some("finish") => {
@@ -246,6 +368,23 @@ pub(crate) fn apply(queue: &mut Option<TaskQueue>, input: &Value) -> Result<(), 
                 .filter(|q| q.active())
                 .ok_or("no active queue")?
                 .finish(status, input["reason"].as_str().unwrap_or("").into())
+        }
+        Some("block" | "cancel") => {
+            let reason = input["reason"]
+                .as_str()
+                .filter(|s| !s.trim().is_empty())
+                .ok_or("stop reason required")?;
+            let queue = queue
+                .as_mut()
+                .filter(|q| q.goal_id == goal_id && q.active())
+                .ok_or("no active goal")?;
+            let state = if input["action"] == "block" {
+                QueueState::Blocked
+            } else {
+                QueueState::Cancelled
+            };
+            queue.stop(state, reason.into());
+            Ok(())
         }
         _ => Err("unknown task_queue action".into()),
     }

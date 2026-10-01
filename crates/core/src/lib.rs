@@ -6,6 +6,7 @@ mod scheduler;
 pub mod task_queue;
 pub use budget::{ContextBudget, ExecutionBudget};
 pub use context::select_context;
+pub use task_queue::{GoalTurn, QueueState};
 
 use std::{collections::VecDeque, sync::Arc};
 
@@ -86,6 +87,10 @@ pub struct CompressionResult {
 
 #[derive(Debug, Error)]
 pub enum AgentError {
+    #[error("goal lifecycle error: {0}")]
+    GoalMismatch(String),
+    #[error("global execution blocker: {0}")]
+    GlobalBlocked(String),
     #[error(transparent)]
     Model(#[from] ModelError),
     #[error(transparent)]
@@ -140,6 +145,8 @@ pub struct AgentKernel {
     tool_concurrency: usize,
     result_reader: tool::ResultReader,
     task_queue: Option<task_queue::TaskQueue>,
+    goal_id: Option<String>,
+    parent_goal_id: Option<String>,
 }
 
 impl AgentKernel {
@@ -166,6 +173,8 @@ impl AgentKernel {
             tool_concurrency: 4,
             result_reader,
             task_queue: None,
+            goal_id: None,
+            parent_goal_id: None,
         }
     }
 
@@ -201,6 +210,11 @@ impl AgentKernel {
     #[must_use]
     pub fn with_messages(mut self, mut messages: Vec<Message>) -> Self {
         self.task_queue = task_queue::TaskQueue::restore(&mut messages);
+        self.goal_id = self.task_queue.as_ref().map(|q| q.goal_id.clone());
+        self.parent_goal_id = self
+            .task_queue
+            .as_ref()
+            .and_then(|q| q.parent_goal_id.clone());
         for message in &messages {
             if let Some(id) = &message.tool_call_id
                 && let Ok(result) = serde_json::from_str::<tool::ToolResult>(&message.content)
@@ -233,11 +247,13 @@ impl AgentKernel {
     }
 
     #[must_use]
-    pub fn fork_with_messages(&self, messages: Vec<Message>) -> Self {
+    pub fn fork_with_messages(&self, mut messages: Vec<Message>) -> Self {
+        // Worker context belongs to a child goal, never the controller queue.
+        task_queue::TaskQueue::restore(&mut messages);
         let result_reader = tool::ResultReader::default();
         let mut tools = self.tools.clone();
         tools.register(result_reader.clone());
-        Self {
+        let mut worker = Self {
             provider: Arc::clone(&self.provider),
             tools,
             approval: Arc::clone(&self.approval),
@@ -249,8 +265,12 @@ impl AgentKernel {
             compression_dirty: false,
             result_reader,
             task_queue: None,
+            goal_id: None,
+            parent_goal_id: None,
         }
-        .with_messages(messages)
+        .with_messages(messages);
+        worker.parent_goal_id.clone_from(&self.goal_id);
+        worker
     }
 
     #[must_use]
@@ -560,6 +580,23 @@ impl AgentKernel {
         self.run_turn_checkpointed(input, emit, |_| Ok(())).await
     }
 
+    /// Run with explicit goal identity, without requiring a new session for workers.
+    ///
+    /// # Errors
+    /// Returns lifecycle, execution or persistence failures.
+    pub async fn run_goal_turn<F>(
+        &mut self,
+        input: impl Into<String>,
+        intent: GoalTurn,
+        emit: F,
+    ) -> Result<String, AgentError>
+    where
+        F: FnMut(AgentEvent) + Send,
+    {
+        self.run_goal_turn_checkpointed(input, intent, emit, |_| Ok(()))
+            .await
+    }
+
     /// Persist each complete message before advancing model or tool execution.
     ///
     /// # Errors
@@ -568,23 +605,62 @@ impl AgentKernel {
         &mut self,
         input: impl Into<String>,
         emit: F,
+        checkpoint: H,
+    ) -> Result<String, AgentError>
+    where
+        F: FnMut(AgentEvent) + Send,
+        H: FnMut(&[Message]) -> Result<(), AgentError> + Send,
+    {
+        self.run_goal_turn_checkpointed(input, GoalTurn::New, emit, checkpoint)
+            .await
+    }
+
+    /// Resume/cancel requires the exact saved goal ID. Ordinary calls start new goals.
+    ///
+    /// # Errors
+    /// Returns lifecycle, runtime or checkpoint failures.
+    pub async fn run_goal_turn_checkpointed<F, H>(
+        &mut self,
+        input: impl Into<String>,
+        intent: GoalTurn,
+        mut emit: F,
         mut checkpoint: H,
     ) -> Result<String, AgentError>
     where
         F: FnMut(AgentEvent) + Send,
         H: FnMut(&[Message]) -> Result<(), AgentError> + Send,
     {
+        self.raw_turn_messages.clear();
         let result = if self.budget.turn_timeout_secs == 0 {
-            self.run_turn_inner(input, emit, &mut checkpoint).await
+            self.run_turn_inner(input, intent, &mut emit, &mut checkpoint)
+                .await
         } else {
             tokio::time::timeout(
                 std::time::Duration::from_secs(self.budget.turn_timeout_secs),
-                self.run_turn_inner(input, emit, &mut checkpoint),
+                self.run_turn_inner(input, intent, &mut emit, &mut checkpoint),
             )
             .await
             .unwrap_or_else(|_| Err(AgentError::Budget("turn timeout".into())))
         };
-        if result.is_err() {
+        if result
+            .as_ref()
+            .is_err_and(|error| !matches!(error, AgentError::GoalMismatch(_)))
+        {
+            if let Some(queue) = &mut self.task_queue {
+                if matches!(
+                    &result,
+                    Err(AgentError::Budget(_) | AgentError::StepLimit(_))
+                ) {
+                    queue.stop(
+                        QueueState::Suspended,
+                        result.as_ref().unwrap_err().to_string(),
+                    );
+                } else {
+                    let reason = result.as_ref().unwrap_err().to_string();
+                    queue.stop(QueueState::Blocked, reason.clone());
+                    queue.final_response.get_or_insert(reason);
+                }
+            }
             // Persist a valid tool-call transcript even if a deadline interrupts execution.
             let answered = self
                 .messages
@@ -607,6 +683,12 @@ impl AgentKernel {
                 self.raw_turn_messages.push(interrupted);
             }
         }
+        if result
+            .as_ref()
+            .is_err_and(|error| !matches!(error, AgentError::GoalMismatch(_)))
+        {
+            self.checkpoint_queue(&mut checkpoint)?;
+        }
         checkpoint(&self.raw_turn_messages)?;
         result
     }
@@ -615,6 +697,7 @@ impl AgentKernel {
     async fn run_turn_inner<F, H>(
         &mut self,
         input: impl Into<String>,
+        intent: GoalTurn,
         emit: F,
         checkpoint: &mut H,
     ) -> Result<String, AgentError>
@@ -623,45 +706,17 @@ impl AgentKernel {
         H: FnMut(&[Message]) -> Result<(), AgentError> + Send,
     {
         let emit = std::sync::Mutex::new(emit);
-        (emit.lock().unwrap())(AgentEvent::TurnStarted);
-        self.raw_turn_messages.clear();
         let input = input.into();
-        let canceled = matches!(
-            input.trim().to_lowercase().as_str(),
-            "/cancel" | "cancel" | "cancel task" | "取消" | "取消长任务"
-        ) && self
-            .task_queue
-            .as_ref()
-            .is_some_and(task_queue::TaskQueue::active);
-        if canceled {
-            self.task_queue.as_mut().unwrap().stop_reason = Some("user canceled".into());
+        let replay = self.begin_goal(&input, intent, checkpoint)?;
+        if let Some(cached) = replay {
+            return Ok(cached);
         }
-        if !canceled
-            && !self
-                .task_queue
-                .as_ref()
-                .is_some_and(task_queue::TaskQueue::active)
-        {
-            self.task_queue = task_queue::TaskQueue::from_input(&input);
-        }
+        (emit.lock().unwrap())(AgentEvent::TurnStarted);
         let user = Message::user(input);
         self.messages.push(user.clone());
         self.raw_turn_messages.push(user);
         checkpoint(&self.raw_turn_messages)?;
         self.checkpoint_queue(checkpoint)?;
-        if canceled {
-            self.set_context(task_queue::PROGRESS_PREFIX, None);
-            let content = "Task queue canceled by user.";
-            let message = Message::assistant(content, vec![]);
-            self.messages.push(message.clone());
-            self.raw_turn_messages.push(message);
-            checkpoint(&self.raw_turn_messages)?;
-            (emit.lock().unwrap())(AgentEvent::ContentDelta {
-                delta: content.into(),
-            });
-            (emit.lock().unwrap())(AgentEvent::TurnFinished);
-            return Ok(content.into());
-        }
         let mut tool_specs = self
             .tools
             .iter()
@@ -680,6 +735,14 @@ impl AgentKernel {
         let mut calls_used = 0;
         let mut steps_used = 0usize;
         loop {
+            if let Some(queue) = self.task_queue.as_ref().filter(|q| !q.active()) {
+                let content = queue
+                    .final_response
+                    .clone()
+                    .or_else(|| queue.stop_reason.clone())
+                    .unwrap_or_default();
+                return self.finish_goal_response(content, &emit, checkpoint);
+            }
             if self.budget.max_steps != 0 && steps_used >= self.budget.max_steps {
                 return Err(AgentError::StepLimit(self.budget.max_steps));
             }
@@ -696,7 +759,7 @@ impl AgentKernel {
                 task_queue::PROGRESS_PREFIX,
                 self.task_queue
                     .as_ref()
-                    .filter(|q| q.active())
+                    .filter(|q| q.active() && !q.tasks.is_empty())
                     .map(task_queue::TaskQueue::progress),
             );
             self.compress_if_needed(|event| (emit.lock().unwrap())(event))
@@ -708,7 +771,7 @@ impl AgentKernel {
             let queue_active = self
                 .task_queue
                 .as_ref()
-                .is_some_and(task_queue::TaskQueue::active);
+                .is_some_and(|q| q.active() && !q.tasks.is_empty());
             let mut on_delta = |delta: String| {
                 if !queue_active {
                     (emit.lock().unwrap())(AgentEvent::ContentDelta { delta });
@@ -719,15 +782,11 @@ impl AgentKernel {
             };
             let model_timer = tool::telemetry::Timer::new("model.request");
             let mut request_history = self.messages.clone();
-            if let Some(queue) = self.task_queue.as_ref().filter(|q| {
-                q.active()
-                    && !q.tasks.iter().any(|t| {
-                        matches!(
-                            t.status,
-                            task_queue::TaskStatus::Running | task_queue::TaskStatus::Pending
-                        )
-                    })
-            }) {
+            if let Some(queue) = self
+                .task_queue
+                .as_ref()
+                .filter(|q| q.state == QueueState::Summarizing)
+            {
                 request_history.push(queue.summary_context());
             }
             let request_messages = request_context(&request_history, self.context_budget())?;
@@ -763,17 +822,6 @@ impl AgentKernel {
                     if model_failures < 2 {
                         continue;
                     }
-                    if let Some(queue) = &mut self.task_queue
-                        && let Some(task) = queue.current_mut()
-                    {
-                        task.recovery_attempts += 1;
-                        queue
-                            .finish(task_queue::TaskStatus::Failed, error.to_string())
-                            .map_err(AgentError::Persistence)?;
-                        self.checkpoint_queue(checkpoint)?;
-                        model_failures = 0;
-                        continue;
-                    }
                     return Err(error.into());
                 }
                 Err(error) => return Err(error.into()),
@@ -788,35 +836,21 @@ impl AgentKernel {
 
             if tool_calls.is_empty() {
                 if let Some(queue) = self.task_queue.as_mut().filter(|q| q.active()) {
-                    if let Some(task) = queue.current_mut() {
-                        if task.failure_reason.is_some() && task.recovery_attempts == 0 {
-                            task.recovery_attempts = 1;
-                            self.messages.push(Message::system("[ax-recovery] Attempt recovery before ending this task. Search existing workspace runner/runtime/scripts and available environments; retry or use an alternative. If unrecoverable, finish the task as failed and continue independent tasks."));
-                            self.checkpoint_queue(checkpoint)?;
-                            continue;
-                        }
-                        let status = if task.failure_reason.is_some() {
-                            task_queue::TaskStatus::Failed
-                        } else {
-                            task_queue::TaskStatus::Completed
-                        };
-                        let reason = task
-                            .failure_reason
-                            .clone()
-                            .unwrap_or_else(|| content.clone());
-                        queue
-                            .finish(status, reason)
-                            .map_err(AgentError::Persistence)?;
-                        self.messages
-                            .retain(|m| !m.content.starts_with("[ax-recovery]"));
-                        self.checkpoint_queue(checkpoint)?;
-                        continue;
+                    // A final response is goal-scoped. Never interpret it as one
+                    // task's completion and ask again for every remaining item.
+                    if queue.state == QueueState::Active && !queue.tasks.is_empty() {
+                        queue.stop(QueueState::Blocked, content.clone());
+                    } else {
+                        queue.state = QueueState::Completed;
                     }
+                    queue.final_response = Some(content.clone());
                     queue.summarized = true;
                     self.checkpoint_queue(checkpoint)?;
-                    (emit.lock().unwrap())(AgentEvent::ContentDelta {
-                        delta: content.clone(),
-                    });
+                    if queue_active {
+                        (emit.lock().unwrap())(AgentEvent::ContentDelta {
+                            delta: content.clone(),
+                        });
+                    }
                 }
                 self.set_context(task_queue::PROGRESS_PREFIX, None);
                 (emit.lock().unwrap())(AgentEvent::TurnFinished);
@@ -836,7 +870,14 @@ impl AgentKernel {
                 let result = if tool_calls.len() == 1 {
                     serde_json::from_str::<Value>(&tool_calls[0].function.arguments)
                         .map_err(|error| error.to_string())
-                        .and_then(|input| task_queue::apply(&mut self.task_queue, &input))
+                        .and_then(|input| {
+                            task_queue::apply(
+                                &mut self.task_queue,
+                                &input,
+                                self.goal_id.as_deref().unwrap_or_default(),
+                                self.parent_goal_id.as_deref(),
+                            )
+                        })
                 } else {
                     Err(
                         "task_queue must be called alone; no tools in this round were executed"
@@ -905,9 +946,16 @@ impl AgentKernel {
                             .unwrap()
                             .insert(id.clone(), result.raw_output);
                     }
+                    let blocker = serde_json::from_str::<tool::ToolResult>(&message.content)
+                        .ok()
+                        .and_then(|result| result.global_blocker);
                     self.messages.push(message.clone());
                     self.raw_turn_messages.push(message);
-                    checkpoint(&self.raw_turn_messages)
+                    checkpoint(&self.raw_turn_messages)?;
+                    if let Some(reason) = blocker {
+                        return Err(AgentError::GlobalBlocked(reason));
+                    }
+                    Ok(())
                 },
             )
             .await?;
@@ -934,6 +982,130 @@ impl AgentKernel {
             self.messages.extend(results);
             self.checkpoint_queue(checkpoint)?;
         }
+    }
+
+    fn begin_goal<H>(
+        &mut self,
+        input: &str,
+        intent: GoalTurn,
+        checkpoint: &mut H,
+    ) -> Result<Option<String>, AgentError>
+    where
+        H: FnMut(&[Message]) -> Result<(), AgentError> + Send,
+    {
+        let cancel = matches!(&intent, GoalTurn::Cancel { .. });
+        match intent {
+            GoalTurn::New | GoalTurn::Start { .. } => {
+                let goal_id = if let GoalTurn::Start { goal_id } = intent {
+                    goal_id
+                } else {
+                    task_queue::fresh_goal_id()
+                };
+                if goal_id.trim().is_empty()
+                    || self
+                        .task_queue
+                        .as_ref()
+                        .is_some_and(|q| q.goal_id == goal_id)
+                {
+                    return Err(AgentError::GoalMismatch("new goal ID must be nonempty and fresh; use explicit resume for the saved goal".into()));
+                }
+                let had_queue = self.task_queue.is_some();
+                if let Some(previous) = &mut self.task_queue {
+                    previous.stop(QueueState::Superseded, format!("superseded by {goal_id}"));
+                    self.raw_turn_messages.push(previous.snapshot());
+                    self.raw_turn_messages.push(Message::system(format!(
+                        "{}{}",
+                        task_queue::ARCHIVE_PREFIX,
+                        serde_json::to_string(&previous).unwrap()
+                    )));
+                    checkpoint(&self.raw_turn_messages)?;
+                }
+                let mut next = task_queue::TaskQueue::from_input(input);
+                // A durable empty head prevents restoring an archived queue when
+                // the replacement goal is a plain single task.
+                if next.is_none() && had_queue {
+                    next = Some(task_queue::TaskQueue::new(input.into(), vec![]));
+                }
+                if let Some(queue) = &mut next {
+                    queue.goal_id.clone_from(&goal_id);
+                    queue.parent_goal_id.clone_from(&self.parent_goal_id);
+                }
+                self.goal_id = Some(goal_id);
+                self.task_queue = next;
+                self.set_context(task_queue::PROGRESS_PREFIX, None);
+                self.messages
+                    .retain(|m| !m.content.starts_with("[ax-recovery]"));
+                self.checkpoint_queue(checkpoint)?;
+                Ok(None)
+            }
+            GoalTurn::Resume { goal_id } | GoalTurn::Cancel { goal_id } => {
+                let queue = self
+                    .task_queue
+                    .as_mut()
+                    .filter(|q| q.goal_id == goal_id)
+                    .ok_or_else(|| {
+                        AgentError::GoalMismatch(format!("no saved queue for goal {goal_id}"))
+                    })?;
+                if !matches!(
+                    queue.state,
+                    QueueState::Active | QueueState::Summarizing | QueueState::Suspended
+                ) {
+                    return Ok(Some(
+                        queue
+                            .final_response
+                            .clone()
+                            .or_else(|| queue.stop_reason.clone())
+                            .unwrap_or_default(),
+                    ));
+                }
+                if cancel {
+                    queue.stop(QueueState::Cancelled, "Task queue canceled by user.".into());
+                } else if queue.state == QueueState::Suspended {
+                    queue.state = QueueState::Active;
+                    queue.stop_reason = None;
+                    queue.advance();
+                }
+                self.goal_id = Some(goal_id);
+                self.checkpoint_queue(checkpoint)?;
+                Ok(None)
+            }
+        }
+    }
+
+    fn finish_goal_response<F, H>(
+        &mut self,
+        content: String,
+        emit: &std::sync::Mutex<F>,
+        checkpoint: &mut H,
+    ) -> Result<String, AgentError>
+    where
+        F: FnMut(AgentEvent) + Send,
+        H: FnMut(&[Message]) -> Result<(), AgentError> + Send,
+    {
+        let queue = self.task_queue.as_mut().expect("terminal goal exists");
+        if queue.final_response.is_some() {
+            return Ok(content);
+        }
+        queue.final_response = Some(content.clone());
+        queue.summarized = true;
+        let message = Message::assistant(content.clone(), vec![]);
+        self.messages.push(message.clone());
+        self.raw_turn_messages.push(message);
+        self.checkpoint_queue(checkpoint)?;
+        (emit.lock().unwrap())(AgentEvent::ContentDelta {
+            delta: content.clone(),
+        });
+        (emit.lock().unwrap())(AgentEvent::TurnFinished);
+        Ok(content)
+    }
+
+    #[must_use]
+    pub fn goal_id(&self) -> Option<&str> {
+        self.goal_id.as_deref()
+    }
+    #[must_use]
+    pub fn parent_goal_id(&self) -> Option<&str> {
+        self.parent_goal_id.as_deref()
     }
 
     /// Durable queue checkpoint uses the caller's existing message persistence path.

@@ -15,7 +15,7 @@ use serde_json::{Value, json};
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     sync::{mpsc, oneshot},
-    task::AbortHandle,
+    task::JoinHandle,
 };
 use uuid::Uuid;
 
@@ -29,7 +29,33 @@ type PendingPermissions = Arc<Mutex<HashMap<String, oneshot::Sender<String>>>>;
 struct ActivePrompt {
     request_id: Value,
     session_id: String,
-    abort: AbortHandle,
+    task: JoinHandle<()>,
+}
+
+fn cancel_saved_goal(state: &mut ReplState, session_id: &str) -> Result<()> {
+    let Some(saved) = state
+        .store()?
+        .latest_agent_state(session_id, runtime_core::task_queue::STATE_PREFIX)?
+    else {
+        return Ok(());
+    };
+    let mut queue: runtime_core::task_queue::TaskQueue = serde_json::from_str(
+        saved
+            .content
+            .strip_prefix(runtime_core::task_queue::STATE_PREFIX)
+            .unwrap_or_default(),
+    )?;
+    queue.normalize_legacy();
+    queue.stop(
+        runtime_core::QueueState::Cancelled,
+        "Task queue canceled by user.".into(),
+    );
+    queue
+        .final_response
+        .get_or_insert_with(|| "Task queue canceled by user.".into());
+    let message = queue.snapshot();
+    state.current_session = state.store()?.session(session_id)?;
+    state.persist_messages(&[message])
 }
 
 struct AcpApproval {
@@ -745,6 +771,18 @@ pub async fn run(cli: &Cli, data_dir: PathBuf, skills_dir: PathBuf) -> Result<()
                         continue;
                     }
                 };
+                let goal_turn = match params.pointer("/_meta/axGoal") {
+                    Some(value) => {
+                        match serde_json::from_value::<runtime_core::GoalTurn>(value.clone()) {
+                            Ok(intent) => intent,
+                            Err(error_message) => {
+                                error(&out, id, -32602, format!("invalid axGoal: {error_message}"));
+                                continue;
+                            }
+                        }
+                    }
+                    None => runtime_core::GoalTurn::New,
+                };
                 let selection = match model_selection::require_resolved(cli) {
                     Ok(value) => value,
                     Err(err) => {
@@ -786,6 +824,7 @@ pub async fn run(cli: &Cli, data_dir: PathBuf, skills_dir: PathBuf) -> Result<()
                         state.mcp_override = task_override;
                         apply_mcp_names(&mut state, task_mcp_names.as_ref())?;
                         state.allowed_skills = task_skills_allowed;
+                        state.next_goal_turn = goal_turn;
                         let budget = context_budget(&selection, &[]);
                         if !state.open_session(&task_session, &budget)? {
                             return Err(anyhow!("AX session not found"));
@@ -809,7 +848,7 @@ pub async fn run(cli: &Cli, data_dir: PathBuf, skills_dir: PathBuf) -> Result<()
                             let body=stamp(json!({"sessionUpdate":"turn_changes","changedFiles":files}),now_seconds());
                             task_out.send(json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":task_session,"update":body}})).ok();
                         }
-                        outcome
+                        outcome.map(|_| state.runtime.as_ref().and_then(runtime_core::AgentKernel::goal_id).unwrap_or_default().to_owned())
                     }
                     .await;
                     let should_reply = task_active
@@ -820,7 +859,11 @@ pub async fn run(cli: &Cli, data_dir: PathBuf, skills_dir: PathBuf) -> Result<()
                     if should_reply {
                         task_active.lock().unwrap().take();
                         match result {
-                            Ok(_) => reply(&task_out, task_id, json!({"stopReason":"end_turn"})),
+                            Ok(goal_id) => reply(
+                                &task_out,
+                                task_id,
+                                json!({"stopReason":"end_turn","_meta":{"axGoal":{"goal_id":goal_id}}}),
+                            ),
                             Err(err) => error(&task_out, task_id, -32000, err.to_string()),
                         }
                     }
@@ -828,7 +871,7 @@ pub async fn run(cli: &Cli, data_dir: PathBuf, skills_dir: PathBuf) -> Result<()
                 *slot = Some(ActivePrompt {
                     request_id: id,
                     session_id,
-                    abort: task.abort_handle(),
+                    task,
                 });
             }
             "session/cancel" => {
@@ -839,8 +882,24 @@ pub async fn run(cli: &Cli, data_dir: PathBuf, skills_dir: PathBuf) -> Result<()
                 let taken = { active.lock().unwrap().take() };
                 if let Some(item) = taken {
                     if item.session_id == session_id {
-                        item.abort.abort();
-                        reply(&out, item.request_id, json!({"stopReason":"cancelled"}));
+                        item.task.abort();
+                        let _ = item.task.await;
+                        // Abort has completed before writing cancellation, so a
+                        // late checkpoint cannot resurrect the active queue.
+                        let cancellation: Result<()> = (|| {
+                            let mut state = ReplState::new_in_project(
+                                data_dir.clone(),
+                                skills_dir.clone(),
+                                mcp_config.clone(),
+                                &cwd,
+                            )?;
+                            cancel_saved_goal(&mut state, session_id)
+                        })();
+                        if let Err(err) = cancellation {
+                            error(&out, item.request_id, -32000, err.to_string());
+                        } else {
+                            reply(&out, item.request_id, json!({"stopReason":"cancelled"}));
+                        }
                     } else {
                         *active.lock().unwrap() = Some(item);
                     }
@@ -862,6 +921,7 @@ pub async fn run(cli: &Cli, data_dir: PathBuf, skills_dir: PathBuf) -> Result<()
                     "resume":true,
                     "streaming":true,
                     "cancel":"abort_turn",
+                    "goals":{"promptMetadata":"_meta.axGoal","actions":["new","start","resume","cancel"]},
                     "permissions":true,
                     "providers":{
                         "supported": model::PROVIDERS.iter()
@@ -971,8 +1031,10 @@ pub async fn run(cli: &Cli, data_dir: PathBuf, skills_dir: PathBuf) -> Result<()
             }
         }
     }
-    if let Some(item) = active.lock().unwrap().take() {
-        item.abort.abort();
+    let disconnected = active.lock().unwrap().take();
+    if let Some(item) = disconnected {
+        item.task.abort();
+        let _ = item.task.await;
     }
     drop(out);
     writer.await??;
@@ -982,6 +1044,62 @@ pub async fn run(cli: &Cli, data_dir: PathBuf, skills_dir: PathBuf) -> Result<()
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn cancellation_persists_terminal_goal_across_reconnect() {
+        let root = std::env::temp_dir().join(format!(
+            "ax-goal-cancel-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+        let data = root.join("data");
+        let skills = root.join("skills");
+        let mut state =
+            ReplState::new_in_project(data.clone(), skills.clone(), None, &root).unwrap();
+        state.create_session("controller").unwrap();
+        let session_id = state.current_session.as_ref().unwrap().id.clone();
+        let queue: runtime_core::task_queue::TaskQueue = serde_json::from_value(json!({
+            "goal_id":"controller-goal", "state":"active", "overall_goal":"benchmark",
+            "tasks":[
+                {"title":"worker 1","status":"running","failure_reason":null,"outcome":null},
+                {"title":"worker 2","status":"pending","failure_reason":null,"outcome":null}
+            ], "summarized":false, "stop_reason":null
+        }))
+        .unwrap();
+        state.persist_messages(&[queue.snapshot()]).unwrap();
+        cancel_saved_goal(&mut state, &session_id).unwrap();
+        drop(state);
+        let mut restored = ReplState::new_in_project(data, skills, None, &root).unwrap();
+        let saved = restored
+            .store()
+            .unwrap()
+            .latest_agent_state(&session_id, runtime_core::task_queue::STATE_PREFIX)
+            .unwrap()
+            .unwrap();
+        let queue: runtime_core::task_queue::TaskQueue = serde_json::from_str(
+            saved
+                .content
+                .strip_prefix(runtime_core::task_queue::STATE_PREFIX)
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(queue.goal_id, "controller-goal");
+        assert_eq!(queue.state, runtime_core::QueueState::Cancelled);
+        assert_eq!(
+            queue.final_response.as_deref(),
+            Some("Task queue canceled by user.")
+        );
+        assert_eq!(
+            queue.tasks[1].status,
+            runtime_core::task_queue::TaskStatus::Pending
+        );
+        drop(restored);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn failed_tool_update_keeps_call_id_and_structured_failure() {
         let (out, mut rx) = mpsc::unbounded_channel();

@@ -167,9 +167,11 @@ where
         .collect();
     let mut recorder = Recorder::new(state, prompt, skills_used);
     let mut saved = 0;
+    let intent = std::mem::take(&mut state.next_goal_turn);
     let result = runtime
-        .run_turn_checkpointed(
+        .run_goal_turn_checkpointed(
             prompt,
+            intent,
             |event| {
                 recorder.observe(&event);
                 emit(event);

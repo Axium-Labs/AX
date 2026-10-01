@@ -2,7 +2,7 @@
 use super::*;
 use model::{FunctionCall, ModelResponse, ToolCall};
 use std::sync::Mutex;
-use task_queue::{PROGRESS_PREFIX, STATE_PREFIX, TaskStatus};
+use task_queue::{ARCHIVE_PREFIX, PROGRESS_PREFIX, STATE_PREFIX, TaskStatus};
 
 struct QueueProvider {
     requests: Mutex<Vec<ModelRequest>>,
@@ -51,6 +51,14 @@ fn call(id: &str, name: &str, input: Value) -> Result<ModelResponse, ModelError>
         finish_reason: None,
     })
 }
+fn finish(status: &str, reason: &str) -> Result<ModelResponse, ModelError> {
+    call(
+        "finish",
+        "task_queue",
+        serde_json::json!({"action":"finish","status":status,"reason":reason}),
+    )
+}
+
 fn provider(responses: Vec<Result<ModelResponse, ModelError>>) -> Arc<QueueProvider> {
     Arc::new(QueueProvider {
         requests: Mutex::new(vec![]),
@@ -67,9 +75,9 @@ async fn twenty_three_tasks_first_fails_remaining_execute_and_only_summary_is_em
     let executions = Arc::new(Mutex::new(vec![]));
     let mut responses = vec![
         call("bad", "record_task", serde_json::json!({"task":1})),
-        text("cannot do task 1"), // runtime requests recovery instead of finishing
+        finish("failed", "environment unavailable"), // rejected until recovery executes
         call("retry", "record_task", serde_json::json!({"task":1})),
-        text("unrecoverable task 1"),
+        finish("failed", "environment unavailable after recovery"),
     ];
     for task in 2..=23 {
         responses.push(call(
@@ -77,7 +85,7 @@ async fn twenty_three_tasks_first_fails_remaining_execute_and_only_summary_is_em
             "record_task",
             serde_json::json!({"task":task}),
         ));
-        responses.push(text("task completed"));
+        responses.push(finish("completed", "task completed"));
     }
     responses.push(text("Final: 22 completed; task 1 failed"));
     let provider = provider(responses);
@@ -178,7 +186,7 @@ async fn twenty_three_tasks_first_fails_remaining_execute_and_only_summary_is_em
 
 #[tokio::test]
 async fn reconnect_keeps_completed_tasks_and_resumes_original_queue() {
-    let mut first = kernel(provider(vec![text("first done")]));
+    let mut first = kernel(provider(vec![finish("completed", "first done")]));
     first.budget.max_steps = 1;
     let mut saved = vec![];
     assert!(matches!(
@@ -195,8 +203,8 @@ async fn reconnect_keeps_completed_tasks_and_resumes_original_queue() {
         Err(AgentError::StepLimit(1))
     ));
     let second_provider = provider(vec![
-        text("second done"),
-        text("third done"),
+        finish("completed", "second done"),
+        finish("completed", "third done"),
         text("all summarized"),
     ]);
     let mut second = kernel(second_provider.clone()).with_messages(saved);
@@ -205,7 +213,16 @@ async fn reconnect_keeps_completed_tasks_and_resumes_original_queue() {
         TaskStatus::Completed
     );
     assert_eq!(
-        second.run_turn("resume", |_| {}).await.unwrap(),
+        second
+            .run_goal_turn(
+                "resume",
+                GoalTurn::Resume {
+                    goal_id: second.goal_id().unwrap().into()
+                },
+                |_| {}
+            )
+            .await
+            .unwrap(),
         "all summarized"
     );
     let requests = second_provider.requests.lock().unwrap();
@@ -256,10 +273,10 @@ impl tool::Tool for HangingTool {
 async fn task_tool_timeout_recovery_then_continues_other_independent_tasks() {
     let provider = provider(vec![
         call("hang", "hang", serde_json::json!({})),
-        text("timed out"),
+        finish("failed", "timed out"),
         call("retry", "hang", serde_json::json!({})),
-        text("failed after recovery"),
-        text("second complete"),
+        finish("failed", "tool timeout after recovery"),
+        finish("completed", "second complete"),
         text("summary"),
     ]);
     let mut kernel = kernel(provider).with_tool(HangingTool);
@@ -318,38 +335,46 @@ async fn semantic_queue_initialization_and_explicit_outcomes() {
 }
 
 #[tokio::test]
-async fn repeated_model_failure_is_local_but_auth_failure_is_global() {
+async fn repeated_provider_failure_blocks_goal_without_fanning_out_over_tasks() {
     let failing_provider = provider(vec![
         Err(ModelError::InvalidResponse("temporary".into())),
         Err(ModelError::InvalidResponse("still unavailable".into())),
-        text("second done"),
-        text("summary"),
     ]);
-    let mut runtime = kernel(failing_provider);
-    runtime
-        .run_turn("goal\n1. one\n2. two", |_| {})
-        .await
-        .unwrap();
-    assert_eq!(
-        runtime.task_queue().unwrap().tasks[0].status,
-        TaskStatus::Failed
+    let mut runtime = kernel(failing_provider.clone());
+    assert!(
+        runtime
+            .run_turn("goal\n1. one\n2. two", |_| {})
+            .await
+            .is_err()
     );
-    assert_eq!(
-        runtime.task_queue().unwrap().tasks[1].status,
-        TaskStatus::Completed
-    );
-    let mut runtime = kernel(provider(vec![Err(ModelError::HttpStatus {
-        status: 401,
-        message: "expired credential".into(),
-    })]));
-    assert!(matches!(
-        runtime.run_turn("goal\n1. one\n2. two", |_| {}).await,
-        Err(AgentError::Model(_))
-    ));
+    assert_eq!(runtime.task_queue().unwrap().state, QueueState::Blocked);
     assert_eq!(
         runtime.task_queue().unwrap().tasks[1].status,
         TaskStatus::Pending
     );
+    assert_eq!(failing_provider.requests.lock().unwrap().len(), 2);
+    runtime
+        .run_goal_turn(
+            "resume",
+            GoalTurn::Resume {
+                goal_id: runtime.goal_id().unwrap().into(),
+            },
+            |_| panic!("terminal goal must not emit again"),
+        )
+        .await
+        .unwrap();
+    assert_eq!(failing_provider.requests.lock().unwrap().len(), 2);
+    let auth_provider = provider(vec![Err(ModelError::HttpStatus {
+        status: 401,
+        message: "expired credential".into(),
+    })]);
+    let mut runtime = kernel(auth_provider.clone());
+    assert!(matches!(
+        runtime.run_turn("goal\n1. one\n2. two", |_| {}).await,
+        Err(AgentError::Model(_))
+    ));
+    assert_eq!(auth_provider.requests.lock().unwrap().len(), 1);
+    assert_eq!(runtime.task_queue().unwrap().state, QueueState::Blocked);
 }
 
 #[test]
@@ -362,7 +387,7 @@ fn explicit_queue_detection_preserves_multiline_details_and_ignores_code() {
 
 #[tokio::test]
 async fn explicit_user_cancel_stops_without_executing_remaining_tasks() {
-    let mut runtime = kernel(provider(vec![text("one complete")]));
+    let mut runtime = kernel(provider(vec![finish("completed", "one complete")]));
     runtime.budget.max_steps = 1;
     assert!(
         runtime
@@ -371,12 +396,21 @@ async fn explicit_user_cancel_stops_without_executing_remaining_tasks() {
             .is_err()
     );
     assert_eq!(
-        runtime.run_turn("取消长任务", |_| {}).await.unwrap(),
+        runtime
+            .run_goal_turn(
+                "取消长任务",
+                GoalTurn::Cancel {
+                    goal_id: runtime.goal_id().unwrap().into()
+                },
+                |_| {}
+            )
+            .await
+            .unwrap(),
         "Task queue canceled by user."
     );
     assert_eq!(
         runtime.task_queue().unwrap().stop_reason.as_deref(),
-        Some("user canceled")
+        Some("Task queue canceled by user.")
     );
     assert_eq!(
         runtime.task_queue().unwrap().tasks[1].status,
@@ -414,4 +448,302 @@ impl tool::Tool for RecordingTool {
             Ok("executed".into())
         }
     }
+}
+
+fn large_queue() -> task_queue::TaskQueue {
+    task_queue::TaskQueue::new(
+        "Old controller goal".into(),
+        (1..=76).map(|i| format!("old task {i}")).collect(),
+    )
+}
+
+#[tokio::test]
+async fn new_user_goal_supersedes_persisted_active_seventy_six_task_queue() {
+    let original = large_queue();
+    let old_id = original.goal_id.clone();
+    let provider = provider(vec![text("New task executed immediately")]);
+    let mut runtime = kernel(provider.clone()).with_messages(vec![original.snapshot()]);
+    let mut saved = vec![];
+    let result = runtime
+        .run_turn_checkpointed(
+            "New independent user goal",
+            |_| {},
+            |messages| {
+                saved = messages.to_vec();
+                Ok(())
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(result, "New task executed immediately");
+    assert_ne!(runtime.goal_id().unwrap(), old_id);
+    assert_eq!(
+        runtime.task_queue().unwrap().overall_goal,
+        "New independent user goal"
+    );
+    assert_eq!(runtime.task_queue().unwrap().state, QueueState::Completed);
+    let archive = saved
+        .iter()
+        .find(|m| m.content.starts_with(ARCHIVE_PREFIX))
+        .unwrap();
+    let archived: task_queue::TaskQueue =
+        serde_json::from_str(archive.content.strip_prefix(ARCHIVE_PREFIX).unwrap()).unwrap();
+    assert_eq!(archived.goal_id, old_id);
+    assert_eq!(archived.state, QueueState::Superseded);
+    assert_eq!(provider.requests.lock().unwrap().len(), 1);
+    let restored = kernel(provider.clone()).with_messages(saved);
+    assert_eq!(restored.goal_id(), runtime.goal_id());
+    assert!(!restored.task_queue().unwrap().active());
+}
+
+#[tokio::test]
+async fn global_blocker_final_text_is_generated_once_and_survives_reconnect() {
+    let original = large_queue();
+    let goal_id = original.goal_id.clone();
+    let provider = provider(
+        (0..76)
+            .map(|_| text("Global blocker: controller environment unavailable"))
+            .collect(),
+    );
+    let mut runtime = kernel(provider.clone()).with_messages(vec![original.snapshot()]);
+    let mut saved = vec![];
+    let mut events = vec![];
+    let result = runtime
+        .run_goal_turn_checkpointed(
+            "same goal",
+            GoalTurn::Resume {
+                goal_id: goal_id.clone(),
+            },
+            |e| events.push(e),
+            |m| {
+                saved = m.to_vec();
+                Ok(())
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(provider.requests.lock().unwrap().len(), 1);
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| matches!(e, AgentEvent::ContentDelta { .. }))
+            .count(),
+        1
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| matches!(e, AgentEvent::TurnFinished))
+            .count(),
+        1
+    );
+    let queue = runtime.task_queue().unwrap();
+    assert_eq!(queue.state, QueueState::Blocked);
+    assert!(
+        queue
+            .tasks
+            .iter()
+            .all(|t| matches!(t.status, TaskStatus::Running | TaskStatus::Pending))
+    );
+    let mut resumed = kernel(provider.clone()).with_messages(saved);
+    assert_eq!(
+        resumed
+            .run_goal_turn("resume again", GoalTurn::Resume { goal_id }, |_| panic!(
+                "must not re-emit a final"
+            ))
+            .await
+            .unwrap(),
+        result
+    );
+    assert_eq!(provider.requests.lock().unwrap().len(), 1);
+    assert_eq!(provider.responses.lock().unwrap().len(), 75);
+}
+
+#[tokio::test]
+async fn explicit_global_stop_does_not_call_model_for_a_summary_or_remaining_tasks() {
+    let provider = provider(vec![call(
+        "blocked",
+        "task_queue",
+        serde_json::json!({"action":"block","reason":"workspace globally inaccessible"}),
+    )]);
+    let mut runtime = kernel(provider.clone());
+    let mut events = vec![];
+    assert_eq!(
+        runtime
+            .run_turn("Goal\n1. one\n2. two", |event| events.push(event))
+            .await
+            .unwrap(),
+        "workspace globally inaccessible"
+    );
+    assert_eq!(runtime.task_queue().unwrap().state, QueueState::Blocked);
+    assert_eq!(provider.requests.lock().unwrap().len(), 1);
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| matches!(e, AgentEvent::TurnFinished))
+            .count(),
+        1
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| matches!(e, AgentEvent::ContentDelta { .. }))
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn new_goal_can_replan_while_mismatched_resume_cannot_touch_old_goal() {
+    let original = large_queue();
+    let old_id = original.goal_id.clone();
+    let provider = provider(vec![
+        finish("completed", "new one"),
+        finish("completed", "new two"),
+        text("new summary"),
+    ]);
+    let mut runtime = kernel(provider.clone()).with_messages(vec![original.snapshot()]);
+    assert!(matches!(
+        runtime
+            .run_goal_turn(
+                "wrong resume",
+                GoalTurn::Resume {
+                    goal_id: "other-goal".into()
+                },
+                |_| {}
+            )
+            .await,
+        Err(AgentError::GoalMismatch(_))
+    ));
+    assert_eq!(runtime.goal_id().unwrap(), old_id);
+    assert_eq!(runtime.task_queue().unwrap().state, QueueState::Active);
+    assert_eq!(provider.requests.lock().unwrap().len(), 0);
+    runtime
+        .run_turn("New goal\n1. new task one\n2. new task two", |_| {})
+        .await
+        .unwrap();
+    assert_ne!(runtime.goal_id().unwrap(), old_id);
+    assert_eq!(runtime.task_queue().unwrap().tasks.len(), 2);
+    assert!(
+        runtime
+            .task_queue()
+            .unwrap()
+            .tasks
+            .iter()
+            .all(|task| task.status == TaskStatus::Completed)
+    );
+}
+
+#[tokio::test]
+async fn controller_goal_can_create_isolated_workers_without_new_user_sessions() {
+    let original = large_queue();
+    let goal_id = original.goal_id.clone();
+    let provider = provider(vec![text("worker result"), text("worker result")]);
+    let controller = kernel(provider.clone()).with_messages(vec![original.snapshot()]);
+    let mut worker = controller.fork_with_messages(vec![
+        original.snapshot(),
+        Message::user("private worker one"),
+    ]);
+    assert!(worker.task_queue().is_none());
+    assert_eq!(worker.parent_goal_id(), Some(goal_id.as_str()));
+    worker.run_turn("worker one", |_| {}).await.unwrap();
+    assert_ne!(worker.goal_id(), controller.goal_id());
+    let supervisor = AgentSupervisor::new(controller, 2);
+    let results = supervisor
+        .run_tasks(
+            vec![AgentTask {
+                id: "worker-two".into(),
+                prompt: "worker two".into(),
+                context: vec![original.snapshot(), Message::user("private worker two")],
+            }],
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(results.len(), 1);
+    assert!(results[0].result.is_ok());
+    assert_eq!(
+        supervisor.template.task_queue().unwrap().state,
+        QueueState::Active
+    );
+    let requests = provider.requests.lock().unwrap();
+    assert!(
+        requests[0]
+            .messages
+            .iter()
+            .any(|m| m.content == "private worker one")
+    );
+    assert!(
+        !requests[1]
+            .messages
+            .iter()
+            .any(|m| m.content == "private worker one")
+    );
+    assert!(
+        requests[1]
+            .messages
+            .iter()
+            .any(|m| m.content == "private worker two")
+    );
+    assert!(requests.iter().all(|r| {
+        !r.messages
+            .iter()
+            .any(|m| m.content.starts_with(STATE_PREFIX) || m.content.starts_with(PROGRESS_PREFIX))
+    }));
+}
+
+struct FatalTool;
+#[async_trait]
+impl tool::Tool for FatalTool {
+    fn name(&self) -> &'static str {
+        "fatal"
+    }
+    fn description(&self) -> &'static str {
+        "fatal"
+    }
+    fn input_schema(&self) -> Value {
+        serde_json::json!({"type":"object"})
+    }
+    fn safety(&self, _: &Value) -> SafetyLevel {
+        SafetyLevel::Safe
+    }
+    fn capability(&self, _: &Value) -> tool::Capability {
+        tool::Capability::FilesystemRead
+    }
+    async fn execute(&self, _: Value) -> Result<String, ToolError> {
+        Err(ToolError::GlobalBlocked(
+            "all workspaces inaccessible".into(),
+        ))
+    }
+}
+
+#[tokio::test]
+async fn typed_global_tool_failure_stops_pending_dag_work_and_blocks_goal() {
+    let executions = Arc::new(Mutex::new(vec![]));
+    let mut response = call("fatal", "fatal", serde_json::json!({})).unwrap();
+    response.tool_calls.push(ToolCall {
+        id: "dependent".into(),
+        kind: "function".into(),
+        function: FunctionCall {
+            name: "record_task".into(),
+            arguments: serde_json::json!({"task":2,"_ax_depends_on":["fatal"]}).to_string(),
+        },
+    });
+    let provider = provider(vec![Ok(response)]);
+    let mut runtime = kernel(provider.clone())
+        .with_tool(FatalTool)
+        .with_tool(RecordingTool(executions.clone()));
+    assert!(matches!(
+        runtime.run_turn("goal\n1. one\n2. two", |_| {}).await,
+        Err(AgentError::GlobalBlocked(_))
+    ));
+    assert_eq!(runtime.task_queue().unwrap().state, QueueState::Blocked);
+    assert!(executions.lock().unwrap().is_empty());
+    assert_eq!(provider.requests.lock().unwrap().len(), 1);
+    assert!(
+        runtime
+            .messages()
+            .iter()
+            .any(|m| m.tool_call_id.as_deref() == Some("dependent"))
+    );
 }

@@ -139,7 +139,15 @@ enum Command {
         dry_run: bool,
     },
     /// Run one persisted task and exit.
-    Run { prompt: String },
+    Run {
+        prompt: String,
+        #[arg(long)]
+        session: Option<String>,
+        #[arg(long, requires = "session", conflicts_with = "cancel_goal")]
+        resume_goal: Option<String>,
+        #[arg(long, requires = "session")]
+        cancel_goal: Option<String>,
+    },
     /// Run independent tasks with bounded concurrency.
     Agents {
         #[arg(required = true, num_args = 1..)]
@@ -250,6 +258,7 @@ struct ReplState {
     runtime: Option<AgentKernel>,
     permissions: PermissionStore,
     execution_budget: runtime_core::ExecutionBudget,
+    next_goal_turn: runtime_core::GoalTurn,
     evolution: Option<::evolution::Handle>,
     evolution_revision: u64,
 }
@@ -309,6 +318,7 @@ impl ReplState {
             runtime: None,
             permissions: PermissionStore::default(),
             execution_budget: runtime_core::ExecutionBudget::default(),
+            next_goal_turn: runtime_core::GoalTurn::New,
             evolution: None,
             evolution_revision: 0,
         })
@@ -1204,10 +1214,31 @@ async fn main() -> Result<()> {
         Some(Command::Import { ref path, dry_run }) => {
             run_import(path, &data_dir, &cwd, dry_run)?;
         }
-        Some(Command::Run { ref prompt }) => {
+        Some(Command::Run {
+            ref prompt,
+            ref session,
+            ref resume_goal,
+            ref cancel_goal,
+        }) => {
             let selection = model_selection::require_resolved(&cli)?;
             let mut state = ReplState::new(data_dir, skills_dir, cli.mcp_config.clone())?;
             state.execution_budget = budget;
+            if let Some(session) = session
+                && !state.open_session(session, &context_budget(&selection, &[]))?
+            {
+                return Err(anyhow!("AX session not found"));
+            }
+            state.next_goal_turn = if let Some(goal_id) = resume_goal {
+                runtime_core::GoalTurn::Resume {
+                    goal_id: goal_id.clone(),
+                }
+            } else if let Some(goal_id) = cancel_goal {
+                runtime_core::GoalTurn::Cancel {
+                    goal_id: goal_id.clone(),
+                }
+            } else {
+                runtime_core::GoalTurn::New
+            };
             evolution::run_once(&mut state, &selection, approval, prompt).await?;
         }
         Some(Command::Agents {
@@ -1793,5 +1824,42 @@ mod project_root_tests {
         );
 
         fs::remove_dir_all(&root).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod goal_argument_tests {
+    use super::*;
+
+    #[test]
+    fn resume_requires_session_and_explicit_goal() {
+        assert!(Cli::try_parse_from(["ax", "run", "--resume-goal", "goal-1", "continue"]).is_err());
+        let cli = Cli::try_parse_from([
+            "ax",
+            "run",
+            "--session",
+            "session-1",
+            "--resume-goal",
+            "goal-1",
+            "continue",
+        ])
+        .unwrap();
+        assert!(matches!(cli.command, Some(Command::Run {
+            session: Some(session), resume_goal: Some(goal), cancel_goal: None, ..
+        }) if session == "session-1" && goal == "goal-1"));
+        assert!(
+            Cli::try_parse_from([
+                "ax",
+                "run",
+                "--session",
+                "session-1",
+                "--resume-goal",
+                "goal-1",
+                "--cancel-goal",
+                "goal-1",
+                "continue"
+            ])
+            .is_err()
+        );
     }
 }
