@@ -172,3 +172,24 @@ concise results, without full child tool histories.
 `--child-timeout-secs` limits each isolated child independently; it defaults to
 unlimited and never implicitly ends the controller. `--turn-timeout-secs` remains
 the global turn deadline. These options also apply to ACP child dispatch.
+
+
+## Execution state and truthful tool history
+
+The kernel checkpoints `[ax-execution-state]` after every tool completion, using
+existing AgentState/JSONL storage. It keeps at most sixteen completion events
+(call ID, tool, step, actual resolved arguments, result preview and progress),
+plus a cumulative tool-call count. Full raw results remain in authoritative
+history. The CLI restores the latest checkpoint independently of effective-context
+snapshots and bounded history pages. Compression changes conversation only and
+cannot replace execution state with a model-generated guess.
+
+Each execution request receives a replaceable `[ax-execution]` projection with
+the goal, step, expected output, scopes, recovery and actual events. Normal requests
+show two recent events; new user turns and stalls show up to eight, fitted against
+`ContextBudget`. This also supplies history/progress questions without matching
+language-specific keywords. Missing older events mean unknown details, never zero
+calls. Legacy/compressed sessions without a checkpoint expose an unknown total
+and only backfill retained actual call/result pairs. Child completion events use the same session-prefixed IDs as UI events;
+controller cursors prevent duplicate counting after reconnect. Child state remains
+independent of controller state.

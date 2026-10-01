@@ -2,12 +2,12 @@
 //! JSON-RPC is newline framed; no model, tool, session, or memory logic lives here.
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{Arc, Mutex},
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use anyhow::{Result, anyhow};
+use anyhow::{Context, Result, anyhow};
 use async_trait::async_trait;
 use mcp::{CURRENT_PROTOCOL_VERSION, McpConfig, ServerConfig, TransportConfig};
 use memory::MessageRole;
@@ -182,7 +182,12 @@ fn update(out: &Outbox, session_id: &str, event: AgentEvent, calls: &mut HashMap
             }
             update
         }
-        AgentEvent::ModelStarted { .. }
+        AgentEvent::SubagentStarted { .. }
+        | AgentEvent::SubagentProgress { .. }
+        | AgentEvent::SubagentCompleted { .. }
+        | AgentEvent::SubagentFailed { .. }
+        | AgentEvent::SubagentCancelled { .. }
+        | AgentEvent::ModelStarted { .. }
         | AgentEvent::ContextCompressed { .. }
         | AgentEvent::TurnStarted
         | AgentEvent::TurnFinished => return,
@@ -399,7 +404,7 @@ fn client_mcp_names(params: &Value) -> Result<Option<HashSet<String>>> {
 }
 fn apply_mcp_names(state: &mut ReplState, names: Option<&HashSet<String>>) -> Result<()> {
     let Some(names) = names else { return Ok(()) };
-    let mut config = McpConfig::load(&state.mcp_config)?;
+    let mut config = state.effective_mcp_config()?;
     for name in names {
         if !config.servers.contains_key(name) {
             return Err(anyhow!("unknown local MCP server: {name}"));
@@ -440,19 +445,40 @@ fn apply_permission_profile(store: &PermissionStore, profile: Option<&str>) {
 }
 
 fn replay(out: &Outbox, session_id: &str, state: &mut ReplState) -> Result<()> {
+    replay_store(out, session_id, session_id, state.store()?, false)
+}
+
+fn replay_store(
+    out: &Outbox,
+    session_id: &str,
+    source_session: &str,
+    store: &mut memory::MemoryStore,
+    tools_only: bool,
+) -> Result<()> {
     let mut pages = Vec::new();
     let mut before = None;
     loop {
-        let page = state.store()?.load_messages(session_id, before, 128)?;
+        let page = store.load_messages(source_session, before, 128)?;
         if page.is_empty() {
             break;
         }
         before = page.first().map(|item| item.id);
         pages.push(page);
     }
+    let mut children = HashSet::new();
+    let call_id = |id: &str| {
+        if tools_only {
+            format!("{source_session}:{id}")
+        } else {
+            id.to_owned()
+        }
+    };
     for message in pages.into_iter().rev().flatten() {
         let update = match message.role {
             MessageRole::User => {
+                if tools_only {
+                    continue;
+                }
                 json!({"sessionUpdate":"user_message_chunk","messageId":message.id.to_string(),"content":{"type":"text","text":message.content}})
             }
             MessageRole::Assistant => {
@@ -464,18 +490,60 @@ fn replay(out: &Outbox, session_id: &str, state: &mut ReplState) -> Result<()> {
                             .and_then(|text| serde_json::from_str::<Value>(text).ok())
                             .unwrap_or(Value::Null);
                         let detail = runtime_core::tool_activity(name, &input);
-                        let start = json!({"sessionUpdate":"tool_call","toolCallId":call["id"],"title":detail,"kind":name,"rawInput":{"name":name,"arguments":input},"status":"pending"});
+                        let start = json!({"sessionUpdate":"tool_call","toolCallId":call_id(call["id"].as_str().unwrap_or("unknown")),"title":detail,"kind":name,"rawInput":{"name":name,"arguments":input},"status":"pending"});
                         out.send(json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":session_id,"update":stamp(start,message.created_at)}})).ok();
                     }
+                }
+                if tools_only {
+                    continue;
                 }
                 json!({"sessionUpdate":"agent_message_chunk","messageId":message.id.to_string(),"content":{"type":"text","text":message.content}})
             }
             MessageRole::Tool => {
                 let result = serde_json::from_str::<tool::ToolResult>(&message.content)
                     .unwrap_or_else(|_| tool::ToolResult::from_legacy(message.content.clone()));
-                json!({"sessionUpdate":"tool_call_update","toolCallId":message.metadata.get("tool_call_id").and_then(Value::as_str).unwrap_or("unknown"),"status":if result.status=="success" {"completed"} else {"failed"},"rawOutput":result})
+                json!({"sessionUpdate":"tool_call_update","toolCallId":call_id(message.metadata.get("tool_call_id").and_then(Value::as_str).unwrap_or("unknown")),"status":if result.status=="success" {"completed"} else {"failed"},"rawOutput":result})
             }
             MessageRole::System => {
+                if !tools_only {
+                    let queue = message
+                        .content
+                        .strip_prefix(runtime_core::task_queue::STATE_PREFIX)
+                        .or_else(|| {
+                            message
+                                .content
+                                .strip_prefix(runtime_core::task_queue::ARCHIVE_PREFIX)
+                        })
+                        .and_then(|data| {
+                            serde_json::from_str::<runtime_core::task_queue::TaskQueue>(data).ok()
+                        });
+                    if let Some(queue) = queue {
+                        for child in queue.tasks.iter().filter_map(|task| task.child.as_ref()) {
+                            if !children.insert(child.session_id.clone()) {
+                                continue;
+                            }
+                            let database = child.state_dir.as_ref().map_or_else(
+                                || child.cwd.join(".ax").join("child.sqlite3"),
+                                |state| state.join("child.sqlite3"),
+                            );
+                            // Never create a missing child store while viewing history.
+                            if database.is_file() {
+                                let mut child_store = memory::MemoryStore::open(&database)?;
+                                replay_store(
+                                    out,
+                                    session_id,
+                                    &child.session_id,
+                                    &mut child_store,
+                                    true,
+                                )?;
+                            }
+                        }
+                        continue;
+                    }
+                }
+                if tools_only {
+                    continue;
+                }
                 let Some(data) = message.content.strip_prefix("[ax-changes]\n") else {
                     continue;
                 };
@@ -921,6 +989,7 @@ pub async fn run(cli: &Cli, data_dir: PathBuf, skills_dir: PathBuf) -> Result<()
                 &out,
                 id,
                 json!({
+                    "scopedCapabilities":{"method":"_ax/scopedCapabilities","scopes":["global","project"],"kinds":["skills","mcp","agents"],"actions":["list","enable","disable","add","remove"]},
                     "sessions":true,
                     "resume":true,
                     "streaming":true,
@@ -997,29 +1066,50 @@ pub async fn run(cli: &Cli, data_dir: PathBuf, skills_dir: PathBuf) -> Result<()
                     ),
                 }
             }
-            "_ax/skills" => {
-                let global = crate::config::ax_home().join("skills");
-                match skill::SkillCatalog::index_sources([&skills_dir, &global]) {
-                    Ok(catalog) => {
-                        let skills = catalog.statuses(std::iter::empty::<&str>()).into_iter()
-                            .map(|status| json!({"name":status.metadata.name,"description":status.metadata.description,"missing_tools":status.missing_tools}))
-                            .collect::<Vec<_>>();
-                        reply(&out, id, json!({"skills":skills}));
+            "_ax/skills" | "_ax/mcp" | "_ax/agents" | "_ax/scopedCapabilities" => {
+                let result = (|| -> Result<Value> {
+                    let root = crate::discover_project_root(&std::env::current_dir()?);
+                    let mut state = ReplState::new_in_project(
+                        data_dir.clone(),
+                        skills_dir.clone(),
+                        mcp_config.clone(),
+                        &root,
+                    )?;
+                    let kind = crate::capabilities::Kind::parse(
+                        params
+                            .get("kind")
+                            .and_then(Value::as_str)
+                            .unwrap_or(match method {
+                                "_ax/skills" => "skills",
+                                "_ax/mcp" => "mcp",
+                                _ => "agents",
+                            }),
+                    )?;
+                    let scope = params
+                        .get("scope")
+                        .and_then(Value::as_str)
+                        .map(crate::capabilities::parse_scope)
+                        .transpose()?;
+                    if let Some(action) = params
+                        .get("action")
+                        .and_then(Value::as_str)
+                        .filter(|action| *action != "list")
+                    {
+                        let scope = scope.context("mutation requires explicit scope")?;
+                        let name = params
+                            .get("name")
+                            .and_then(Value::as_str)
+                            .context("name is required")?;
+                        let source = params.get("source").and_then(Value::as_str).map(Path::new);
+                        state.manage_capability(kind, scope, action, name, source)?;
                     }
-                    Err(err) => error(&out, id, -32000, err.to_string()),
-                }
-            }
-            "_ax/mcp" => {
-                let path = mcp_config
-                    .clone()
-                    .unwrap_or_else(|| data_dir.join("mcp.toml"));
-                match McpConfig::load(path) {
-                    Ok(config) => {
-                        let servers = config.servers.into_iter()
-                            .map(|(name, server)| json!({"name":name,"description":server.description,"enabled":server.enabled,"capabilities":server.capabilities}))
-                            .collect::<Vec<_>>();
-                        reply(&out, id, json!({"servers":servers}));
-                    }
+                    let rows = state.capability_rows(kind, scope)?;
+                    Ok(
+                        json!({"items": rows, kind.key(): rows, "servers": if kind == crate::capabilities::Kind::Mcp { rows } else { Vec::new() }, "project_id":state.project_id}),
+                    )
+                })();
+                match result {
+                    Ok(value) => reply(&out, id, value),
                     Err(err) => error(&out, id, -32000, err.to_string()),
                 }
             }
@@ -1101,6 +1191,119 @@ mod tests {
             runtime_core::task_queue::TaskStatus::Pending
         );
         drop(restored);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn cancelled_controller_replays_child_tools_once_across_history_pages() {
+        let root = std::env::temp_dir().join(format!("ax-child-replay-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let mut parent = memory::MemoryStore::open(root.join("parent.sqlite3")).unwrap();
+        let controller = parent.create_session("controller").unwrap().id;
+        parent
+            .append_message(
+                &controller,
+                memory::NewMessage::text(MessageRole::User, "goal"),
+            )
+            .unwrap();
+        let mut tasks = Vec::new();
+        let mut expected = Vec::new();
+        for index in 0..2 {
+            let state_dir = root.join(format!("child-{index}"));
+            std::fs::create_dir_all(&state_dir).unwrap();
+            let mut store = memory::MemoryStore::open(state_dir.join("child.sqlite3")).unwrap();
+            let session = store.create_session("worker").unwrap().id;
+            store
+                .append_message(
+                    &session,
+                    memory::NewMessage::text(MessageRole::User, "internal prompt"),
+                )
+                .unwrap();
+            // Cross the replay page boundary; workers deliberately reuse call IDs.
+            for call in 0..65 {
+                let id = format!("call-{call}");
+                expected.push(format!("{session}:{id}"));
+                store.append_message(&session, memory::NewMessage {
+                    role: MessageRole::Assistant, kind: memory::MessageKind::ToolCall,
+                    content: "internal narration".into(),
+                    metadata: json!({"tool_calls":[{"id":id,"function":{"name":"shell","arguments":"{\"command\":\"echo kept\"}"}}]}),
+                }).unwrap();
+                if call < 64 {
+                    store
+                        .append_message(
+                            &session,
+                            memory::NewMessage {
+                                role: MessageRole::Tool,
+                                kind: memory::MessageKind::ToolCall,
+                                content: serde_json::to_string(&tool::ToolResult::new(
+                                    true,
+                                    "kept output".into(),
+                                ))
+                                .unwrap(),
+                                metadata: json!({"tool_call_id":id}),
+                            },
+                        )
+                        .unwrap();
+                }
+            }
+            tasks.push(json!({"title":"worker","status":"running","failure_reason":null,"outcome":null,
+                "child":{"goal_id":"goal","session_id":session,"cwd":root.join("deleted-workspace"),"state_dir":state_dir,"memory_scope":"worker"}}));
+        }
+        let queue: runtime_core::task_queue::TaskQueue = serde_json::from_value(json!({
+            "goal_id":"goal","state":"cancelled","overall_goal":"goal","tasks":tasks,"summarized":false,"stop_reason":"cancelled"
+        })).unwrap();
+        // Repeated queue checkpoints and archives must not duplicate child tools.
+        for prefix in [
+            runtime_core::task_queue::STATE_PREFIX,
+            runtime_core::task_queue::ARCHIVE_PREFIX,
+        ] {
+            parent
+                .append_message(
+                    &controller,
+                    memory::NewMessage::text(
+                        MessageRole::System,
+                        format!("{prefix}{}", serde_json::to_string(&queue).unwrap()),
+                    ),
+                )
+                .unwrap();
+        }
+        let (out, mut rx) = mpsc::unbounded_channel();
+        replay_store(&out, &controller, &controller, &mut parent, false).unwrap();
+        let mut updates = Vec::new();
+        while let Ok(frame) = rx.try_recv() {
+            assert_eq!(frame["params"]["sessionId"], controller);
+            updates.push(frame["params"]["update"].clone());
+        }
+        let starts: Vec<_> = updates
+            .iter()
+            .filter(|u| u["sessionUpdate"] == "tool_call")
+            .map(|u| u["toolCallId"].as_str().unwrap().to_owned())
+            .collect();
+        assert_eq!(starts, expected);
+        let results: Vec<_> = updates
+            .iter()
+            .filter(|u| u["sessionUpdate"] == "tool_call_update")
+            .collect();
+        assert_eq!(results.len(), 128);
+        assert!(
+            results
+                .iter()
+                .all(|u| u["rawOutput"]["raw_output"] == "kept output")
+        );
+        assert_eq!(
+            updates
+                .iter()
+                .filter(|u| u["sessionUpdate"] == "user_message_chunk")
+                .count(),
+            1
+        );
+        assert!(
+            !updates
+                .iter()
+                .any(|u| u["sessionUpdate"] == "agent_message_chunk")
+        );
+        drop(parent);
         std::fs::remove_dir_all(root).unwrap();
     }
 

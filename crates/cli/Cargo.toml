@@ -10,6 +10,7 @@ name = "ax"
 path = "src/main.rs"
 
 [dependencies]
+scoped = { path = "../scoped" }
 ignore = "0.4"
 fs2 = "0.4"
 anyhow.workspace = true

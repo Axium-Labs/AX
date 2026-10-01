@@ -324,3 +324,89 @@ paths. Shell inherits installed runtimes/PATH but launches with the child cwd
 and child AX_HOME/session/memory environment. AX_HOME and memory databases bind
 to `RunContext.state_dir`, outside the disposable workspace. Tool execution keeps ordinary
 approval rules and the existing DAG. This does not introduce an OS container.
+
+
+## Execution scope and bounded recovery
+
+Ordinary tool arguments may include `_ax_execution` with `goal_id`, `step`,
+`expected_output` and `scope`. The scheduler resolves result references first;
+the kernel validates the binding and declared path resources before tool execution,
+then strips runtime-only metadata. `_ax_observe` may name a JSON pointer to an
+actual true boolean verifying the expected output; repeated evidence does not
+reset stagnation. After a stall, only three fresh observations are admitted
+before the runtime requires a repair/output-producing action. Permissions remain independently declared by each tool.
+
+Recovery retains the failed step. Filesystem failures narrow recovery to the
+operation's directory within the existing scope. Only a successful retry of that
+operation (including corrected arguments on the same resource) closes failure
+recovery and restores the previous scope. After three consecutive failures the
+runtime rejects another identical retry until a bounded repair changes strategy.
+Tools with unknown/global effects may retry the exact failed operation, but cannot
+launch new unbounded recovery commands. Tool-owned runtime storage is explicitly
+declared through `runtime_owned_resources`; memory uses this for its private
+session database, which is outside disposable workspaces. This declaration is
+for owned storage, not caller-selected paths. Embedders can choose an initial
+workspace with `AgentKernel::with_execution_scope` and must bind relative tool
+paths to that workspace.
+
+Recursive searches default to the step subtree. A workspace-wide fallback needs
+an explicit nonempty `fallback_reason`, remains inside the initial workspace,
+and is unavailable outside the failed-step scope during recovery. Search traverses
+at most 2,000 entries, eight directory levels and two seconds; skips symlinks,
+binary files and files larger than 1 MB; and excludes `.git`, build/target/dist,
+node_modules, child-runs, caches, virtual environments, runtime storage and vendor
+outputs. Limits produce partial/truncated results or an explicit timeout error.
+
+
+## Optional subagents
+
+Subagents are disabled by default. `/settings` toggles delegation and persists it
+in the existing AX config; `/settings subagent on` and `/settings subagent off`
+are also supported. CLI settings use `ax settings --subagent true|false`,
+`--max-concurrent 3`, and `--max-depth 1`. Changes are loaded before the next
+agent turn, including in a running TUI/ACP session. The JSON section is:
+
+```json
+"subagent": { "enabled": false, "max_concurrent": 3, "max_depth": 1 }
+```
+
+Legacy `config.toml` supports the equivalent section and migrates through the
+existing config loader:
+
+```ini
+[subagent]
+enabled = false
+max_concurrent = 3
+max_depth = 1
+```
+
+When disabled, no delegation tool, manager, child provisioning, extra prompt,
+planner request or model call is created. Enabling adds only
+`subagent(task, context?, tools?)`; the model decides whether to use it. The
+runtime primitives are `spawn_agent`, `wait_agent`, and `cancel_agent` on the
+kernel or its optional manager handle. Embedders attach a `ChildHost`, configure
+subagents and call `prepare_subagents` before direct primitive use; normal agent
+turns prepare the handle automatically.
+
+Independent calls use the existing tool-round DAG and bounded concurrency.
+Delegation admission also limits children to `max_concurrent` (default 3,
+1–64); provisioning counts toward this bound. At most 64 tasks are admitted per
+turn, preventing unlimited spawn even with an unlimited execution budget.
+`max_depth` is 0 or 1; all children have delegation removed regardless of
+configuration. Tools are a whitelist intersected with the child's rebound
+registry; unknown or delegation tool requests are rejected. Empty tools disables
+all child tools. Provider/model/reasoning and the parent approval policy are
+inherited; tools and histories are not shared across child sessions.
+
+Each tool returns `{status, summary, artifacts, error}`. Status is `completed`,
+`failed` or `cancelled`; artifacts identify the durable child state directory,
+when supplied by the host. Disposable workspace changes are not merged into the
+parent. Only the final receipt is returned; raw history remains in the child
+store. Runtime events are `subagent_started`, `subagent_progress`,
+`subagent_completed`, `subagent_failed` and `subagent_cancelled`. TUI renders
+brief lifecycle notices without child text, tool inputs or reasoning.
+Cancellation and timeouts stop the existing child loop and close the child
+receipt. Primitive timeouts include admission/provisioning; model-tool children
+inherit the configured child timeout. Dropping a parent tool round cancels its
+outstanding delegated calls. Provider, provisioning, receipt and worker failures
+are returned locally in the result envelope.

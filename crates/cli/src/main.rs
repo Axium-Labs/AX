@@ -24,11 +24,12 @@ use tool::{FilesystemTool, ShellTool, ToolRegistry};
 
 mod acp;
 mod auth_login;
+mod capabilities;
 mod capability_import;
 mod config;
-mod execution;
 mod crew_device;
 mod evolution;
+mod execution;
 mod file_reference;
 mod memory_context;
 mod memory_tool;
@@ -107,6 +108,15 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Show or persist optional subagent settings; active agents reload next turn.
+    Settings {
+        #[arg(long, action = clap::ArgAction::Set)]
+        subagent: Option<bool>,
+        #[arg(long)]
+        max_concurrent: Option<usize>,
+        #[arg(long)]
+        max_depth: Option<usize>,
+    },
     /// Show or select the agent environment and Crew terminal shell.
     Environment {
         #[arg(value_enum)]
@@ -128,6 +138,17 @@ enum Command {
     Mcp {
         #[command(subcommand)]
         command: CapabilityCommand,
+    },
+    /// Manage scoped Skills, MCP servers and named Agents through one registry.
+    Capabilities {
+        kind: String,
+        #[arg(default_value = "list")]
+        action: String,
+        name: Option<String>,
+        #[arg(long, default_value = "project")]
+        scope: String,
+        #[arg(long)]
+        source: Option<PathBuf>,
     },
     /// Run the Agent Client Protocol v1 adapter on stdio.
     Acp,
@@ -260,6 +281,14 @@ struct ReplState {
     project_id: String,
     project_local_store: bool,
     skill_catalog: Option<SkillCatalog>,
+    capability_registries: std::cell::RefCell<
+        std::collections::HashMap<
+            capabilities::Kind,
+            scoped::ScopedRegistry<capabilities::Capability>,
+        >,
+    >,
+    capability_scope: Option<scoped::Scope>,
+    capability_home: PathBuf,
     file_index: Option<Vec<String>>,
     mcp_manager: Option<Arc<tokio::sync::Mutex<McpManager>>>,
     mcp_tools: Vec<McpToolProxy>,
@@ -293,7 +322,15 @@ impl ReplState {
         let project_id = project_identity::load_or_create(project_root)?;
         storage_location::migrate_project(project_root, &data_dir)?;
         let database = database_path(&data_dir);
-        let mcp_config = mcp_config.unwrap_or_else(|| data_dir.join("mcp.toml"));
+        let mcp_config = mcp_config.unwrap_or_else(|| {
+            let canonical = project_root.join(".ax/mcp.toml");
+            let legacy = data_dir.join("mcp.toml");
+            if !canonical.exists() && legacy.exists() {
+                legacy
+            } else {
+                canonical
+            }
+        });
         let store = if database.exists() {
             Some(MemoryStore::open(&database).with_context(|| {
                 format!("failed to open memory database at {}", database.display())
@@ -321,6 +358,9 @@ impl ReplState {
             project_id,
             project_local_store,
             skill_catalog: None,
+            capability_registries: std::cell::RefCell::new(std::collections::HashMap::new()),
+            capability_scope: None,
+            capability_home: config::ax_home(),
             file_index: None,
             mcp_manager: None,
             mcp_tools: Vec::new(),
@@ -510,6 +550,15 @@ impl ReplState {
         if let Some(queue_state) = queue_state {
             self.loaded_messages.push(restore_message(&queue_state));
         }
+        let execution_state = self
+            .store()?
+            .latest_agent_state(id, runtime_core::execution::STATE_PREFIX)?;
+        self.loaded_messages.retain(|m| {
+            m.role != Role::System || !m.content.starts_with(runtime_core::execution::STATE_PREFIX)
+        });
+        if let Some(state) = execution_state {
+            self.loaded_messages.push(restore_message(&state));
+        }
         self.active_skills = self
             .loaded_messages
             .iter()
@@ -598,18 +647,12 @@ impl ReplState {
 
     fn skills(&mut self) -> Result<&SkillCatalog> {
         if self.skill_catalog.is_none() {
-            let global_skills = config::ax_home().join("skills");
-            let evolved = self.evolution_root().join("live");
-            let catalog = SkillCatalog::index_sources([&self.skills_dir, &global_skills, &evolved])
-                .with_context(|| {
-                    format!(
-                        "failed to index skills directory {}",
-                        self.skills_dir.display()
-                    )
-                })?;
-            for issue in catalog.issues() {
-                eprintln!("Skill discovery: {issue}");
-            }
+            let registry = self.capability_registry(capabilities::Kind::Skills)?;
+            let catalog = SkillCatalog::index_directories(
+                registry
+                    .effective()
+                    .map(|entry| entry.value.source.as_path()),
+            )?;
             self.skill_catalog = Some(catalog);
         }
         self.skill_catalog
@@ -773,29 +816,12 @@ impl ReplState {
         Ok(token_budget)
     }
 
-    /// The MCP config actually loaded: the project file, or the user-level
-    /// `$AX_HOME/mcp.toml` an installer (or a one-time `cp`) can provide, which
-    /// then applies to every project until a project file overrides it. Layers
-    /// the same way `<project>/skills` and `~/.ax/skills` do.
-    fn resolved_mcp_config(&self) -> PathBuf {
-        if self.mcp_config.exists() {
-            return self.mcp_config.clone();
-        }
-        let global = config::ax_home().join("mcp.toml");
-        if global.exists() {
-            return global;
-        }
-        self.mcp_config.clone()
-    }
-
     fn mcp(&mut self) -> Result<Arc<tokio::sync::Mutex<McpManager>>> {
         if self.mcp_manager.is_none() {
             let config = if let Some(config) = self.mcp_override.clone() {
                 config
             } else {
-                let path = self.resolved_mcp_config();
-                McpConfig::load(&path)
-                    .with_context(|| format!("failed to load MCP config {}", path.display()))?
+                self.effective_mcp_config()?
             };
             self.mcp_manager = Some(Arc::new(tokio::sync::Mutex::new(McpManager::new(config))));
         }
@@ -1169,7 +1195,13 @@ fn render_event(event: AgentEvent) {
             "[memory] compressed {removed_messages} messages ({estimated_tokens_before} -> {estimated_tokens_after} estimated tokens)"
         ),
         AgentEvent::TurnFinished => println!(),
-        AgentEvent::TurnStarted | AgentEvent::ThinkingDelta { .. } => {}
+        AgentEvent::SubagentStarted { id } => eprintln!("[{id}] started"),
+        AgentEvent::SubagentCompleted { id } => eprintln!("[{id}] completed"),
+        AgentEvent::SubagentFailed { id, error } => eprintln!("[{id}] failed: {error}"),
+        AgentEvent::SubagentCancelled { id } => eprintln!("[{id}] cancelled"),
+        AgentEvent::SubagentProgress { .. }
+        | AgentEvent::TurnStarted
+        | AgentEvent::ThinkingDelta { .. } => {}
     }
 }
 
@@ -1182,6 +1214,30 @@ async fn main() -> Result<()> {
             return Err(anyhow!("--update cannot be combined with a subcommand"));
         }
         return update::run().await;
+    }
+    if let Some(Command::Settings {
+        subagent,
+        max_concurrent,
+        max_depth,
+    }) = cli.command
+    {
+        let mut config = AxConfig::load()?;
+        if let Some(value) = subagent {
+            config.subagent.enabled = value;
+        }
+        if let Some(value) = max_concurrent {
+            anyhow::ensure!((1..=64).contains(&value), "max_concurrent must be 1..=64");
+            config.subagent.max_concurrent = value;
+        }
+        if let Some(value) = max_depth {
+            anyhow::ensure!(value <= 1, "max_depth must be 0 or 1");
+            config.subagent.max_depth = value;
+        }
+        if subagent.is_some() || max_concurrent.is_some() || max_depth.is_some() {
+            config.save()?;
+        }
+        println!("{}", serde_json::to_string_pretty(&config.subagent)?);
+        return Ok(());
     }
     if let Some(Command::Environment {
         environment,
@@ -1209,6 +1265,32 @@ async fn main() -> Result<()> {
     if let Some(Command::Auth { ref command }) = cli.command {
         return auth_login::run(command).await;
     }
+    if let Some(Command::Capabilities {
+        ref kind,
+        ref action,
+        ref name,
+        ref scope,
+        ref source,
+    }) = cli.command
+    {
+        let mut state = ReplState::new(data_dir, skills_dir, cli.mcp_config.clone())?;
+        let kind = capabilities::Kind::parse(kind)?;
+        let scope = capabilities::parse_scope(scope)?;
+        if action != "list" {
+            state.manage_capability(
+                kind,
+                scope,
+                action,
+                name.as_deref().context("name is required")?,
+                source.as_deref(),
+            )?;
+        }
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&state.capability_rows(kind, Some(scope))?)?
+        );
+        return Ok(());
+    }
     if capability_import::run(&cli, &data_dir, &skills_dir)? {
         return Ok(());
     }
@@ -1223,10 +1305,12 @@ async fn main() -> Result<()> {
         Some(
             Command::Acp
             | Command::Environment { .. }
+            | Command::Settings { .. }
             | Command::Crew { .. }
             | Command::Auth { .. }
             | Command::Skill { .. }
-            | Command::Mcp { .. },
+            | Command::Mcp { .. }
+            | Command::Capabilities { .. },
         ) => {
             unreachable!("handled before command dispatch")
         }
@@ -1483,6 +1567,7 @@ where
                 ..state.execution_budget
             }),
     );
+    state.configure_scoped_subagents()?;
     // Bind memory access to the current session and user request on every turn.
     let global_root = config::ax_home();
     fs::create_dir_all(&global_root)?;

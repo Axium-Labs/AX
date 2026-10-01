@@ -15,32 +15,49 @@ fn available_tools(state: &ReplState) -> Vec<String> {
 }
 
 pub(super) fn skill_items(state: &mut ReplState) -> Result<Vec<SurfaceItem>> {
-    let available = available_tools(state);
-    let disabled = state.disabled_skills()?;
+    capability_items(state, crate::capabilities::Kind::Skills)
+}
+
+pub(super) fn capability_items(
+    state: &ReplState,
+    kind: crate::capabilities::Kind,
+) -> Result<Vec<SurfaceItem>> {
     Ok(state
-        .skills()?
-        .statuses(available.iter().map(String::as_str))
+        .capability_rows(kind, state.capability_scope)?
         .into_iter()
-        .map(|s| {
-            let status = if disabled.contains(&s.metadata.name) {
-                "disabled".to_owned()
-            } else if s.available() {
-                "enabled".to_owned()
-            } else {
-                format!("unavailable: missing {}", s.missing_tools.join(", "))
-            };
-            SurfaceItem {
-                id: s.metadata.name.clone(),
-                label: s.metadata.name,
-                value: format!("{status} - {}", s.metadata.description),
-            }
+        .map(|row| SurfaceItem {
+            id: row["name"].as_str().unwrap_or_default().into(),
+            label: row["name"].as_str().unwrap_or_default().into(),
+            value: format!(
+                "[{}] | {} | {}",
+                row["scope"].as_str().unwrap_or_default(),
+                row["status"].as_str().unwrap_or_default(),
+                row["description"].as_str().unwrap_or_default()
+            ),
         })
         .collect())
 }
 
+pub(super) fn open_agents(state: &ReplState, pane: &mut BottomPane) -> Result<()> {
+    pane.push_view(SurfaceView::manager(
+        "Agents",
+        "agents",
+        vec![
+            "Name | Scope | Status".into(),
+            "Instructions load only when delegated.".into(),
+        ],
+        capability_items(state, crate::capabilities::Kind::Agents)?,
+        "Enter toggle in selected scope | Esc back",
+    ));
+    Ok(())
+}
+
 pub(super) fn open_skills(state: &mut ReplState, pane: &mut BottomPane) -> Result<()> {
     let items = skill_items(state)?;
-    let mut help = vec!["Type to search names, descriptions, or status".into()];
+    let mut help = vec![
+        "Name | Scope | Status".into(),
+        "Type to search names, descriptions, or status".into(),
+    ];
     help.extend(
         state
             .skills()?
@@ -98,7 +115,7 @@ pub(super) async fn open_mcp(state: &mut ReplState, pane: &mut BottomPane) -> Re
         "mcp",
         vec!["Servers connect lazily. Type to search.".into()],
         items,
-        "Enter details | Alt+C connect | Alt+X disconnect | Alt+R restart | Esc back",
+        "Space enable/disable | Enter details | Alt+C connect | Alt+X disconnect | Alt+R restart | Esc back",
     ));
     Ok(())
 }
@@ -116,23 +133,7 @@ fn server_state(status: &mcp::ServerStatus) -> &'static str {
 }
 
 pub(super) async fn mcp_items(state: &mut ReplState) -> Result<Vec<SurfaceItem>> {
-    Ok(state
-        .mcp()?
-        .lock()
-        .await
-        .statuses()
-        .iter()
-        .map(|s| SurfaceItem {
-            id: s.name.clone(),
-            label: s.name.clone(),
-            value: format!(
-                "{} | {} | {} discovered tools",
-                server_state(s),
-                s.transport,
-                s.tools.len()
-            ),
-        })
-        .collect())
+    capability_items(state, crate::capabilities::Kind::Mcp)
 }
 
 pub(super) async fn open_detail(
@@ -178,12 +179,24 @@ pub(super) async fn open_detail(
             );
         }
         "mcp" => {
+            let registry = state.capability_registry(crate::capabilities::Kind::Mcp)?;
+            let entry = registry
+                .get(id)
+                .ok_or_else(|| anyhow::anyhow!("Unknown server: {id}"))?;
+            lines.push(format!("Scope: [{}]", entry.scope.label()));
+            lines.push(format!("Status: {}", entry.status()));
+            lines.push(format!("Description: {}", entry.value.description));
+            lines.push(format!("Source: {}", entry.value.source.display()));
+            if !entry.enabled {
+                pane.push_view(SurfaceView::info("Details", lines));
+                return Ok(());
+            }
             let statuses = state.mcp()?.lock().await.statuses();
             let status = statuses
                 .iter()
                 .find(|s| s.name == id)
-                .ok_or_else(|| anyhow::anyhow!("Unknown server: {id}"))?;
-            lines.push(format!("Status: {}", server_state(status)));
+                .ok_or_else(|| anyhow::anyhow!("Server is unavailable: {id}"))?;
+            lines.push(format!("Connection: {}", server_state(status)));
             lines.push(format!("Transport: {}", status.transport));
             lines.push(format!("Configured protocol: {}", status.protocol_version));
             if let Some(error) = &status.last_error {
@@ -211,8 +224,25 @@ pub(super) async fn open_detail(
 
 fn append_skill_details(state: &mut ReplState, id: &str, lines: &mut Vec<String>) -> Result<()> {
     let available = available_tools(state);
-    let disabled = state.disabled_skills()?.contains(id);
-    let catalog = state.skills()?;
+    let row = state
+        .capability_rows(crate::capabilities::Kind::Skills, state.capability_scope)?
+        .into_iter()
+        .find(|row| row["name"] == id)
+        .ok_or_else(|| anyhow::anyhow!("Unknown skill: {id}"))?;
+    let source = std::path::PathBuf::from(
+        row["source"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("Missing source"))?,
+    );
+    let catalog = skill::SkillCatalog::index_directories([&source])?;
+    lines.push(format!(
+        "Scope: [{}]",
+        row["scope"].as_str().unwrap_or_default()
+    ));
+    lines.push(format!(
+        "Status: {}",
+        row["status"].as_str().unwrap_or_default()
+    ));
     let status = catalog
         .statuses(available.iter().map(String::as_str))
         .into_iter()
@@ -222,7 +252,7 @@ fn append_skill_details(state: &mut ReplState, id: &str, lines: &mut Vec<String>
         "Source: {}",
         catalog.directory(id).expect("indexed skill").display()
     ));
-    lines.push(format!("Enabled: {}", !disabled));
+    lines.push(format!("Enabled: {}", row["enabled"]));
     lines.push(format!(
         "Missing tools: {}",
         status.missing_tools.join(", ")

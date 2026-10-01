@@ -91,6 +91,12 @@ mod tests {
             command="this-command-does-not-exist-ax-test"
             description="Project issue tracker"
             capabilities=["issues", "tasks"]
+
+            [servers.disabled]
+            transport="stdio"
+            command="must-never-start-disabled-server"
+            description="disabled-secret-capability"
+            enabled=false
         "#,
         )
         .unwrap();
@@ -99,6 +105,7 @@ mod tests {
         let result = gateway.execute(json!({"action":"catalog"})).await.unwrap();
         assert!(result.contains("issues"));
         assert!(result.contains("Project issue tracker"));
+        assert!(!result.contains("disabled-secret-capability"));
         assert_eq!(manager.lock().await.connected_server_count(), 0);
         assert_eq!(
             gateway.permission(&json!({"action":"call"})).capability,

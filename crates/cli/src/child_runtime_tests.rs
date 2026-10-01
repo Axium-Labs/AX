@@ -149,6 +149,52 @@ struct Fixture {
     root: PathBuf,
     host: Arc<LocalChildHost>,
 }
+
+#[tokio::test]
+async fn optional_subagent_uses_local_child_session_and_durable_artifact() {
+    let fixture = Fixture::new();
+    let provider = provider(false, false, false);
+    let mut kernel = fixture.kernel(provider.clone());
+    kernel.push_context(model::Message::system("controller secret"));
+    kernel.configure_subagents(runtime_core::SubagentConfig {
+        enabled: true,
+        ..runtime_core::SubagentConfig::default()
+    });
+    let _events = kernel.prepare_subagents().unwrap();
+    let id = kernel
+        .spawn_agent("child 1", runtime_core::SpawnOptions::default())
+        .unwrap();
+    let result = kernel.wait_agent(&id).await;
+    assert_eq!(result.status, "completed", "{:?}", result.error);
+    assert_eq!(result.summary, "outcome:child 1");
+    let state = PathBuf::from(&result.artifacts[0]);
+    assert!(state.join("child.sqlite3").exists());
+    let store = MemoryStore::open(state.join("child.sqlite3")).unwrap();
+    let sessions = store.list_sessions(10, 0).unwrap();
+    assert_eq!(sessions.len(), 1);
+    let messages = store
+        .load_messages(&sessions[0].id, None, u32::MAX)
+        .unwrap();
+    assert!(
+        !messages
+            .iter()
+            .any(|m| m.content.contains("controller secret"))
+    );
+    assert!(
+        messages
+            .iter()
+            .any(|m| m.content.contains("outcome:child 1"))
+    );
+    assert_eq!(
+        store
+            .scoped_memories(memory::MemoryScope::Session, &sessions[0].id)
+            .unwrap()[0]
+            .value,
+        "child 1"
+    );
+    assert!(!fixture.host.source.join("result.txt").exists());
+    drop(store);
+}
 impl Fixture {
     fn new() -> Self {
         let root = std::env::temp_dir().join(format!("ax-child-test-{}", uuid::Uuid::new_v4()));

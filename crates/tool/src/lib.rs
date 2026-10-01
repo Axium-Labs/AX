@@ -77,6 +77,14 @@ pub trait Tool: Send + Sync {
     fn fork_for_run(&self, _context: &RunContext) -> Option<Arc<dyn Tool>> {
         None
     }
+    /// Declared paths belong to tool-owned runtime storage, never caller-chosen files.
+    fn runtime_owned_resources(&self) -> bool {
+        false
+    }
+    /// Whether this tool recursively traverses a filesystem subtree.
+    fn recursive_search(&self) -> bool {
+        false
+    }
     fn name(&self) -> &str;
     fn description(&self) -> &str;
     fn input_schema(&self) -> Value;

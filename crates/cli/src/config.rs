@@ -26,6 +26,57 @@ pub(crate) fn ax_home() -> PathBuf {
         .join(".ax")
 }
 
+#[cfg(test)]
+mod subagent_tests {
+    use super::*;
+
+    #[test]
+    fn subagent_defaults_and_json_persistence() {
+        let root =
+            std::env::temp_dir().join(format!("ax-subagent-config-{}", uuid::Uuid::new_v4()));
+        let path = root.join("config.json");
+        let mut config = AxConfig::load_from(&path).unwrap();
+        assert_eq!(config.subagent, runtime_core::SubagentConfig::default());
+        assert!(
+            !serde_json::from_str::<AxConfig>("{}")
+                .unwrap()
+                .subagent
+                .enabled
+        );
+        config.subagent.enabled = true;
+        config.subagent.max_concurrent = 2;
+        config.save_to(&path).unwrap();
+        assert_eq!(
+            AxConfig::load_from(&path).unwrap().subagent,
+            config.subagent
+        );
+        config.subagent.enabled = false;
+        config.save_to(&path).unwrap();
+        assert!(!AxConfig::load_from(&path).unwrap().subagent.enabled);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn legacy_subagent_section_migrates_without_losing_settings() {
+        let root = std::env::temp_dir().join(format!("ax-subagent-toml-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            root.join("config.toml"),
+            "[subagent]\nenabled = true\nmax_concurrent = 3\nmax_depth = 1\n",
+        )
+        .unwrap();
+        let config = AxConfig::load_from_home(&root).unwrap();
+        assert!(config.subagent.enabled);
+        assert_eq!(config.subagent.max_concurrent, 3);
+        assert_eq!(config.subagent.max_depth, 1);
+        assert_eq!(
+            AxConfig::load_from_home(&root).unwrap().subagent,
+            config.subagent
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
 #[must_use]
 pub(crate) fn config_path() -> PathBuf {
     ax_home().join("config.json")
@@ -33,6 +84,8 @@ pub(crate) fn config_path() -> PathBuf {
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct AxConfig {
+    #[serde(default)]
+    pub subagent: runtime_core::SubagentConfig,
     #[serde(default)]
     pub execution: ExecutionConfig,
     #[serde(default, skip_serializing_if = "Option::is_none")]

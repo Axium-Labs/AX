@@ -4,7 +4,11 @@ mod budget;
 pub mod child;
 pub use child::{ChildCheckpoint, ChildHost, ChildOutcome, ChildRun, PreparedChild};
 mod context;
+pub mod execution;
 mod scheduler;
+pub mod subagent;
+pub use execution::{ExecutionState, NoProgressDetector};
+pub use subagent::{AgentTemplate, SpawnOptions, SubagentConfig, SubagentManager, SubagentResult};
 pub mod task_queue;
 pub use budget::{ContextBudget, ExecutionBudget};
 pub use context::select_context;
@@ -22,6 +26,23 @@ use tool::{SafetyLevel, ToolError, ToolOutput, ToolPermission, ToolRegistry};
 #[derive(Clone, Debug, serde::Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AgentEvent {
+    SubagentStarted {
+        id: String,
+    },
+    SubagentProgress {
+        id: String,
+        phase: String,
+    },
+    SubagentCompleted {
+        id: String,
+    },
+    SubagentFailed {
+        id: String,
+        error: String,
+    },
+    SubagentCancelled {
+        id: String,
+    },
     TurnStarted,
     ModelStarted {
         provider: String,
@@ -152,6 +173,11 @@ pub struct AgentKernel {
     child_host: Option<Arc<dyn ChildHost>>,
     child_run: Option<ChildRun>,
     child_budget: Option<ExecutionBudget>,
+    subagent_config: SubagentConfig,
+    agent_templates: Vec<AgentTemplate>,
+    subagent_manager: Option<Arc<SubagentManager>>,
+    execution: Arc<std::sync::Mutex<ExecutionState>>,
+    execution_root: Option<std::path::PathBuf>,
 }
 
 impl AgentKernel {
@@ -183,7 +209,18 @@ impl AgentKernel {
             child_host: None,
             child_run: None,
             child_budget: None,
+            subagent_config: SubagentConfig::default(),
+            agent_templates: Vec::new(),
+            subagent_manager: None,
+            execution: Arc::new(std::sync::Mutex::new(ExecutionState::fresh())),
+            execution_root: None,
         }
+    }
+
+    #[must_use]
+    pub fn with_execution_scope(mut self, root: std::path::PathBuf) -> Self {
+        self.execution_root = Some(root);
+        self
     }
 
     #[must_use]
@@ -210,6 +247,14 @@ impl AgentKernel {
     }
 
     #[must_use]
+    pub fn execution_state(&self) -> ExecutionState {
+        self.execution
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    #[must_use]
     pub fn messages(&self) -> &[Message] {
         &self.messages
     }
@@ -217,6 +262,17 @@ impl AgentKernel {
     /// Seeds the kernel with a previously loaded session context.
     #[must_use]
     pub fn with_messages(mut self, mut messages: Vec<Message>) -> Self {
+        if let Some(state) = ExecutionState::restore(&mut messages) {
+            *self
+                .execution
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = state;
+        } else {
+            self.execution
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .seed_history(&messages);
+        }
         self.task_queue = task_queue::TaskQueue::restore(&mut messages);
         self.goal_id = self.task_queue.as_ref().map(|q| q.goal_id.clone());
         self.parent_goal_id = self
@@ -260,6 +316,8 @@ impl AgentKernel {
         task_queue::TaskQueue::restore(&mut messages);
         let result_reader = tool::ResultReader::default();
         let mut tools = self.tools.clone();
+        tools.remove("subagent");
+        tools.remove("spawn_agent");
         tools.register(result_reader.clone());
         let mut worker = Self {
             provider: Arc::clone(&self.provider),
@@ -278,6 +336,11 @@ impl AgentKernel {
             child_host: None,
             child_run: None,
             child_budget: None,
+            subagent_config: SubagentConfig::default(),
+            agent_templates: Vec::new(),
+            subagent_manager: None,
+            execution: Arc::new(std::sync::Mutex::new(ExecutionState::fresh())),
+            execution_root: self.execution_root.clone(),
         }
         .with_messages(messages);
         worker.parent_goal_id.clone_from(&self.goal_id);
@@ -718,7 +781,25 @@ impl AgentKernel {
     {
         let emit = std::sync::Mutex::new(emit);
         let input = input.into();
+        let new_goal = matches!(&intent, GoalTurn::New | GoalTurn::Start { .. });
         let replay = self.begin_goal(&input, intent, checkpoint)?;
+        if self.execution.lock().unwrap().overall_goal.is_empty()
+            || (new_goal && self.child_run.is_none())
+        {
+            let cwd = self.child_run.as_ref().map_or_else(
+                || {
+                    self.execution_root
+                        .clone()
+                        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default())
+                },
+                |run| run.cwd.clone(),
+            );
+            self.execution.lock().unwrap().begin(
+                &input,
+                self.goal_id.as_deref().unwrap_or_default(),
+                &cwd,
+            );
+        }
         if let Some(cached) = replay {
             return Ok(cached);
         }
@@ -751,8 +832,11 @@ impl AgentKernel {
                 self.raw_turn_messages.push(message);
             }
         }
+        self.raw_turn_messages
+            .push(self.execution_state().snapshot());
         checkpoint(&self.raw_turn_messages)?;
         self.checkpoint_queue(checkpoint)?;
+        let mut subagent_events = self.prepare_subagents();
         let mut tool_specs = self
             .tools
             .iter()
@@ -811,6 +895,19 @@ impl AgentKernel {
                     .filter(|q| q.active() && !q.tasks.is_empty())
                     .map(task_queue::TaskQueue::progress),
             );
+            let state = self.execution_state();
+            let mut event_count = if state.progress.no_progress || steps_used == 1 {
+                8
+            } else {
+                2
+            };
+            while event_count > 0
+                && estimate_tokens(&[state.context(event_count)])
+                    > self.context_budget().session_summary_budget()
+            {
+                event_count -= 1;
+            }
+            self.set_context(execution::CONTEXT_PREFIX, Some(state.context(event_count)));
             self.compress_if_needed(|event| (emit.lock().unwrap())(event))
                 .await?;
             (emit.lock().unwrap())(AgentEvent::ModelStarted {
@@ -937,6 +1034,7 @@ impl AgentKernel {
                 .iter()
                 .any(|call| call.function.name == task_queue::TOOL_NAME)
             {
+                let queue_before = serde_json::to_string(&self.task_queue).unwrap();
                 let result = if tool_calls.len() == 1 {
                     serde_json::from_str::<Value>(&tool_calls[0].function.arguments)
                         .map_err(|error| error.to_string())
@@ -959,8 +1057,22 @@ impl AgentKernel {
                         Ok(()) => "Queue updated. Continue current_task; summarize only after all tasks are terminal.".into(),
                         Err(reason) => format!("Queue update rejected: {reason}"),
                     });
+                    let input =
+                        serde_json::from_str(&call.function.arguments).unwrap_or(Value::Null);
+                    let envelope = tool::ToolResult::new(result.is_ok(), message.content.clone());
+                    let advanced = result.is_ok()
+                        && queue_before != serde_json::to_string(&self.task_queue).unwrap();
+                    self.execution.lock().unwrap().record_control(
+                        &call.id,
+                        &call.function.name,
+                        &input,
+                        &envelope,
+                        advanced,
+                    );
                     self.messages.push(message.clone());
                     self.raw_turn_messages.push(message);
+                    self.raw_turn_messages
+                        .push(self.execution_state().snapshot());
                 }
                 self.checkpoint_queue(checkpoint)?;
                 checkpoint(&self.raw_turn_messages)?;
@@ -999,34 +1111,65 @@ impl AgentKernel {
                 task.recovery_attempts += 1;
             }
             let round_start = self.messages.len();
-            let results = scheduler::run(
-                jobs,
-                Arc::clone(&self.approval),
-                self.tool_concurrency,
-                self.budget.tool_timeout_secs,
+            let results = subagent::forward_events(
+                scheduler::run(
+                    jobs,
+                    Arc::clone(&self.approval),
+                    self.tool_concurrency,
+                    self.budget.tool_timeout_secs,
+                    &emit,
+                    Some(Arc::clone(&self.execution)),
+                    |message, name, input| {
+                        if let Some(tool) = self.tools.get(name) {
+                            let result = serde_json::from_str::<tool::ToolResult>(&message.content)
+                                .unwrap_or_else(|_| {
+                                    tool::ToolResult::new(true, message.content.clone())
+                                });
+                            self.execution.lock().unwrap().record(
+                                message.tool_call_id.as_deref().unwrap_or_default(),
+                                tool.as_ref(),
+                                input,
+                                &result,
+                            );
+                        } else {
+                            let result = serde_json::from_str::<tool::ToolResult>(&message.content)
+                                .unwrap_or_else(|_| {
+                                    tool::ToolResult::new(false, message.content.clone())
+                                });
+                            self.execution.lock().unwrap().record_control(
+                                message.tool_call_id.as_deref().unwrap_or_default(),
+                                name,
+                                input,
+                                &result,
+                                false,
+                            );
+                        }
+                        if let Some(id) = &message.tool_call_id
+                            && let Ok(result) =
+                                serde_json::from_str::<tool::ToolResult>(&message.content)
+                        {
+                            self.result_reader
+                                .0
+                                .write()
+                                .unwrap()
+                                .insert(id.clone(), result.raw_output);
+                        }
+                        let blocker = serde_json::from_str::<tool::ToolResult>(&message.content)
+                            .ok()
+                            .and_then(|result| result.global_blocker);
+                        self.messages.push(message.clone());
+                        self.raw_turn_messages.push(message);
+                        self.raw_turn_messages
+                            .push(self.execution_state().snapshot());
+                        checkpoint(&self.raw_turn_messages)?;
+                        if let Some(reason) = blocker {
+                            return Err(AgentError::GlobalBlocked(reason));
+                        }
+                        Ok(())
+                    },
+                ),
+                &mut subagent_events,
                 &emit,
-                |message| {
-                    if let Some(id) = &message.tool_call_id
-                        && let Ok(result) =
-                            serde_json::from_str::<tool::ToolResult>(&message.content)
-                    {
-                        self.result_reader
-                            .0
-                            .write()
-                            .unwrap()
-                            .insert(id.clone(), result.raw_output);
-                    }
-                    let blocker = serde_json::from_str::<tool::ToolResult>(&message.content)
-                        .ok()
-                        .and_then(|result| result.global_blocker);
-                    self.messages.push(message.clone());
-                    self.raw_turn_messages.push(message);
-                    checkpoint(&self.raw_turn_messages)?;
-                    if let Some(reason) = blocker {
-                        return Err(AgentError::GlobalBlocked(reason));
-                    }
-                    Ok(())
-                },
             )
             .await?;
             // Raw checkpoints follow completion order; the next model request
@@ -1503,7 +1646,13 @@ fn request_context(
             continue;
         }
         if message.role == model::Role::System
-            && (message.content.starts_with(task_queue::PROGRESS_PREFIX)
+            && message.content.starts_with(execution::STATE_PREFIX)
+        {
+            continue;
+        }
+        if message.role == model::Role::System
+            && (message.content.starts_with(execution::CONTEXT_PREFIX)
+                || message.content.starts_with(task_queue::PROGRESS_PREFIX)
                 || message.content.starts_with("[ax-task-summary]")
                 || message.content.starts_with("[ax-recovery]"))
         {
@@ -1831,7 +1980,8 @@ mod tests {
         let mut tools = ToolRegistry::new();
         tools.register(tool::PatchTool);
         tools.register(tool::FilesystemTool);
-        let mut kernel = AgentKernel::new(Arc::new(provider), tools, Arc::new(AllowAll));
+        let mut kernel = AgentKernel::new(Arc::new(provider), tools, Arc::new(AllowAll))
+            .with_execution_scope(path.parent().unwrap().to_owned());
         let mut finished = Vec::new();
         kernel
             .run_turn("repair this file", |event| {
@@ -1899,7 +2049,7 @@ mod tests {
                 "test",
                 |_| {},
                 |messages| {
-                    if messages.len() == 2 && !failed_once {
+                    if messages.iter().any(|m| !m.tool_calls.is_empty()) && !failed_once {
                         failed_once = true;
                         return Err(AgentError::Persistence("disk failure".into()));
                     }
@@ -1909,9 +2059,13 @@ mod tests {
             )
             .await;
         assert!(matches!(result, Err(AgentError::Persistence(_))));
-        assert_eq!(saved.len(), 3);
-        assert_eq!(saved[0].role, model::Role::User);
-        assert!(saved[2].content.contains("Execution interrupted"));
+        let conversation: Vec<_> = saved
+            .iter()
+            .filter(|m| m.role != model::Role::System)
+            .collect();
+        assert_eq!(conversation.len(), 3);
+        assert_eq!(conversation[0].role, model::Role::User);
+        assert!(conversation[2].content.contains("Execution interrupted"));
     }
 
     #[tokio::test]
@@ -1955,7 +2109,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(lengths, vec![1, 2, 3, 4, 4]);
+        assert_eq!(lengths, vec![2, 3, 5, 6, 6]);
     }
 
     struct EchoProvider;
@@ -2055,7 +2209,14 @@ mod tests {
             .expect("agent turn should succeed");
 
         assert_eq!(answer, "done");
-        assert_eq!(kernel.messages().len(), 4);
+        assert_eq!(
+            kernel
+                .messages()
+                .iter()
+                .filter(|m| m.role != model::Role::System)
+                .count(),
+            4
+        );
         assert_eq!(kernel.messages()[2].role, model::Role::Tool);
     }
 
@@ -2611,3 +2772,6 @@ mod tests {
 
 #[cfg(test)]
 mod task_queue_tests;
+
+#[cfg(test)]
+mod execution_tests;

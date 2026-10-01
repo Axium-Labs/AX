@@ -146,6 +146,7 @@ impl AgentKernel {
         kernel
     }
 
+    #[allow(clippy::too_many_lines)] // Child execution and durable receipt must remain one transaction.
     pub(crate) async fn execute_next_child<F, H>(
         &mut self,
         emit: &std::sync::Mutex<F>,
@@ -166,6 +167,11 @@ impl AgentKernel {
             })
             .expect("active child task");
         let input = task.title.clone();
+        self.execution
+            .lock()
+            .unwrap()
+            .current_step
+            .clone_from(&input);
         let previous = task.child.clone();
         let host = self.child_host.as_ref().expect("child host").clone();
         let outcome = match host.prepare(self, &input, previous.as_ref()).await {
@@ -203,7 +209,33 @@ impl AgentKernel {
                                 (emit.lock().unwrap())(event);
                             }
                         }),
-                        Box::new(|messages| child.checkpoint.save(messages)),
+                        Box::new(|messages| {
+                            child.checkpoint.save(messages)?;
+                            if let Some(state) = messages
+                                .iter()
+                                .rev()
+                                .filter(|m| m.role == model::Role::System)
+                                .find_map(|m| {
+                                    m.content
+                                        .strip_prefix(crate::execution::STATE_PREFIX)
+                                        .and_then(|json| {
+                                            serde_json::from_str::<crate::ExecutionState>(json).ok()
+                                        })
+                                })
+                            {
+                                let changed = self
+                                    .execution
+                                    .lock()
+                                    .unwrap()
+                                    .absorb_child(&event_session, &state);
+                                if changed {
+                                    self.raw_turn_messages
+                                        .push(self.execution_state().snapshot());
+                                    checkpoint(&self.raw_turn_messages)?;
+                                }
+                            }
+                            Ok(())
+                        }),
                     )
                     .await;
                     let mut outcome = match result {

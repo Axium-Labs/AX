@@ -28,6 +28,7 @@ cli ───────────────┬──> runtime-core ──>
 | `runtime-core` | The model → tool → model agent loop, `AgentEvent` stream, context selection, `ContextBudget`, compaction, and `AgentSupervisor` for bounded-concurrency tasks. |
 | `mcp` | MCP client for stdio / Streamable HTTP / WebSocket, lazy connection, capability catalog, `McpToolProxy` and `McpGateway`. |
 | `skill` | `SKILL.md` frontmatter indexing, precomputed Unicode routing features, and language-independent similarity routing; Markdown body is loaded only when a route hits. Legacy packages remain supported. |
+| `scoped` | Shared Global/Project registry, config policies and override/mask resolution. Metadata only, no execution or UI dependencies. |
 | `lexical` | Language-independent lexical features (NFKC, case fold, word tokens, character n-grams) and normalized similarity, shared by skill routing and memory retrieval so the two cannot drift apart. Leaf crate: no dependency on other AX crates. |
 | `memory` | SQLite session/message repository, effective-context snapshots, scoped facts, JSONL event streams, resume and compaction state. |
 | `cli` | The only composition root: clap arguments, provider selection, lazy SQLite/Skill/MCP initialization, REPL, ratatui TUI, session commands, permission dialogs. |
@@ -223,9 +224,11 @@ user task
   → model streaming request
   → final text ──────────────→ persist and finish
   → tool calls
+      → goal-bound step/scope admission
       → permission check
       → dependency DAG and bounded resource-aware execution
-      → checkpoint completed results with original tool call IDs
+      → update ExecutionState from actual completion events
+      → checkpoint completed results and execution state with original tool call IDs
       → append completed round in original call order
       → context pressure check / next model step
 ```
@@ -273,8 +276,9 @@ Successful ACP prompt responses return the goal ID in `_meta.axGoal.goal_id`.
 Tasks have pending/running/completed/failed/skipped states. Explicit `finish`
 controls advance the queue; task failures require a recovery opportunity first.
 Tool failures and tool timeouts remain local, allowing independent tasks to
-continue. Recovery searches workspace runners, runtimes, scripts and available
-environments. Provider failures retry once within the goal; configuration,
+continue. Recovery is bound to the failed execution step and its task directories.
+Unbounded recovery tools are rejected; successful retries restore the original
+step scope, and repeated failures require a different bounded strategy. Provider failures retry once within the goal; configuration,
 authentication, persistence and exhausted provider retries block the goal.
 
 Queue states are active/summarizing/suspended/completed/blocked/cancelled/superseded.
@@ -348,3 +352,46 @@ execution fails only that child, persists its failure and releases workspace spa
 These are admission/checkpoint limits, not an OS filesystem quota: a subprocess
 can temporarily exceed them between checkpoints. Durable state is excluded from
 workspace quota accounting and is preserved by GC.
+
+
+### Goal-bound execution invariants
+
+`ExecutionState` lives in the kernel independently of conversation compression.
+It retains the original goal and identity, current step, expected output, task
+scope, failed-step recovery binding, bounded real completion events and progress.
+The execution model can declare a narrower step through `_ax_execution` on an
+ordinary tool call. A successor requires observed progress; recovery cannot
+replace the failed step or enlarge its directories. Scope admission uses declared
+resources after typed result substitution, before approval and execution.
+
+Eight consecutive calls without a declared state transition trigger
+`NoProgressDetector`. Read/list/search success alone is observation; new successful
+declared mutations, explicit result evidence and repaired retries count as progress.
+Repeated mutations/evidence are deduplicated. A stall binds recovery to the current
+step, injects its goal and ineffective actions and rejects repeated exploration.
+No separate planner/model request is made. See [context.md](context.md),
+[tools.md](tools.md) and [ADR 0009](adr/0009-execution-invariants.md).
+
+
+### Optional model-selected delegation
+
+`SubagentConfig` defaults to disabled. The enabled turn registers a single
+`subagent` tool backed by a turn-scoped admission/cancellation adapter. Runtime
+`spawn_agent` / `wait_agent` / `cancel_agent` reuse `ChildHost::prepare` and
+`AgentSupervisor::run_child`; the latter is the existing checkpointed Agent Loop.
+There is no second loop or planner request. The adapter enforces bounded child
+admission and suppresses child content/reasoning in parent events, forwarding
+only compact lifecycle events. Worker forks remove delegation and controller
+history. CLI reloads the existing persisted settings before each turn. See
+[tools.md](tools.md#optional-subagents) and [ADR 0010](adr/0010-optional-subagents.md).
+
+## Capability scope composition
+
+Skill, MCP and named Agent metadata resolve through one `scoped::ScopedRegistry<T>`.
+The CLI supplies source adapters and a shared manager. Global and project sources
+merge by name/ID before explicit project overrides and inherited-global masks;
+only enabled entries reach execution. Crew consumes AX's ACP scope rows and
+management boundary. Named Agent instructions are read at invocation. Portable
+project capability config carries the existing project UUID; runtime stores keep
+their existing ownership and migration rules. See [capabilities.md](capabilities.md)
+and [ADR 0011](adr/0011-scoped-capabilities.md).

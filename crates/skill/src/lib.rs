@@ -82,10 +82,16 @@ pub struct SkillMetadata {
 
 #[derive(Debug, Deserialize)]
 struct LegacyMetadata {
+    #[serde(default = "legacy_enabled")]
+    enabled: bool,
     name: String,
     description: String,
     #[serde(default)]
     required_tools: Vec<String>,
+}
+
+const fn legacy_enabled() -> bool {
+    true
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -229,6 +235,26 @@ impl SkillCatalog {
         Ok(catalog)
     }
 
+    /// Index already resolved package directories; scope resolution belongs to `ScopedRegistry`.
+    ///
+    /// # Errors
+    /// Malformed packages are recorded in `issues`; other packages remain usable.
+    pub fn index_directories<P: AsRef<Path>>(
+        directories: impl IntoIterator<Item = P>,
+    ) -> Result<Self, SkillError> {
+        let mut catalog = Self::default();
+        for directory in directories {
+            match Self::index_directory(directory.as_ref()) {
+                Ok(Some(skill)) => {
+                    catalog.skills.insert(skill.metadata.name.clone(), skill);
+                }
+                Ok(None) => (),
+                Err(error) => catalog.issues.push(error),
+            }
+        }
+        Ok(catalog)
+    }
+
     fn index_directory(directory: &Path) -> Result<Option<IndexedSkill>, SkillError> {
         let standard_path = directory.join(STANDARD);
         let legacy_path = directory.join(LEGACY_MANIFEST);
@@ -261,7 +287,10 @@ impl SkillCatalog {
                 compatibility: None,
                 metadata: BTreeMap::new(),
                 allowed_tools: None,
-                extensions: BTreeMap::new(),
+                extensions: BTreeMap::from([(
+                    "enabled".into(),
+                    serde_yaml::Value::Bool(legacy.enabled),
+                )]),
                 required_tools: legacy.required_tools,
             }
         } else {

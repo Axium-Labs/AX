@@ -37,6 +37,9 @@ struct Input {
 
 #[async_trait]
 impl Tool for MemoryTool {
+    fn runtime_owned_resources(&self) -> bool {
+        true
+    }
     fn fork_for_run(&self, context: &tool::RunContext) -> Option<std::sync::Arc<dyn Tool>> {
         let database = context.state_dir.join("child.sqlite3");
         Some(std::sync::Arc::new(Self {

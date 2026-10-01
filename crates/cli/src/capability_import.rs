@@ -2,7 +2,7 @@
 use anyhow::{Result, bail};
 use std::{fs, io::Write, path::Path};
 
-pub(crate) fn run(cli: &crate::Cli, data_dir: &Path, skills_dir: &Path) -> Result<bool> {
+pub(crate) fn run(cli: &crate::Cli, _data_dir: &Path, _skills_dir: &Path) -> Result<bool> {
     if let Some(crate::Command::Skill {
         command: crate::CapabilityCommand::Import { path, global },
     }) = &cli.command
@@ -10,7 +10,7 @@ pub(crate) fn run(cli: &crate::Cli, data_dir: &Path, skills_dir: &Path) -> Resul
         let root = if *global {
             crate::config::ax_home().join("skills")
         } else {
-            skills_dir.to_path_buf()
+            crate::discover_project_root(&std::env::current_dir()?).join(".ax/skills")
         };
         println!("{}", skill::install_skill_directory(path, &root)?.display());
         return Ok(true);
@@ -22,9 +22,10 @@ pub(crate) fn run(cli: &crate::Cli, data_dir: &Path, skills_dir: &Path) -> Resul
         let destination = if *global {
             crate::config::ax_home().join("mcp.toml")
         } else {
-            cli.mcp_config
-                .clone()
-                .unwrap_or_else(|| data_dir.join("mcp.toml"))
+            cli.mcp_config.clone().unwrap_or_else(|| {
+                crate::discover_project_root(&std::env::current_dir().expect("cwd"))
+                    .join(".ax/mcp.toml")
+            })
         };
         import_mcp(path, &destination)?;
         println!("MCP configuration imported: {}", destination.display());

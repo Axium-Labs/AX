@@ -17,6 +17,8 @@ discoverable.
 | [0007-installation-storage.md](0007-installation-storage.md) | Installation-owned persistent state | Accepted |
 
 - [0008 — Durable lightweight Task Queue](0008-durable-task-queue.md)
+- [0009 — Goal-bound execution invariants](0009-execution-invariants.md)
+- [0010 — Optional model-selected subagents](0010-optional-subagents.md)
 
 ## Adding an ADR
 
@@ -43,3 +45,5 @@ What we chose to do.
 
 What becomes easier, what becomes harder, and what we accepted.
 ```
+
+- [0011: Scoped capabilities](0011-scoped-capabilities.md) — one shared Global/Project registry for Skill, MCP and Agent management.

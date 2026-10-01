@@ -55,6 +55,12 @@ impl WorkspaceTool {
 }
 #[async_trait]
 impl Tool for WorkspaceTool {
+    fn runtime_owned_resources(&self) -> bool {
+        self.tool.runtime_owned_resources()
+    }
+    fn recursive_search(&self) -> bool {
+        self.tool.recursive_search()
+    }
     fn name(&self) -> &str {
         self.tool.name()
     }

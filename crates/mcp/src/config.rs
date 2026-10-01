@@ -1,10 +1,10 @@
 use std::{collections::BTreeMap, fs, path::Path};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::{McpError, client::CURRENT_PROTOCOL_VERSION};
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct McpConfig {
     #[serde(default)]
@@ -36,7 +36,7 @@ impl McpConfig {
     }
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ServerConfig {
     #[serde(default)]
     pub description: String,
@@ -64,7 +64,7 @@ const fn default_timeout() -> u64 {
     30
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(tag = "transport", rename_all = "snake_case", deny_unknown_fields)]
 pub enum TransportConfig {
     Stdio {

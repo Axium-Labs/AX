@@ -259,6 +259,18 @@ impl App {
 
     fn apply_event(&mut self, event: AgentEvent) {
         match event {
+            AgentEvent::SubagentStarted { id } => {
+                self.push(TranscriptKind::Status, format!("{id}: started"));
+            }
+            AgentEvent::SubagentCompleted { id } => {
+                self.push(TranscriptKind::Status, format!("{id}: completed"));
+            }
+            AgentEvent::SubagentFailed { id, error } => {
+                self.push(TranscriptKind::Error, format!("{id}: {error}"));
+            }
+            AgentEvent::SubagentCancelled { id } => {
+                self.push(TranscriptKind::Status, format!("{id}: cancelled"));
+            }
             AgentEvent::TurnStarted => {
                 self.working = true;
                 self.streaming = false;
@@ -270,7 +282,7 @@ impl App {
             // Reasoning deltas are private model working text. Keep the compact
             // animated `Thinking` status instead of dumping chain-of-thought
             // into the transcript and consuming the whole viewport.
-            AgentEvent::ThinkingDelta { delta: _ } => {}
+            AgentEvent::SubagentProgress { .. } | AgentEvent::ThinkingDelta { delta: _ } => {}
             AgentEvent::TurnFinished => {
                 self.transcript.streaming = false;
             }

@@ -57,7 +57,7 @@ impl McpManager {
     /// Metadata-only discovery. Never starts a process or opens a connection.
     #[must_use]
     pub fn capability_catalog(&self) -> Value {
-        serde_json::json!(self.configs.iter().map(|(name,config)| serde_json::json!({
+        serde_json::json!(self.configs.iter().filter(|(_, config)| config.enabled).map(|(name,config)| serde_json::json!({
             "server":name, "description":config.description, "capabilities":config.capabilities,
             "enabled":config.enabled,"connected":self.clients.contains_key(name),"transport":transport_name(config)
         })).collect::<Vec<_>>())

@@ -9,6 +9,41 @@ struct ProjectMetadata {
     id: String,
 }
 
+/// Carry the existing UUID with a project that now owns portable capability config.
+/// This is a locator for the same identity, never a second path-derived identity.
+pub(crate) fn ensure_portable(root: &Path, id: &str) -> Result<()> {
+    let directory = root.join(".ax");
+    fs::create_dir_all(&directory)?;
+    let path = directory.join("project.json");
+    if path.exists() {
+        let metadata: ProjectMetadata = serde_json::from_str(&fs::read_to_string(&path)?)?;
+        anyhow::ensure!(
+            metadata.id == id,
+            "Project identity conflicts with portable project metadata"
+        );
+        return Ok(());
+    }
+    let temporary = directory.join(format!("project.{}.tmp", uuid::Uuid::new_v4()));
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temporary)?;
+    file.write_all(
+        serde_json::to_string_pretty(&ProjectMetadata { id: id.to_owned() })?.as_bytes(),
+    )?;
+    file.sync_all()?;
+    drop(file);
+    let result = fs::hard_link(&temporary, &path);
+    fs::remove_file(&temporary)?;
+    match result {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            ensure_portable(root, id)
+        }
+        Err(error) => Err(error).context("Cannot publish portable project identity"),
+    }
+}
+
 pub(crate) fn load_existing(root: &Path) -> Result<Option<String>> {
     let central = crate::storage_location::project_directory(root).join("project.json");
     if central.is_file() {

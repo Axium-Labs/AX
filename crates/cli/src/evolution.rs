@@ -245,6 +245,7 @@ impl ReplState {
             if revision != self.evolution_revision {
                 self.evolution_revision = revision;
                 self.skill_catalog = None;
+                self.capability_registries.borrow_mut().clear();
                 // Refreshed evolved instructions will be routed again within the normal budget.
                 let prefix = self.evolution_root().to_string_lossy().into_owned();
                 self.loaded_messages.retain(|m| {
@@ -383,6 +384,7 @@ mod tests {
         fs::create_dir_all(&archived).unwrap();
         fs::rename(live.join("sample-evolved"), archived.join("sample-evolved")).unwrap();
         state.skill_catalog = None;
+        state.capability_registries.borrow_mut().clear();
         let budget = runtime_core::ContextBudget::new(32_000, Some(2048), 0);
         state.open_session(&session, &budget).unwrap();
         assert!(!state.active_skills.contains("sample-evolved"));
@@ -413,6 +415,7 @@ mod tests {
         )
         .unwrap();
         state.skill_catalog = None;
+        state.capability_registries.borrow_mut().clear();
         assert_eq!(
             state.skills().unwrap().directory("sample-evolved"),
             Some(manual.as_path())

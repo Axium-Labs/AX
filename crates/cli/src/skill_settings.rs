@@ -1,36 +1,30 @@
 //! Persist explicit skill choices separately from dependency availability.
 use std::collections::BTreeSet;
 
-use anyhow::{Context, Result, bail};
+use anyhow::Result;
 
-use crate::{ReplState, active_skill_name};
+use crate::ReplState;
 
 impl ReplState {
     pub(crate) fn disabled_skills(&self) -> Result<BTreeSet<String>> {
-        let path = self.data_dir.join("disabled-skills.json");
-        match std::fs::read(&path) {
-            Ok(bytes) => serde_json::from_slice(&bytes).context("Invalid disabled-skills.json"),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(BTreeSet::new()),
-            Err(error) => Err(error).context("Cannot read skill settings"),
-        }
+        Ok(self
+            .capability_registry(crate::capabilities::Kind::Skills)?
+            .entries()
+            .filter(|entry| !entry.enabled)
+            .map(|entry| entry.name.clone())
+            .collect())
     }
 
+    #[cfg(test)]
     pub(crate) fn toggle_skill(&mut self, name: &str) -> Result<()> {
-        if self.skills()?.directory(name).is_none() {
-            bail!("Unknown skill: {name}");
-        }
-        let mut disabled = self.disabled_skills()?;
-        if !disabled.remove(name) {
-            disabled.insert(name.to_owned());
-        }
-        std::fs::create_dir_all(&self.data_dir)?;
-        let temporary = self.data_dir.join("disabled-skills.json.tmp");
-        std::fs::write(&temporary, serde_json::to_vec_pretty(&disabled)?)?;
-        std::fs::rename(temporary, self.data_dir.join("disabled-skills.json"))?;
-        self.invalidate_runtime();
-        self.loaded_messages
-            .retain(|message| active_skill_name(message).as_deref() != Some(name));
-        self.active_skills.remove(name);
+        let disabled = self.disabled_skills()?.contains(name);
+        self.manage_capability(
+            crate::capabilities::Kind::Skills,
+            scoped::Scope::Project,
+            if disabled { "enable" } else { "disable" },
+            name,
+            None,
+        )?;
         Ok(())
     }
 }
@@ -38,7 +32,7 @@ impl ReplState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::Message;
+    use crate::{Message, active_skill_name};
 
     #[test]
     fn toggle_persists_affects_routing_and_resume_without_deleting_history() {

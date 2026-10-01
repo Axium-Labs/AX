@@ -120,6 +120,12 @@ pub static SLASH_COMMANDS: &[SlashCommandDef] = &[
         None,
     ),
     cmd(
+        "/agents",
+        "manage scoped agents",
+        SlashPresentation::Manager,
+        None,
+    ),
+    cmd(
         "/tools",
         "view available tools",
         SlashPresentation::InfoPanel,
@@ -149,6 +155,12 @@ pub static SLASH_COMMANDS: &[SlashCommandDef] = &[
         SlashPresentation::Manager,
         None,
     ),
+    cmd(
+        "/settings",
+        "configure optional subagents",
+        SlashPresentation::Manager,
+        None,
+    ),
     cmd("/exit", "exit AX", SlashPresentation::DirectAction, None),
 ];
 
@@ -158,6 +170,132 @@ pub fn filter_commands(token: &str) -> Vec<&'static SlashCommandDef> {
         .iter()
         .filter(|c| token.is_empty() || c.name.trim_start_matches('/').contains(&token))
         .collect()
+}
+
+fn capability_settings(state: &ReplState) -> Box<dyn super::bottom_pane::PaneView> {
+    SurfaceView::manager(
+        "Settings",
+        "capability-settings",
+        vec![format!("Project identity: {}", state.project_id)],
+        vec![
+            item(
+                "global",
+                "Global configuration",
+                "Available to all projects",
+            ),
+            item(
+                "project",
+                "Current project configuration",
+                "Includes inherited globals; changes apply here",
+            ),
+            item(
+                "subagents",
+                "Subagent execution",
+                "Global execution defaults",
+            ),
+        ],
+        "Enter select | Esc close",
+    )
+}
+fn capability_scope_settings(state: &ReplState) -> Box<dyn super::bottom_pane::PaneView> {
+    SurfaceView::manager(
+        "Capabilities",
+        "capability-kinds",
+        vec![format!(
+            "Scope: {}",
+            state
+                .capability_scope
+                .unwrap_or(scoped::Scope::Project)
+                .label()
+        )],
+        vec![
+            item("skills", "Skills", ""),
+            item("mcp", "MCP", ""),
+            item("agents", "Agents", ""),
+        ],
+        "Enter manage | Esc back",
+    )
+}
+fn capability_slash(
+    command: &str,
+    state: &mut ReplState,
+) -> Result<Option<crate::capabilities::Kind>> {
+    let Some((prefix, rest)) = command.split_once(' ') else {
+        return Ok(None);
+    };
+    let kind = match prefix {
+        "/skills" => crate::capabilities::Kind::Skills,
+        "/mcp" => crate::capabilities::Kind::Mcp,
+        "/agents" => crate::capabilities::Kind::Agents,
+        _ => return Ok(None),
+    };
+    let mut args = rest.split_whitespace();
+    let action = args.next().unwrap_or("list");
+    if action == "list" {
+        state.capability_scope = args
+            .next()
+            .map(crate::capabilities::parse_scope)
+            .transpose()?;
+    } else {
+        let name = args
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("name is required"))?;
+        let scope = args
+            .next()
+            .map(crate::capabilities::parse_scope)
+            .transpose()?
+            .unwrap_or(state.capability_scope.unwrap_or(scoped::Scope::Project));
+        let source = args.collect::<Vec<_>>().join(" ");
+        state.manage_capability(
+            kind,
+            scope,
+            action,
+            name,
+            if source.is_empty() {
+                None
+            } else {
+                Some(std::path::Path::new(source.trim_matches('\"')))
+            },
+        )?;
+    }
+    Ok(Some(kind))
+}
+
+fn subagent_settings() -> Result<Box<dyn super::bottom_pane::PaneView>> {
+    let config = AxConfig::load()?;
+    Ok(SurfaceView::manager(
+        "Settings",
+        "subagent_settings",
+        vec!["Subagent changes apply on the next agent turn.".into()],
+        vec![
+            SurfaceItem {
+                id: "enabled".into(),
+                label: "Subagents (toggle)".into(),
+                value: config.subagent.enabled.to_string(),
+            },
+            SurfaceItem {
+                id: "max_concurrent".into(),
+                label: "Maximum concurrent subagents (cycle 1–3)".into(),
+                value: config.subagent.max_concurrent.to_string(),
+            },
+            SurfaceItem {
+                id: "max_depth".into(),
+                label: "Maximum depth (children cannot delegate)".into(),
+                value: config.subagent.max_depth.min(1).to_string(),
+            },
+        ],
+        "Enter change · Esc close",
+    ))
+}
+fn save_subagent_setting(enabled: bool, app: &mut App) -> Result<()> {
+    let mut config = AxConfig::load()?;
+    config.subagent.enabled = enabled;
+    config.save()?;
+    app.push(
+        TranscriptKind::Status,
+        "Saved; applies on the next agent turn.",
+    );
+    Ok(())
 }
 
 fn execution_settings() -> Result<Box<dyn super::bottom_pane::PaneView>> {
@@ -189,6 +327,14 @@ pub(super) async fn execute_slash(
     app: &mut App,
     pane: &mut BottomPane,
 ) -> Result<bool> {
+    if let Some(kind) = capability_slash(command.trim(), state)? {
+        match kind {
+            crate::capabilities::Kind::Skills => open_skills(state, pane)?,
+            crate::capabilities::Kind::Mcp => open_mcp(state, pane).await?,
+            crate::capabilities::Kind::Agents => catalogs::open_agents(state, pane)?,
+        }
+        return Ok(true);
+    }
     match command.trim() {
         "/exit" => return Ok(false),
         "/login" => open_provider_login(pane),
@@ -247,6 +393,10 @@ pub(super) async fn execute_slash(
         "/mcp" => open_mcp(state, pane).await?,
         "/permissions" => pane.push_view(permissions(&state.permissions)),
         "/status" => pane.push_view(status_panel(state, selection, app)),
+        "/settings" => pane.push_view(capability_settings(state)),
+        "/agents" => catalogs::open_agents(state, pane)?,
+        "/settings subagent on" => save_subagent_setting(true, app)?,
+        "/settings subagent off" => save_subagent_setting(false, app)?,
         "/environment" => pane.push_view(execution_settings()?),
         other => {
             if let Some(term) = other.strip_prefix("/model ") {
@@ -876,7 +1026,62 @@ pub(super) async fn apply_modal_action(
             open_session_picker(state, app, pane)?;
         }
         ModalAction::SurfaceSelected { surface, id } => {
-            if surface == "execution" {
+            if surface == "capability-settings" {
+                if id == "subagents" {
+                    pane.push_view(subagent_settings()?);
+                } else {
+                    state.capability_scope = Some(crate::capabilities::parse_scope(&id)?);
+                    pane.push_view(capability_scope_settings(state));
+                }
+                return Ok(());
+            }
+            if surface == "capability-kinds" {
+                match id.as_str() {
+                    "skills" => open_skills(state, pane)?,
+                    "mcp" => open_mcp(state, pane).await?,
+                    "agents" => catalogs::open_agents(state, pane)?,
+                    _ => {}
+                }
+                return Ok(());
+            }
+            if surface == "agents" {
+                let row = state
+                    .capability_rows(crate::capabilities::Kind::Agents, state.capability_scope)?
+                    .into_iter()
+                    .find(|row| row["name"] == id)
+                    .ok_or_else(|| anyhow::anyhow!("Unknown agent"))?;
+                state.manage_capability(
+                    crate::capabilities::Kind::Agents,
+                    state.capability_scope.unwrap_or(scoped::Scope::Project),
+                    if row["enabled"] == true {
+                        "disable"
+                    } else {
+                        "enable"
+                    },
+                    &id,
+                    None,
+                )?;
+                pane.refresh_surface(
+                    "agents",
+                    &catalogs::capability_items(state, crate::capabilities::Kind::Agents)?,
+                );
+                return Ok(());
+            }
+            if surface == "subagent_settings" {
+                let mut config = AxConfig::load()?;
+                match id.as_str() {
+                    "enabled" => config.subagent.enabled = !config.subagent.enabled,
+                    "max_concurrent" => {
+                        config.subagent.max_concurrent = config.subagent.max_concurrent % 3 + 1;
+                    }
+                    "max_depth" => {
+                        config.subagent.max_depth = usize::from(config.subagent.max_depth == 0);
+                    }
+                    _ => {}
+                }
+                config.save()?;
+                pane.push_view(subagent_settings()?);
+            } else if surface == "execution" {
                 let options: Vec<(&str, &str)> = if id == "environment" {
                     vec![
                         ("native", "Windows native"),
@@ -1013,8 +1218,46 @@ pub(super) async fn apply_modal_action(
                     format!("Permission updated: {capability} = {decision}"),
                 );
             } else if surface == "skill-toggle" {
-                state.toggle_skill(&id)?;
+                let row = state
+                    .capability_rows(crate::capabilities::Kind::Skills, state.capability_scope)?
+                    .into_iter()
+                    .find(|row| row["name"] == id)
+                    .ok_or_else(|| anyhow::anyhow!("Unknown skill"))?;
+                state.manage_capability(
+                    crate::capabilities::Kind::Skills,
+                    state.capability_scope.unwrap_or(scoped::Scope::Project),
+                    if row["enabled"] == true {
+                        "disable"
+                    } else {
+                        "enable"
+                    },
+                    &id,
+                    None,
+                )?;
                 pane.refresh_surface("skills", &skill_items(state)?);
+            } else if matches!(surface.as_str(), "mcp-toggle" | "agents-toggle") {
+                let kind = if surface == "mcp-toggle" {
+                    crate::capabilities::Kind::Mcp
+                } else {
+                    crate::capabilities::Kind::Agents
+                };
+                let row = state
+                    .capability_rows(kind, state.capability_scope)?
+                    .into_iter()
+                    .find(|row| row["name"] == id)
+                    .ok_or_else(|| anyhow::anyhow!("Unknown capability"))?;
+                state.manage_capability(
+                    kind,
+                    state.capability_scope.unwrap_or(scoped::Scope::Project),
+                    if row["enabled"] == true {
+                        "disable"
+                    } else {
+                        "enable"
+                    },
+                    &id,
+                    None,
+                )?;
+                pane.refresh_surface(kind.key(), &catalogs::capability_items(state, kind)?);
             } else if matches!(surface.as_str(), "skills" | "tools" | "mcp") {
                 catalogs::open_detail(&surface, &id, state, pane).await?;
             } else if surface == "mcp-action" {

@@ -143,9 +143,16 @@ impl PaneView for SurfaceView {
                 });
                 ViewOutcome::Accepted
             }
-            KeyCode::Char(' ') if self.surface == "skills" && !self.visible().is_empty() => {
+            KeyCode::Char(' ')
+                if matches!(self.surface.as_str(), "skills" | "mcp" | "agents")
+                    && !self.visible().is_empty() =>
+            {
                 self.action = Some(ModalAction::SurfaceSelected {
-                    surface: "skill-toggle".into(),
+                    surface: if self.surface == "skills" {
+                        "skill-toggle".into()
+                    } else {
+                        format!("{}-toggle", self.surface)
+                    },
                     id: self.visible()[self.selected].id.clone(),
                 });
                 ViewOutcome::Accepted

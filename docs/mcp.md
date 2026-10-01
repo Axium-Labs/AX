@@ -14,12 +14,12 @@ cleanup.
 
 ## Configuration
 
-MCP servers are configured in `mcp.toml`. Resolution order:
-
-1. the path passed with `--mcp-config`;
-2. `<data-dir>/mcp.toml` (by default `<install-dir>/.ax/projects/<project-key>/mcp.toml`);
-3. `$AX_HOME/mcp.toml` (usually `<install-dir>/.ax/mcp.toml`), used when the project has no
-   config of its own.
+MCP servers are configured in `$AX_HOME/mcp.toml` and
+`<project>/.ax/mcp.toml`. Both are loaded through the shared
+[scoped capability registry](capabilities.md): project server IDs replace
+matching global IDs while unrelated global servers remain available.
+`--mcp-config` replaces only the project source. Project masks and explicit
+enable/disable choices live in `.ax/config.toml` and do not alter global config.
 
 A missing file is an empty registry, not an error, so a fresh install simply
 has no servers configured. The release archive ships `mcp.example.toml`, and the

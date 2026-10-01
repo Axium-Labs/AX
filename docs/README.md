@@ -18,6 +18,7 @@ design decisions that shaped the code are recorded as ADRs in
 | [web-latency.md](web-latency.md) | Reproducible web scheduling latency benchmark |
 | [mcp.md](mcp.md) | MCP integration: configuration, transports, lazy connection |
 | [skills.md](skills.md) | Skills: package format, routing, enable/disable |
+| [capabilities.md](capabilities.md) | Shared Global/Project registry and Skill/MCP/Agent management |
 | [evolution.md](evolution.md) | Low-frequency Experience learning and evolved Skill lifecycle |
 | [providers.md](providers.md) | Models, providers, authentication |
 | [development.md](development.md) | Building, testing, extending and releasing AX |

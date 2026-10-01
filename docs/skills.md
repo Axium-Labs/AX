@@ -2,6 +2,7 @@
 
 AX uses the [Agent Skills specification](https://agentskills.io/specification).
 Skills provide task instructions without adding their bodies to startup context.
+Skill, MCP and Agent scope management share the [same registry](capabilities.md).
 
 ## Package format
 
@@ -48,9 +49,10 @@ Inspect the full diff and report actionable regressions.
 ## Discovery
 
 AX indexes skills on first routing or `/skills`, reading only YAML frontmatter
-from each `SKILL.md`. The search order is the selected project skills directory
-(`--skills-dir` when set, otherwise `<project>/skills`), then
-`<install-dir>/.ax/skills`. The first valid package with a given name wins; paths within
+from each `SKILL.md`. The shared scope registry loads global `$AX_HOME/skills`, then project
+`<project>/.ax/skills`, with legacy `<project>/skills` / `--skills-dir` sources
+still readable. Project names override global names; canonical project packages
+precede legacy packages. Paths within
 each root are sorted. A standard `SKILL.md` wins over legacy files in the
 same directory. Invalid packages and duplicates are reported individually in
 stderr and `/skills`; they do not suppress valid skills.
@@ -60,7 +62,7 @@ places them in `$AX_HOME/skills` (usually `<install-dir>/.ax/skills`) so they ap
 project. A package that already exists there is left untouched, so local edits
 survive an upgrade; `ax --update` refreshes them from the new release the same
 way. Skills are otherwise plain directories — copy one there (or
-into `<project>/skills`) to install it by hand.
+into `<project>/.ax/skills`) to install it by hand.
 
 ## Routing
 
@@ -109,7 +111,10 @@ create and install that format.
 ## Enable and disable
 
 `/skills` lists indexed packages and lets the user toggle them. Choices are
-stored in `<data-dir>/disabled-skills.json`. Disabling removes that skill's
+stored in the selected scope's `config.toml`, through the same policy used
+for MCP and Agents. Legacy `disabled-skills.json` is read as a fallback.
+Project disabling of inherited global packages stores a local mask.
+Disabling removes that skill's
 tagged instructions from effective context while preserving stored history.
 Re-enabling permits routing on a later matching turn.
 
@@ -141,8 +146,8 @@ packages. See [evolution.md](evolution.md) for scheduling, lifecycle and control
 ## Importing a local Skill
 
 Use `ax skill import C:/downloads/my-skill` to install a validated package into
-the current project's `skills/` directory, or add `--global` to use
-`$AX_HOME/skills`. `--skills-dir` also applies to project imports. AX reuses
+the current project's `.ax/skills/` directory, or add `--global` to use
+`$AX_HOME/skills`. `--skills-dir` remains a discovery source. AX reuses
 the standard package validator, copies resources, rejects symbolic links and
 conflicting names, and does not execute package scripts during import.
 Crew exposes the same command under Settings → AX capabilities.

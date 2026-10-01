@@ -246,7 +246,7 @@ impl TaskQueue {
         }
         if status == TaskStatus::Failed && task.recovery_attempts == 0 {
             task.failure_reason = Some(reason);
-            return Err("attempt recovery first: search existing workspace runner/runtime/scripts and available environments, then retry or use an alternative".into());
+            return Err("attempt recovery first: repair the failed step within its declared directories and runtime; do not scan unrelated workspace projects, then retry or use an alternative".into());
         }
         task.status = status;
         task.outcome = Some(reason.clone());
@@ -316,7 +316,7 @@ impl TaskQueue {
 pub(crate) fn spec() -> ToolSpec {
     ToolSpec { kind: "function", function: FunctionSpec {
         name: TOOL_NAME.into(),
-        description: "The runtime can execute queued tasks automatically in isolated child runs. Each task must contain its complete explicit input. For requests containing multiple explicit subtasks, initialize the internal queue before executing any work unless a queue already exists. Use this tool alone in a round. Finish the current task with completed/failed/skipped and a concise outcome. Before declaring failure, search existing workspace runner/runtime/scripts and available environments and attempt recovery. Independent tasks continue after failure. Execute current_task only; use finish for task-local completion/failure and block for a global blocker. A text-only response terminates the goal, never advances a task. Only summarize once current_task is null. For numbered requests the queue is automatic.".into(),
+        description: "The runtime can execute queued tasks automatically in isolated child runs. Each task must contain its complete explicit input. For requests containing multiple explicit subtasks, initialize the internal queue before executing any work unless a queue already exists. Use this tool alone in a round. Finish the current task with completed/failed/skipped and a concise outcome. Before declaring failure, repair the failed step within its declared directories and runtime; do not scan unrelated workspace projects and attempt recovery. Independent tasks continue after failure. Execute current_task only; use finish for task-local completion/failure and block for a global blocker. A text-only response terminates the goal, never advances a task. Only summarize once current_task is null. For numbered requests the queue is automatic.".into(),
         parameters: json!({"type":"object","properties":{
             "action":{"type":"string","enum":["start","finish","block","cancel"]},
             "overall_goal":{"type":"string"},"tasks":{"type":"array","minItems":2,"items":{"type":"string"}},

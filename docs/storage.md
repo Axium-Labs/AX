@@ -252,3 +252,10 @@ Legacy descriptors without `state_dir` move the old `.ax` store and JSONL togeth
 before enabling cleanup. Persistent memory and shell AX_HOME now bind to `state`,
 not a directory inside the disposable cwd. History loads in chronological order;
 checkpoints append only newly generated raw messages during resume.
+
+ACP `session/load` also replays the tools from child sessions referenced by raw
+queue checkpoints and archives, including cancelled or interrupted children.
+Each child is replayed once with the same `child-session:call-id` identity used
+by live events. Arguments, completed results and unfinished calls remain visible
+after cancellation and reconnect, even after workspace cleanup. Child prompts
+and internal assistant text remain private to the child transcript.

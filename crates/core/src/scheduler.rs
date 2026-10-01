@@ -47,6 +47,8 @@ pub(super) fn input_schema(mut schema: Value) -> Value {
         schema["properties"] = serde_json::json!({});
     }
     if let Some(properties) = schema.get_mut("properties").and_then(Value::as_object_mut) {
+        properties.insert("_ax_execution".into(), serde_json::json!({"type":"object","properties":{"goal_id":{"type":"string"},"step":{"type":"string"},"expected_output":{"type":"string"},"scope":{"type":"array","items":{"type":"string"}}},"required":["goal_id","step","expected_output","scope"],"additionalProperties":false,"description":"Bind a step to the original goal ID, output and narrower directories. Runtime enforces scope and predecessor progress."}));
+        properties.insert("_ax_observe".into(), serde_json::json!({"type":"string","description":"JSON pointer to a true boolean in the actual result verifying the expected output; observation alone is not progress."}));
         properties.insert("_ax_depends_on".into(), serde_json::json!({"type":"array","items":{"type":"string"},"description":"Tool call IDs whose successful completion is required by this call."}));
     }
     schema
@@ -240,17 +242,18 @@ pub(super) async fn run<F, H>(
     concurrency: usize,
     timeout_secs: u64,
     emit: &Mutex<F>,
+    execution: Option<Arc<Mutex<crate::ExecutionState>>>,
     mut completed: H,
 ) -> Result<Vec<Message>, AgentError>
 where
     F: FnMut(AgentEvent) + Send,
-    H: FnMut(Message) -> Result<(), AgentError>,
+    H: FnMut(Message, &str, &Value) -> Result<(), AgentError>,
 {
     let mut outputs: Vec<Option<Message>> = vec![None; jobs.len()];
     let mut succeeded = vec![false; jobs.len()];
     let mut started = vec![false; jobs.len()];
     let approval_gate = Arc::new(tokio::sync::Mutex::new(()));
-    let mut running: FuturesUnordered<BoxFuture<'_, (usize, bool, Message)>> =
+    let mut running: FuturesUnordered<BoxFuture<'_, (usize, bool, Message, Value)>> =
         FuturesUnordered::new();
     loop {
         for index in 0..jobs.len() {
@@ -280,7 +283,17 @@ where
             };
             let approval = Arc::clone(&approval);
             let approval_gate = Arc::clone(&approval_gate);
+            let execution = execution.clone();
             running.push(Box::pin(async move {
+                let proposed_input = input.as_ref().unwrap_or(&job.input).clone();
+                let input = input.and_then(|input| {
+                    if let (Some(state), Some(tool)) = (&execution, &job.tool) {
+                        state.lock().unwrap().prepare(tool.as_ref(), input)
+                    } else {
+                        Ok(input)
+                    }
+                });
+                let actual_input = input.as_ref().unwrap_or(&proposed_input).clone();
                 let result = execute(job, input, approval, approval_gate, timeout_secs, emit).await;
                 let success = result.is_ok();
                 let envelope = envelope(&result);
@@ -291,15 +304,15 @@ where
                     diagnostics: fetch_diagnostics(&job.name, &result),
                     result: envelope,
                 });
-                (index, success, message(&job.id, result))
+                (index, success, message(&job.id, result), actual_input)
             }));
         }
-        let Some((index, success, message)) = running.next().await else {
+        let Some((index, success, message, input)) = running.next().await else {
             break;
         };
         succeeded[index] = success;
         outputs[index] = Some(message.clone());
-        completed(message)?;
+        completed(message, &jobs[index].name, &input)?;
     }
     Ok(outputs.into_iter().flatten().collect())
 }
@@ -318,7 +331,11 @@ async fn execute<F: FnMut(AgentEvent) + Send>(
         detail: tool_activity(&job.name, input.as_ref().unwrap_or(&job.input)),
         input: input.as_ref().unwrap_or(&job.input).clone(),
     });
-    let input = input?;
+    let mut input = input?;
+    if let Some(object) = input.as_object_mut() {
+        object.remove("_ax_observe");
+        object.remove("_ax_execution");
+    }
     let tool = job
         .tool
         .as_ref()
@@ -558,7 +575,8 @@ mod tests {
             concurrency,
             0,
             &Mutex::new(|_| {}),
-            |_| Ok(()),
+            None,
+            |_, _, _| Ok(()),
         )
         .await
         .unwrap()
