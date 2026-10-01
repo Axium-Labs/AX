@@ -7,7 +7,7 @@
 # Environment:
 #   AX_VERSION       release tag to install (default: latest, e.g. v0.1.0)
 #   AX_INSTALL_DIR   install directory (default: ~/.local/bin)
-#   AX_HOME          AX state directory (default: ~/.ax)
+#   AX_HOME          AX state directory (default: <install directory>/.ax)
 #
 # The downloaded archive is verified against the release's SHA256SUMS before
 # anything is written to disk. The archive also carries the bundled skill
@@ -99,7 +99,7 @@ echo "AX: installed to ${install_dir}/ax"
 # Skill packages that already exist are left untouched so local edits survive an
 # upgrade; the MCP template is only written when no config exists yet, and every
 # server in it is disabled so nothing tries to launch a missing command.
-ax_home="${AX_HOME:-${HOME}/.ax}"
+ax_home="${AX_HOME:-${install_dir}/.ax}"
 
 if [ -d "${tmp_dir}/skills" ]; then
     skills_dir="${ax_home}/skills"

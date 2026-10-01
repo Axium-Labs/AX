@@ -61,7 +61,7 @@ Providers also report their context window, which drives the kernel's
 compression policy. Adding a local model means implementing the trait — no
 agent-loop changes.
 
-Credentials are persisted in `~/.ax/auth.json`: on Unix the file is written
+Credentials are persisted in `<install-dir>/.ax/auth.json` (or `AX_HOME`): on Unix the file is written
 with mode `0600`; on Windows there is no mode bit, so AX calls `icacls` to
 remove inherited ACEs and grant the current user full control (best effort —
 credential saving itself never depends on the tool succeeding).
@@ -117,8 +117,9 @@ Owns:
 - **`AgentSupervisor`**, running tasks with independent contexts and bounded
   concurrency.
 
-The core has no fixed system prompt. Only compaction uses a focused,
-impersonal summarization instruction.
+The core has no fixed system prompt. Compaction uses a focused, impersonal
+summarization instruction; long-task turns add only transient progress and
+recovery state.
 
 ### `mcp`
 
@@ -155,9 +156,10 @@ that catalog when automatic routing has already selected a skill.
 
 SQLite stores raw session messages, effective-context snapshots and scoped
 facts. Global facts live in the AX home; Project and Session facts live in the
-selected project database. Project ownership is a UUID persisted in
-`.ax/project.json`, independent of the absolute workspace path and
-`--data-dir`.
+selected installation-owned project database. Project ownership is a UUID
+persisted in `<install-dir>/.ax/projects/<project-key>/project.json`, independent
+of `--data-dir`; legacy workspace IDs remain readable. Runtime state survives
+workspace deletion. See [storage.md](storage.md) for migration and path keys.
 
 Explicit `remember key=value` declarations default to Session scope. Natural
 language intent is handled by the main model through a session-bound `memory`
@@ -252,3 +254,29 @@ summary. Every model step and tool call records latency metrics visible in
 | Portable backup | Use the memory crate ExportService/ImportService; CLI handles arguments and display |
 
 Step-by-step guidance lives in [development.md](development.md).
+
+## Lightweight long-task orchestration
+
+The existing model/tool Agent Loop and tool-round DAG remain the execution
+mechanisms. A small internal Task Queue recognizes top-level numbered/bulleted
+multi-task requests directly; for semantic subtasks the execution model initializes
+the queue through the `task_queue` tool schema, without a separate planner call
+or a fixed system prompt. A running queue is never replaced on resume. Tasks have
+pending/running/completed/failed/skipped states. Queue updates are isolated from
+ordinary tool rounds, so they cannot race with task execution.
+
+A text response finishes the current task, then advances to the next. A task
+with unresolved tool errors receives a recovery opportunity before being marked
+failed. Explicit failed outcomes also require recovery first. Recovery guidance
+asks the model to search workspace runners, runtimes, scripts and available
+environments before abandoning dependencies. Tool timeouts are local failures;
+step/tool-call/turn-time limits remain global `ExecutionBudget` limits. Transient
+provider failures get one retry before the current task fails and independent
+work continues. Provider configuration or authentication failures and persistence
+failures remain global blockers. An explicit `cancel`, `/cancel`, `取消` or
+`取消长任务` input cancels a saved queue without another model request.
+
+The turn emits its final answer only after all tasks reach terminal states and a
+summary model response is checkpointed. Queue state persists through the existing
+AgentState path; see [context.md](context.md) and [storage.md](storage.md), and
+[ADR 0008](adr/0008-durable-task-queue.md).

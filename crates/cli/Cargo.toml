@@ -11,6 +11,7 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow.workspace = true
+rusqlite.workspace = true
 async-trait.workspace = true
 runtime-core = { path = "../core" }
 model = { path = "../model" }

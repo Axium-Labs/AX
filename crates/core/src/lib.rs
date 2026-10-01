@@ -3,6 +3,7 @@
 mod budget;
 mod context;
 mod scheduler;
+pub mod task_queue;
 pub use budget::{ContextBudget, ExecutionBudget};
 pub use context::select_context;
 
@@ -138,6 +139,7 @@ pub struct AgentKernel {
     compression_dirty: bool,
     tool_concurrency: usize,
     result_reader: tool::ResultReader,
+    task_queue: Option<task_queue::TaskQueue>,
 }
 
 impl AgentKernel {
@@ -163,6 +165,7 @@ impl AgentKernel {
             compression_dirty: false,
             tool_concurrency: 4,
             result_reader,
+            task_queue: None,
         }
     }
 
@@ -196,7 +199,8 @@ impl AgentKernel {
 
     /// Seeds the kernel with a previously loaded session context.
     #[must_use]
-    pub fn with_messages(mut self, messages: Vec<Message>) -> Self {
+    pub fn with_messages(mut self, mut messages: Vec<Message>) -> Self {
+        self.task_queue = task_queue::TaskQueue::restore(&mut messages);
         for message in &messages {
             if let Some(id) = &message.tool_call_id
                 && let Ok(result) = serde_json::from_str::<tool::ToolResult>(&message.content)
@@ -244,6 +248,7 @@ impl AgentKernel {
             raw_turn_messages: Vec::new(),
             compression_dirty: false,
             result_reader,
+            task_queue: None,
         }
         .with_messages(messages)
     }
@@ -264,7 +269,7 @@ impl AgentKernel {
         ContextBudget::new(
             self.provider.context_window(),
             self.provider.max_output_tokens(),
-            estimate_tool_schema_tokens(&self.tools),
+            estimate_tool_schema_tokens(&self.tools) + task_queue::schema_tokens(),
         )
     }
 
@@ -620,11 +625,44 @@ impl AgentKernel {
         let emit = std::sync::Mutex::new(emit);
         (emit.lock().unwrap())(AgentEvent::TurnStarted);
         self.raw_turn_messages.clear();
+        let input = input.into();
+        let canceled = matches!(
+            input.trim().to_lowercase().as_str(),
+            "/cancel" | "cancel" | "cancel task" | "取消" | "取消长任务"
+        ) && self
+            .task_queue
+            .as_ref()
+            .is_some_and(task_queue::TaskQueue::active);
+        if canceled {
+            self.task_queue.as_mut().unwrap().stop_reason = Some("user canceled".into());
+        }
+        if !canceled
+            && !self
+                .task_queue
+                .as_ref()
+                .is_some_and(task_queue::TaskQueue::active)
+        {
+            self.task_queue = task_queue::TaskQueue::from_input(&input);
+        }
         let user = Message::user(input);
         self.messages.push(user.clone());
         self.raw_turn_messages.push(user);
         checkpoint(&self.raw_turn_messages)?;
-        let tool_specs = self
+        self.checkpoint_queue(checkpoint)?;
+        if canceled {
+            self.set_context(task_queue::PROGRESS_PREFIX, None);
+            let content = "Task queue canceled by user.";
+            let message = Message::assistant(content, vec![]);
+            self.messages.push(message.clone());
+            self.raw_turn_messages.push(message);
+            checkpoint(&self.raw_turn_messages)?;
+            (emit.lock().unwrap())(AgentEvent::ContentDelta {
+                delta: content.into(),
+            });
+            (emit.lock().unwrap())(AgentEvent::TurnFinished);
+            return Ok(content.into());
+        }
+        let mut tool_specs = self
             .tools
             .iter()
             .map(|tool| ToolSpec {
@@ -637,6 +675,8 @@ impl AgentKernel {
             })
             .collect::<Vec<_>>();
 
+        tool_specs.push(task_queue::spec());
+        let mut model_failures = 0;
         let mut calls_used = 0;
         let mut steps_used = 0usize;
         loop {
@@ -652,20 +692,45 @@ impl AgentKernel {
                     message.content = result.model_view(chars);
                 }
             }
+            self.set_context(
+                task_queue::PROGRESS_PREFIX,
+                self.task_queue
+                    .as_ref()
+                    .filter(|q| q.active())
+                    .map(task_queue::TaskQueue::progress),
+            );
             self.compress_if_needed(|event| (emit.lock().unwrap())(event))
                 .await?;
             (emit.lock().unwrap())(AgentEvent::ModelStarted {
                 provider: self.provider.name().to_owned(),
                 model: self.provider.model_id().to_owned(),
             });
+            let queue_active = self
+                .task_queue
+                .as_ref()
+                .is_some_and(task_queue::TaskQueue::active);
             let mut on_delta = |delta: String| {
-                (emit.lock().unwrap())(AgentEvent::ContentDelta { delta });
+                if !queue_active {
+                    (emit.lock().unwrap())(AgentEvent::ContentDelta { delta });
+                }
             };
             let mut on_thinking = |delta: String| {
                 (emit.lock().unwrap())(AgentEvent::ThinkingDelta { delta });
             };
             let model_timer = tool::telemetry::Timer::new("model.request");
-            let request_messages = request_context(&self.messages, self.context_budget())?;
+            let mut request_history = self.messages.clone();
+            if let Some(queue) = self.task_queue.as_ref().filter(|q| {
+                q.active()
+                    && !q.tasks.iter().any(|t| {
+                        matches!(
+                            t.status,
+                            task_queue::TaskStatus::Running | task_queue::TaskStatus::Pending
+                        )
+                    })
+            }) {
+                request_history.push(queue.summary_context());
+            }
+            let request_messages = request_context(&request_history, self.context_budget())?;
             let response = self
                 .provider
                 .complete_stream(
@@ -676,8 +741,43 @@ impl AgentKernel {
                     &mut on_delta,
                     &mut on_thinking,
                 )
-                .await?;
+                .await;
             drop(model_timer);
+            let response = match response {
+                Ok(response) => {
+                    model_failures = 0;
+                    response
+                }
+                Err(error)
+                    if queue_active
+                        && !matches!(
+                            &error,
+                            ModelError::Configuration(_)
+                                | ModelError::HttpStatus {
+                                    status: 401 | 403,
+                                    ..
+                                }
+                        ) =>
+                {
+                    model_failures += 1;
+                    if model_failures < 2 {
+                        continue;
+                    }
+                    if let Some(queue) = &mut self.task_queue
+                        && let Some(task) = queue.current_mut()
+                    {
+                        task.recovery_attempts += 1;
+                        queue
+                            .finish(task_queue::TaskStatus::Failed, error.to_string())
+                            .map_err(AgentError::Persistence)?;
+                        self.checkpoint_queue(checkpoint)?;
+                        model_failures = 0;
+                        continue;
+                    }
+                    return Err(error.into());
+                }
+                Err(error) => return Err(error.into()),
+            };
             let content = response.content;
             let tool_calls = response.tool_calls;
             let mut assistant = Message::assistant(content.clone(), tool_calls.clone());
@@ -687,6 +787,38 @@ impl AgentKernel {
             checkpoint(&self.raw_turn_messages)?;
 
             if tool_calls.is_empty() {
+                if let Some(queue) = self.task_queue.as_mut().filter(|q| q.active()) {
+                    if let Some(task) = queue.current_mut() {
+                        if task.failure_reason.is_some() && task.recovery_attempts == 0 {
+                            task.recovery_attempts = 1;
+                            self.messages.push(Message::system("[ax-recovery] Attempt recovery before ending this task. Search existing workspace runner/runtime/scripts and available environments; retry or use an alternative. If unrecoverable, finish the task as failed and continue independent tasks."));
+                            self.checkpoint_queue(checkpoint)?;
+                            continue;
+                        }
+                        let status = if task.failure_reason.is_some() {
+                            task_queue::TaskStatus::Failed
+                        } else {
+                            task_queue::TaskStatus::Completed
+                        };
+                        let reason = task
+                            .failure_reason
+                            .clone()
+                            .unwrap_or_else(|| content.clone());
+                        queue
+                            .finish(status, reason)
+                            .map_err(AgentError::Persistence)?;
+                        self.messages
+                            .retain(|m| !m.content.starts_with("[ax-recovery]"));
+                        self.checkpoint_queue(checkpoint)?;
+                        continue;
+                    }
+                    queue.summarized = true;
+                    self.checkpoint_queue(checkpoint)?;
+                    (emit.lock().unwrap())(AgentEvent::ContentDelta {
+                        delta: content.clone(),
+                    });
+                }
+                self.set_context(task_queue::PROGRESS_PREFIX, None);
                 (emit.lock().unwrap())(AgentEvent::TurnFinished);
                 return Ok(content);
             }
@@ -697,7 +829,64 @@ impl AgentKernel {
                 return Err(AgentError::Budget("tool call limit".into()));
             }
             calls_used = calls_used.saturating_add(tool_calls.len());
-            let jobs = scheduler::prepare(&tool_calls, &self.tools)?;
+            if tool_calls
+                .iter()
+                .any(|call| call.function.name == task_queue::TOOL_NAME)
+            {
+                let result = if tool_calls.len() == 1 {
+                    serde_json::from_str::<Value>(&tool_calls[0].function.arguments)
+                        .map_err(|error| error.to_string())
+                        .and_then(|input| task_queue::apply(&mut self.task_queue, &input))
+                } else {
+                    Err(
+                        "task_queue must be called alone; no tools in this round were executed"
+                            .into(),
+                    )
+                };
+                for call in &tool_calls {
+                    let message = Message::tool(&call.id, match &result {
+                        Ok(()) => "Queue updated. Continue current_task; summarize only after all tasks are terminal.".into(),
+                        Err(reason) => format!("Queue update rejected: {reason}"),
+                    });
+                    self.messages.push(message.clone());
+                    self.raw_turn_messages.push(message);
+                }
+                self.checkpoint_queue(checkpoint)?;
+                checkpoint(&self.raw_turn_messages)?;
+                continue;
+            }
+            let jobs = match scheduler::prepare(&tool_calls, &self.tools) {
+                Ok(jobs) => jobs,
+                Err(error) if queue_active => {
+                    for call in &tool_calls {
+                        let message = Message::tool(
+                            &call.id,
+                            serde_json::to_string(&tool::ToolResult::new(false, error.to_string()))
+                                .unwrap(),
+                        );
+                        self.messages.push(message.clone());
+                        self.raw_turn_messages.push(message);
+                    }
+                    if let Some(task) = self
+                        .task_queue
+                        .as_mut()
+                        .and_then(task_queue::TaskQueue::current_mut)
+                    {
+                        task.failure_reason = Some(error.to_string());
+                    }
+                    self.checkpoint_queue(checkpoint)?;
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
+            if let Some(task) = self
+                .task_queue
+                .as_mut()
+                .and_then(task_queue::TaskQueue::current_mut)
+                && task.failure_reason.is_some()
+            {
+                task.recovery_attempts += 1;
+            }
             let round_start = self.messages.len();
             let results = scheduler::run(
                 jobs,
@@ -725,8 +914,50 @@ impl AgentKernel {
             // Raw checkpoints follow completion order; the next model request
             // receives one result per original call, in the original call order.
             self.messages.truncate(round_start);
+            if let Some(task) = self
+                .task_queue
+                .as_mut()
+                .and_then(task_queue::TaskQueue::current_mut)
+            {
+                let failures = results
+                    .iter()
+                    .filter_map(|m| serde_json::from_str::<tool::ToolResult>(&m.content).ok())
+                    .filter(|r| r.status != "success")
+                    .map(|r| r.raw_output)
+                    .collect::<Vec<_>>();
+                task.failure_reason = if failures.is_empty() {
+                    None
+                } else {
+                    Some(failures.join("\n"))
+                };
+            }
             self.messages.extend(results);
+            self.checkpoint_queue(checkpoint)?;
         }
+    }
+
+    /// Durable queue checkpoint uses the caller's existing message persistence path.
+    fn checkpoint_queue<H>(&mut self, checkpoint: &mut H) -> Result<(), AgentError>
+    where
+        H: FnMut(&[Message]) -> Result<(), AgentError> + Send,
+    {
+        if let Some(queue) = &self.task_queue {
+            self.raw_turn_messages.push(queue.snapshot());
+            checkpoint(&self.raw_turn_messages)?;
+        }
+        Ok(())
+    }
+
+    #[must_use]
+    pub fn task_queue_snapshot(&self) -> Option<Message> {
+        self.task_queue
+            .as_ref()
+            .map(task_queue::TaskQueue::snapshot)
+    }
+
+    #[must_use]
+    pub fn task_queue(&self) -> Option<&task_queue::TaskQueue> {
+        self.task_queue.as_ref()
     }
 }
 
@@ -1019,8 +1250,17 @@ fn request_context(
     let mut history = Vec::new();
     let mut memory = Vec::new();
     let mut skills = Vec::new();
+    let mut progress = Vec::new();
     for message in messages {
         if message.role == model::Role::System && message.content.starts_with("[ax-changes]\n") {
+            continue;
+        }
+        if message.role == model::Role::System
+            && (message.content.starts_with(task_queue::PROGRESS_PREFIX)
+                || message.content.starts_with("[ax-task-summary]")
+                || message.content.starts_with("[ax-recovery]"))
+        {
+            progress.push(message.clone());
             continue;
         }
         let mut projected = message.clone();
@@ -1048,9 +1288,15 @@ fn request_context(
                 .filter(|message| message.role != model::Role::System)
                 .count()
         });
+    let progress_tokens = estimate_tokens(&progress);
+    if progress_tokens >= budget.history_budget() {
+        return Err(AgentError::Budget(
+            "task progress exceeds input budget".into(),
+        ));
+    }
     history = select_context(
         &history,
-        budget.history_budget(),
+        budget.history_budget().saturating_sub(progress_tokens),
         budget.session_summary_budget(),
     );
     if history
@@ -1063,7 +1309,8 @@ fn request_context(
             "latest user turn exceeds the input budget".into(),
         ));
     }
-    let mut selected = history;
+    let mut selected = progress;
+    selected.extend(history);
     let mut remaining = budget.usable().saturating_sub(estimate_tokens(&selected));
     // Routing and retrieval put their highest-priority entries first. When
     // space is tight, optional memory gives way before selected skills.
@@ -2114,3 +2361,6 @@ mod tests {
         assert_eq!(kernel.messages()[0].content, "wait");
     }
 }
+
+#[cfg(test)]
+mod task_queue_tests;

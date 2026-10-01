@@ -7,30 +7,46 @@ never lost; SQLite is a rebuildable index.
 
 ## Data directory layout
 
-AX keeps **project state** in the project's `.ax` directory and **user state**
-in the AX home (`~/.ax`, or `$AX_HOME` when set).
+AX stores persistent state under `.ax` beside the running executable, or
+under `AX_HOME` when explicitly configured. Working directories contain user
+project files and optional user-authored skills, not default runtime state.
+`--data-dir` remains an explicit override for a selected project store.
 
 ```text
-project-root/
+<install-dir>/
+├── ax(.exe)
 └── .ax/
-    ├── memory.sqlite3          # SQLite database (indexes, metadata, facts)
-    ├── memory.sqlite3-shm      # WAL shared memory
-    ├── memory.sqlite3-wal      # WAL log
-    ├── project.json            # portable project identity (UUID)
-    └── sessions/               # JSONL event streams
-        ├── <session-uuid>.jsonl
-        └── <session-uuid>.jsonl
-
-~/.ax/
-├── auth.json                   # provider credentials (0600 on Unix / icacls on Windows)
-├── config.json                 # last model selection (legacy config.toml auto-migrated)
-├── session-projects.json       # known project paths for the cross-project picker
-└── models/                     # model catalog cache
-    ├── deepseek.json
-    ├── openai.json
-    ├── openai-codex.json
-    └── pi-catalog.json
+    ├── auth.json
+    ├── config.json
+    ├── memory.sqlite3              # Global facts
+    ├── session-projects.json       # cross-project session picker
+    ├── models/
+    ├── skills/
+    ├── mcp.toml
+    └── projects/<project-key>/
+        ├── project.json            # Project UUID
+        ├── memory.sqlite3          # Project/Session facts and metadata
+        ├── memory.sqlite3-wal
+        ├── memory.sqlite3-shm
+        ├── sessions/<uuid>.jsonl    # authoritative raw history
+        ├── mcp.toml                # optional project override
+        └── evolution/              # learned skills and Experiences
 ```
+
+The project key is SHA-256 of the canonical project path (case-normalized on
+Windows). Different projects retain separate stores. Project UUIDs remain the
+owners of facts. Legacy workspace identities are accepted and copied into the
+installation store. Deleting workspace files leaves stored identity and history
+intact. A new path without a legacy ID is a new project; use portable export/import
+when deliberately moving a project to another path or installation.
+
+At startup, AX copies the old user home and registered project stores, and copies
+the current project's legacy `.ax` store on first use. Existing destination files
+are preserved, sources are never removed, and completed copies are marked to avoid
+repeated scans. A SQLite writer lock protects a database snapshot and JSONL copy;
+the backup API includes committed WAL writes. Database publication follows JSONL.
+An unwritable installation returns an error rather than falling back to the cwd.
+Explicit `AX_HOME` skips old user-home migration; explicit `--data-dir` is retained.
 
 ## SQLite schema
 
@@ -131,15 +147,11 @@ Happens automatically and per-session on first access. Old messages
 index pointers updated; SQLite content fields are cleared afterwards. No data
 is lost.
 
-### Project identity `project-id` → `project.json`
+### Legacy project identity
 
-`project_identity::load_or_create` migrates automatically:
-
-1. Read `project.json`; return if present.
-2. Else read the legacy `project-id` text file.
-3. Else generate a new UUID.
-4. Write `project.json` atomically (temp file + hard link).
-5. Delete the old `project-id` file.
+AX reads installation `project.json` first, then legacy workspace `project.json`
+or `project-id`. It publishes the UUID atomically in the installation-owned project
+store and retains the legacy files. No new metadata is written into the workspace.
 
 ### Legacy `config.toml` → `config.json`
 
@@ -190,3 +202,16 @@ legacy `config.toml`, saves the result as `config.json`, and continues.
 | Scoped memories | `crates/memory/src/scoped.rs` |
 | Project identity migration | `crates/cli/src/project_identity.rs` |
 | Config migration | `crates/cli/src/config.rs` |
+
+## Durable task queues
+
+Queue checkpoints are ordinary `AgentState` messages prefixed `[ax-task-queue]`.
+They include the original overall goal, ordered tasks and statuses, outcomes,
+failure reasons, recovery attempts and summary/stop state. Pending/running
+entries determine the remaining queue. They use the existing JSONL-first write
+path and agent-state index; no new schema or external state files are needed.
+`latest_agent_state(session, prefix)` loads the latest checkpoint independently
+of recent-history pages and compression watermarks. Session restore fetches this
+state after context selection, and runtime construction removes full checkpoints
+from model-visible messages. Provider changes also retain the queue. Interrupted
+tool calls still use existing recovery placeholders and do not replay side effects.

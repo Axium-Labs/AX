@@ -17,8 +17,8 @@ cleanup.
 MCP servers are configured in `mcp.toml`. Resolution order:
 
 1. the path passed with `--mcp-config`;
-2. `<data-dir>/mcp.toml` (by default the project's `.ax/mcp.toml`);
-3. `$AX_HOME/mcp.toml` (usually `~/.ax/mcp.toml`), used when the project has no
+2. `<data-dir>/mcp.toml` (by default `<install-dir>/.ax/projects/<project-key>/mcp.toml`);
+3. `$AX_HOME/mcp.toml` (usually `<install-dir>/.ax/mcp.toml`), used when the project has no
    config of its own.
 
 A missing file is an empty registry, not an error, so a fresh install simply

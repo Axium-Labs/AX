@@ -6,7 +6,7 @@ selection in AX.
 ## Overview
 
 AX discovers providers from what is already on your machine — credentials in
-`~/.ax/auth.json` and standard environment variables like `DEEPSEEK_API_KEY`.
+`<install-dir>/.ax/auth.json` and standard environment variables like `DEEPSEEK_API_KEY`.
 **No network call happens during startup.** The provider is built only on the
 first model call.
 
@@ -48,7 +48,7 @@ metadata preserves image parts separately from the plain-text transcript.
 
 ## Credentials
 
-Credentials live in `~/.ax/auth.json` (or `$AX_HOME/auth.json` when set):
+Credentials live in `<install-dir>/.ax/auth.json` (or `$AX_HOME/auth.json` when set):
 
 ```json
 {
@@ -71,14 +71,14 @@ Credentials live in `~/.ax/auth.json` (or `$AX_HOME/auth.json` when set):
   credential, then the conventional environment variable. OAuth providers use
   `resolve_oauth`.
 - Older AX builds stored credentials in the project's data directory;
-  `migrate_legacy_project_auth` copies that once into `~/.ax/auth.json`. AX
+  `migrate_legacy_project_auth` copies that once into `<install-dir>/.ax/auth.json`. AX
   never imports another application's credentials (notably
   `~/.codex/auth.json`) unless an explicit `--codex-auth` path is given.
-- `~/.ax/auth.json` is written atomically (temp file + rename).
+- `<install-dir>/.ax/auth.json` is written atomically (temp file + rename).
 
 ## Model discovery
 
-Models are discovered dynamically into `~/.ax/models/`: a bundled catalog
+Models are discovered dynamically into `<install-dir>/.ax/models/`: a bundled catalog
 plus a per-provider refresh cache (`models/<provider>.json`). The cache avoids
 API requests on every startup; refresh falls back to the cache after a 15s
 timeout.
@@ -92,7 +92,7 @@ timeout.
   provider catalogs in the background. Only models from configured providers
   are offered.
 - The last selection — provider, model and reasoning effort — is persisted to
-  `~/.ax/config.json` (`AxConfig { model: { provider, model, reasoning_effort } }`)
+  `<install-dir>/.ax/config.json` (`AxConfig { model: { provider, model, reasoning_effort } }`)
   and restored on the next launch. A legacy `config.toml` is migrated
   automatically.
 - CLI overrides (`--provider`, `--model`, `--codex-auth`,

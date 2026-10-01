@@ -60,7 +60,7 @@ associated session in the same package; those facts are reported as orphan
 session memories and skipped.
 
 Project facts in the package carry the source project's UUID, not its old
-path. Import maps them to the current project's UUID from .ax/project.json;
+path. Import maps them to the current project's UUID from its installation-owned project.json;
 it does not overwrite that identity. Export first applies AX's existing
 path-owner migration when an old project database needs it. Import creates
 the current project identity only for an actual merge, never for dry-run.

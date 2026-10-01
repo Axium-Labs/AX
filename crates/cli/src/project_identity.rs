@@ -1,4 +1,4 @@
-//! Portable project identity stored in `.ax/project.json`.
+//! Installation-owned project identity; legacy workspace IDs remain readable.
 use std::{fs, io::Write, path::Path};
 
 use anyhow::{Context, Result};
@@ -10,6 +10,11 @@ struct ProjectMetadata {
 }
 
 pub(crate) fn load_existing(root: &Path) -> Result<Option<String>> {
+    let central = crate::storage_location::project_directory(root).join("project.json");
+    if central.is_file() {
+        let metadata: ProjectMetadata = serde_json::from_str(&fs::read_to_string(central)?)?;
+        return Ok(Some(uuid::Uuid::parse_str(&metadata.id)?.to_string()));
+    }
     let directory = root.join(".ax");
     let path = directory.join("project.json");
     match fs::read_to_string(&path) {
@@ -30,7 +35,7 @@ pub(crate) fn load_existing(root: &Path) -> Result<Option<String>> {
 }
 
 pub(crate) fn load_or_create(root: &Path) -> Result<String> {
-    let directory = root.join(".ax");
+    let directory = crate::storage_location::project_directory(root);
     fs::create_dir_all(&directory)?;
     let path = directory.join("project.json");
     match fs::read_to_string(&path) {
@@ -42,14 +47,7 @@ pub(crate) fn load_or_create(root: &Path) -> Result<String> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => return Err(error).context("Cannot read project identity"),
     }
-    let legacy = directory.join("project-id");
-    let id = match fs::read_to_string(&legacy) {
-        Ok(value) => uuid::Uuid::parse_str(value.trim())?.to_string(),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            uuid::Uuid::new_v4().to_string()
-        }
-        Err(error) => return Err(error).context("Cannot read legacy project identity"),
-    };
+    let id = load_existing(root)?.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     let temporary = directory.join(format!("project.{}.tmp", uuid::Uuid::new_v4()));
     let mut file = fs::OpenOptions::new()
         .write(true)
@@ -62,12 +60,7 @@ pub(crate) fn load_or_create(root: &Path) -> Result<String> {
     let published = fs::hard_link(&temporary, &path);
     fs::remove_file(&temporary)?;
     match published {
-        Ok(()) => {
-            if legacy.exists() {
-                fs::remove_file(legacy)?;
-            }
-            Ok(id)
-        }
+        Ok(()) => Ok(id),
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
             let metadata: ProjectMetadata = serde_json::from_str(&fs::read_to_string(path)?)?;
             Ok(uuid::Uuid::parse_str(&metadata.id)?.to_string())
@@ -81,10 +74,29 @@ mod tests {
     use super::*;
 
     #[test]
+    fn new_identity_lives_outside_workspace_and_survives_cleanup() {
+        let root = std::env::temp_dir().join(format!("ax-central-id-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let root = fs::canonicalize(root).unwrap();
+        let id = load_or_create(&root).unwrap();
+        assert!(!root.join(".ax").exists());
+        fs::remove_dir_all(&root).unwrap();
+        assert_eq!(load_existing(&root).unwrap(), Some(id));
+        let central = crate::storage_location::project_directory(&root);
+        fs::remove_dir_all(central).unwrap();
+    }
+
+    #[test]
     fn identity_survives_moves_and_different_projects_get_different_ids() {
         let root = std::env::temp_dir().join(format!("ax-identity-{}", uuid::Uuid::new_v4()));
         let first = root.join("first");
         let moved = root.join("moved");
+        fs::create_dir_all(first.join(".ax")).unwrap();
+        fs::write(
+            first.join(".ax/project-id"),
+            uuid::Uuid::new_v4().to_string(),
+        )
+        .unwrap();
         let id = load_or_create(&first).unwrap();
         let database = first.join(".ax/memory.sqlite3");
         let store = memory::MemoryStore::open(database).unwrap();
@@ -123,11 +135,15 @@ mod tests {
         let id = uuid::Uuid::new_v4().to_string();
         fs::write(root.join(".ax/project-id"), &id).unwrap();
         assert_eq!(load_or_create(&root).unwrap(), id);
-        let metadata: ProjectMetadata =
-            serde_json::from_str(&fs::read_to_string(root.join(".ax/project.json")).unwrap())
-                .unwrap();
+        let metadata: ProjectMetadata = serde_json::from_str(
+            &fs::read_to_string(
+                crate::storage_location::project_directory(&root).join("project.json"),
+            )
+            .unwrap(),
+        )
+        .unwrap();
         assert_eq!(metadata.id, id);
-        assert!(!root.join(".ax/project-id").exists());
+        assert!(root.join(".ax/project-id").exists());
         fs::remove_dir_all(root).unwrap();
     }
 }

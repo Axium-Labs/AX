@@ -36,6 +36,7 @@ mod providers;
 mod session_projects;
 mod session_restore;
 mod skill_settings;
+mod storage_location;
 mod tui;
 mod update;
 mod worktree_changes;
@@ -74,6 +75,7 @@ struct Cli {
     /// Override the active model's context-window token capacity.
     #[arg(long, global = true)]
     context_window: Option<NonZeroUsize>,
+    /// Override storage (default: installation .ax/projects/<project-key>).
     #[arg(long, global = true)]
     data_dir: Option<PathBuf>,
     #[arg(long, global = true)]
@@ -267,6 +269,7 @@ impl ReplState {
         migrate_legacy_project_auth(&data_dir)?;
         fs::create_dir_all(&data_dir)?;
         let project_id = project_identity::load_or_create(project_root)?;
+        storage_location::migrate_project(project_root, &data_dir)?;
         let database = database_path(&data_dir);
         let mcp_config = mcp_config.unwrap_or_else(|| data_dir.join("mcp.toml"));
         let store = if database.exists() {
@@ -280,10 +283,10 @@ impl ReplState {
             store.migrate_project_owner(
                 &project_id,
                 &project_root.to_string_lossy(),
-                data_dir == project_root.join(".ax"),
+                storage_location::is_project_store(&data_dir, project_root),
             )?;
         }
-        let project_local_store = data_dir == project_root.join(".ax");
+        let project_local_store = storage_location::is_project_store(&data_dir, project_root);
         Ok(Self {
             project_root: project_root.to_path_buf(),
             data_dir,
@@ -370,13 +373,20 @@ impl ReplState {
         }
         self.evolution_end_session();
         let mut next = Self::new_in_project(
-            location.data_dir.clone(),
+            storage_location::relocated_data_dir(location),
             location.skills_dir.clone(),
             Some(location.mcp_config.clone()),
             &location.root,
         )?;
         next.execution_budget = self.execution_budget;
-        std::env::set_current_dir(&location.root)?;
+        if location.root.is_dir() {
+            std::env::set_current_dir(&location.root)?;
+        } else {
+            eprintln!(
+                "Original workspace {} no longer exists; using the current directory.",
+                location.root.display()
+            );
+        }
         *self = next;
         Ok(())
     }
@@ -408,8 +418,15 @@ impl ReplState {
         let has_snapshot = self.store()?.effective_context(id)?.is_some();
         if !has_snapshot {
             let agent_state = self.store()?.load_agent_state_messages(id)?;
-            self.loaded_messages
-                .extend(agent_state.iter().map(restore_message));
+            self.loaded_messages.extend(
+                agent_state
+                    .iter()
+                    .filter(|m| {
+                        !m.content
+                            .starts_with(runtime_core::task_queue::STATE_PREFIX)
+                    })
+                    .map(restore_message),
+            );
         }
         self.loaded_messages.extend(
             stored
@@ -446,11 +463,28 @@ impl ReplState {
                         .is_none_or(|allowed| allowed.contains(&name))
             })
         });
+        self.loaded_messages.retain(|m| {
+            !m.content
+                .starts_with(runtime_core::task_queue::STATE_PREFIX)
+        });
         self.loaded_messages = runtime_core::select_context(
             &self.loaded_messages,
             budget.recent_messages_budget(),
             budget.session_summary_budget(),
         );
+        // Queue state is durable orchestration metadata, independent of context
+        // snapshots and token selection. Restore the latest checkpoint even when
+        // it predates the bounded recent-history page.
+        let queue_state = self
+            .store()?
+            .latest_agent_state(id, runtime_core::task_queue::STATE_PREFIX)?;
+        self.loaded_messages.retain(|m| {
+            !m.content
+                .starts_with(runtime_core::task_queue::STATE_PREFIX)
+        });
+        if let Some(queue_state) = queue_state {
+            self.loaded_messages.push(restore_message(&queue_state));
+        }
         self.active_skills = self
             .loaded_messages
             .iter()
@@ -748,6 +782,7 @@ impl ReplState {
     fn invalidate_runtime(&mut self) {
         if let Some(runtime) = self.runtime.take() {
             self.loaded_messages = runtime.messages().to_vec();
+            self.loaded_messages.extend(runtime.task_queue_snapshot());
         }
     }
 
@@ -797,10 +832,13 @@ fn discover_project_root(start: &Path) -> PathBuf {
     if let Some(root) = candidates.iter().find(|dir| dir.join(".git").exists()) {
         return (*root).to_path_buf();
     }
-    if let Some(root) = candidates
-        .iter()
-        .find(|dir| dir.join(".ax/project.json").is_file() || dir.join(".ax/project-id").is_file())
-    {
+    if let Some(root) = candidates.iter().find(|dir| {
+        dir.join(".ax/project.json").is_file()
+            || dir.join(".ax/project-id").is_file()
+            || storage_location::project_directory(dir)
+                .join("project.json")
+                .is_file()
+    }) {
         return (*root).to_path_buf();
     }
     if let Some(root) = candidates.iter().find(|dir| {
@@ -820,7 +858,7 @@ fn resolve_directories(
 ) -> (PathBuf, PathBuf) {
     let project_root = discover_project_root(cwd);
     (
-        data_dir.unwrap_or_else(|| project_root.join(".ax")),
+        data_dir.unwrap_or_else(|| storage_location::project_directory(&project_root)),
         skills_dir.unwrap_or_else(|| project_root.join("skills")),
     )
 }
@@ -1122,7 +1160,7 @@ async fn main() -> Result<()> {
     }
     let cwd = std::env::current_dir()?;
     let (data_dir, skills_dir) =
-        resolve_directories(&cwd, cli.data_dir.clone(), cli.skills_dir.clone());
+        storage_location::initialize(&cwd, cli.data_dir.clone(), cli.skills_dir.clone())?;
     let budget = execution_budget(&cli);
     drop(startup_timer);
     model::stats::init(config::ax_home().join("inference_stats.json"));
@@ -1249,7 +1287,7 @@ fn run_export(
         project.migrate_project_owner(
             &project_id,
             &project_root.to_string_lossy(),
-            data_dir == project_root.join(".ax"),
+            storage_location::is_project_store(data_dir, &project_root),
         )?;
     }
     let global = if global_path.exists() {
@@ -1561,6 +1599,68 @@ mod file_context_tests {
     }
 
     #[test]
+    fn queue_restore_uses_latest_durable_state_beyond_snapshot_and_history_page() {
+        let root = std::env::temp_dir().join(format!("ax-queue-resume-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let mut state =
+            ReplState::new_in_project(root.join(".ax"), root.join("skills"), None, &root).unwrap();
+        state.ensure_session("queue test").unwrap();
+        let session = state.current_session_id().unwrap().to_owned();
+        let checkpoint = |status: &str| {
+            Message::system(format!(
+                "{}{}",
+                runtime_core::task_queue::STATE_PREFIX,
+                serde_json::json!({
+                    "overall_goal":"original goal", "summarized":false,"stop_reason":null,
+                    "tasks":[{"title":"one","status":status,"failure_reason":null,"outcome":null},
+                             {"title":"two","status":if status == "completed" {"running"} else {"pending"},"failure_reason":null,"outcome":null}]
+                })
+            ))
+        };
+        state.persist_messages(&[checkpoint("running")]).unwrap();
+        state
+            .store()
+            .unwrap()
+            .save_effective_context(&session, "old summary", "[]")
+            .unwrap();
+        state.persist_messages(&[checkpoint("completed")]).unwrap();
+        for _ in 0..300 {
+            state
+                .persist_messages(&[Message::user("recent"), Message::assistant("done", vec![])])
+                .unwrap();
+        }
+        let budget = runtime_core::ContextBudget::new(10_000, Some(100), 0);
+        assert!(state.open_session(&session, &budget).unwrap());
+        let runtime = AgentKernel::new(
+            Arc::new(MockProvider),
+            ToolRegistry::new(),
+            Arc::new(AllowAll),
+        )
+        .with_messages(state.loaded_messages.clone());
+        let queue = runtime.task_queue().unwrap();
+        assert_eq!(queue.overall_goal, "original goal");
+        assert_eq!(
+            queue.tasks[0].status,
+            runtime_core::task_queue::TaskStatus::Completed
+        );
+        assert_eq!(
+            queue.tasks[1].status,
+            runtime_core::task_queue::TaskStatus::Running
+        );
+        state.runtime = Some(runtime);
+        state.invalidate_runtime();
+        let runtime = AgentKernel::new(
+            Arc::new(MockProvider),
+            ToolRegistry::new(),
+            Arc::new(AllowAll),
+        )
+        .with_messages(state.loaded_messages.clone());
+        assert_eq!(runtime.task_queue().unwrap().tasks[1].title, "two");
+        drop(state);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn referenced_file_enters_runtime_and_persisted_session() {
         let root = std::env::temp_dir().join(format!("ax-file-context-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&root).unwrap();
@@ -1671,7 +1771,10 @@ mod project_root_tests {
         let from_root = resolve_directories(&root, None, None);
         let from_nested = resolve_directories(&nested, None, None);
         assert_eq!(from_root, from_nested);
-        assert_eq!(from_root.0, fs::canonicalize(&root).unwrap().join(".ax"));
+        assert_eq!(
+            from_root.0,
+            crate::storage_location::project_directory(&fs::canonicalize(&root).unwrap())
+        );
         assert_eq!(from_root.1, fs::canonicalize(&root).unwrap().join("skills"));
 
         fs::remove_dir_all(&root).unwrap();

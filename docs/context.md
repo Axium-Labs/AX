@@ -140,3 +140,19 @@ marker and are never replayed automatically — see [memory.md](memory.md).
 | Dispatch and pickers | `crates/cli/src/tui/commands.rs` (`execute_slash`, `open_session_picker`) |
 | Session restoration | `crates/cli/src/main.rs` (`ReplState::open_session`, `reset_new_session`) |
 | Session restore helpers | `crates/cli/src/session_restore.rs` |
+
+## Long task progress
+
+Multi-task turns keep a durable internal Task Queue. Before each execution model
+request, the kernel replaces a compact `[ax-progress]` state containing
+`overall_goal`, `current_task`, `completed_count`, `failed_count` and
+`remaining_tasks` (pending task numbers). Completed task bodies and full queue
+checkpoints are never injected as progress. The current task retains its needed
+details; the original request supplies the pending task definitions. Progress
+space and the queue tool schema are charged to the existing `ContextBudget`;
+progress is reserved before optional history selection.
+
+The final summary request receives terminal statuses and concise outcomes once,
+after every task is completed, failed or skipped. Earlier task responses are
+checkpointed as raw history but their content deltas are withheld from final
+answer output. Compaction continues to use the existing pipeline.

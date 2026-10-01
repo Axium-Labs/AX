@@ -249,7 +249,7 @@ checksum = "1c133bc6a41be0d194c306b5506d15e6feeea7b1d6604bd3f8310dfb2ca96486"
 
 [[package]]
 name = "cli"
-version = "0.2.5"
+version = "0.2.6"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -268,6 +268,7 @@ dependencies = [
  "ratatui",
  "reqwest",
  "runtime-core",
+ "rusqlite",
  "serde",
  "serde_json",
  "sha2",
@@ -551,7 +552,7 @@ dependencies = [
 
 [[package]]
 name = "evolution"
-version = "0.2.5"
+version = "0.2.6"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1144,7 +1145,7 @@ dependencies = [
 
 [[package]]
 name = "lexical"
-version = "0.2.5"
+version = "0.2.6"
 dependencies = [
  "unicode-normalization",
 ]
@@ -1239,7 +1240,7 @@ dependencies = [
 
 [[package]]
 name = "mcp"
-version = "0.2.5"
+version = "0.2.6"
 dependencies = [
  "async-trait",
  "futures-util",
@@ -1261,7 +1262,7 @@ checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
 name = "memory"
-version = "0.2.5"
+version = "0.2.6"
 dependencies = [
  "lexical",
  "rusqlite",
@@ -1297,7 +1298,7 @@ dependencies = [
 
 [[package]]
 name = "model"
-version = "0.2.5"
+version = "0.2.6"
 dependencies = [
  "async-trait",
  "base64",
@@ -1753,7 +1754,7 @@ dependencies = [
 
 [[package]]
 name = "runtime-core"
-version = "0.2.5"
+version = "0.2.6"
 dependencies = [
  "async-trait",
  "futures-util",
@@ -2063,7 +2064,7 @@ checksum = "8ee5873ec9cce0195efcb7a4e9507a04cd49aec9c83d0389df45b1ef7ba2e649"
 
 [[package]]
 name = "skill"
-version = "0.2.5"
+version = "0.2.6"
 dependencies = [
  "lexical",
  "serde",
@@ -2402,7 +2403,7 @@ checksum = "7d56353a2a665ad0f41a421187180aab746c8c325620617ad883a99a1cbe66d2"
 
 [[package]]
 name = "tool"
-version = "0.2.5"
+version = "0.2.6"
 dependencies = [
  "async-trait",
  "base64",

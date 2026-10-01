@@ -495,6 +495,28 @@ impl MemoryStore {
         rows.map(|row| decode_message(row?)).collect()
     }
 
+    /// Load the latest durable state in a namespace, independent of history pages.
+    ///
+    /// # Errors
+    /// Returns storage or decoding failures.
+    pub fn latest_agent_state(
+        &self,
+        session_id: &str,
+        prefix: &str,
+    ) -> Result<Option<StoredMessage>, MemoryError> {
+        self.sync_session(session_id)?;
+        let mut statement = self.connection.prepare(
+            "SELECT a.message_id,a.session_id,m.role,'agent_state',a.content,a.metadata,a.created_at,NULL,NULL
+             FROM agent_states a JOIN messages m ON m.id=a.message_id
+             WHERE a.session_id=?1 AND substr(a.content,1,length(?2))=?2
+             ORDER BY a.message_id DESC LIMIT 1",
+        )?;
+        let raw = statement
+            .query_row(params![session_id, prefix], map_raw_message)
+            .optional()?;
+        raw.map(decode_message).transpose()
+    }
+
     /// Returns the current compressed summary for a session, if one exists.
     ///
     /// # Errors

@@ -10,10 +10,10 @@ Portable export and import are documented in [backup.md](backup.md).
 
 Facts live in three scopes:
 
-- **Global** — belong to the current AX home (`~/.ax`) and can be retrieved in
+- **Global** — belong to the current installation AX home (`<install-dir>/.ax`) and can be retrieved in
   any project.
-- **Project** — belong to a portable UUID in the project's `.ax/project.json`;
-  they follow the project directory, not the machine path.
+- **Project** — belong to a UUID in the installation-owned project store;
+  they remain isolated from other projects and survive workspace deletion.
 - **Session** — belong to one session ID and are not inherited by a new
   session.
 
@@ -45,20 +45,14 @@ this validation — a conservative filter, not a guarantee that every secret
 format is recognized. Raw conversation history is retained separately and is
 not redacted by this filter.
 
-## Portable project identity
+## Project identity
 
-Project-root discovery still locates the repository or project directory, but
-the directory's absolute path is no longer the owner of new facts. The first
-use creates a UUID in `.ax/project.json`, independent of `--data-dir`. An
-existing identity also identifies a project without Git or package markers
-when starting in a subdirectory.
-
-- Moving `.ax` with the project retains both the identity and the default
-  database.
-- Copying `.ax/project.json` deliberately copies the identity; a fresh clone
-  without `.ax` gets a new identity.
-- Deleting the ID loses the association; with a custom data directory, keep
-  that database accessible as well.
+Project-root discovery locates the repository or project directory. UUID ownership
+is independent of `--data-dir`; metadata lives in the installation-owned project
+store. Legacy workspace IDs remain readable and are retained during migration.
+Known installation identities also identify bare project roots from subdirectories.
+Deleting workspace contents preserves both stored identity and history. A new path
+without a legacy ID has a new identity; use export/import to transfer its data.
 
 Legacy path-owned records migrate transactionally to the UUID. Matching the
 current old path is allowed in any store; a project-local default database can

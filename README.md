@@ -14,10 +14,16 @@ service to sign up for, no remote telemetry.
 - **Standard skills and focused tools** — Agent Skills `SKILL.md` packages with lazy instructions and optional resources, read-only web search/fetch that batches concurrent queries and page fetches and deduplicates their results, LSP through configurable MCP servers, and native image input on supported vision models.
 - **Small binary** — a compact workspace of focused crates, not a framework.
 - **Simple workflow** — type, get an answer, switch models, move on.
-- **Local-first** — everything lives in `~/.ax` and your project's `.ax`.
+- **Local-first** — sessions, memory and settings live in `.ax` beside the AX executable.
 
 No benchmarks are published yet; "fast" here means the startup path does as
 little as possible by design.
+
+By default, AX stores persistent data under `<install-dir>/.ax`, with separate
+project stores in `projects/<project-key>/`. Opening another working directory
+does not move data there; deleting a workspace does not delete its history.
+On first launch, legacy `~/.ax` and known project `.ax` stores are copied without
+deleting the originals. `AX_HOME` and `--data-dir` remain explicit overrides.
 
 Portable backups: `ax export backup.axpack` saves sessions and memory; use
 `--memory` or `--sessions` to select one type. Run
@@ -80,13 +86,13 @@ To update the executable you are currently running to the latest GitHub
 Release, run `ax --update`. AX checks the release version, verifies the
 download against `SHA256SUMS`, and replaces that executable; it also refreshes
 the bundled payload from the same archive, installing any missing skill package
-into `~/.ax/skills` and writing `~/.ax/mcp.toml` only when no config exists
+into `<install-dir>/.ax/skills` and writing `<install-dir>/.ax/mcp.toml` only when no config exists
 yet (existing skills and configs are left alone). The bundled payload is
 refreshed on every `ax --update`, even when the binary is already up to date,
 so newly added skill packages are picked up without a version bump. On Windows,
 the verified update is scheduled for replacement after the command exits;
 restart AX before using the new version. The command does not otherwise change your
-`~/.ax` user data or
+`<install-dir>/.ax` user data or
 any project's `.ax` directory. If you installed a separate copy using
 `AX_INSTALL_DIR`, run that copy's `ax --update` to update it. A push to `main`
 alone is not a release; the release workflow runs for `v*` tags.
@@ -103,14 +109,14 @@ powershell -ExecutionPolicy Bypass -c "iex ((iwr 'https://raw.githubusercontent.
 ### Uninstall
 
 Removing AX is just deleting the binary (and, on Windows, the PATH entry the
-installer added). AX keeps its data separately in `~/.ax`, which you can delete
+installer added). AX keeps its data separately in `<install-dir>/.ax`, which you can delete
 too if you want a clean slate.
 
 **macOS / Linux**
 
 ```bash
 rm -f ~/.local/bin/ax        # or wherever AX_INSTALL_DIR pointed
-rm -rf ~/.ax                 # config, sessions, memory, model catalog (optional)
+rm -rf ~/.local/bin/.ax                 # config, sessions, memory, model catalog (optional)
 ```
 
 **Windows**
@@ -120,7 +126,7 @@ Remove-Item -Force "$env:LOCALAPPDATA\Programs\AX\bin\ax.exe"
 # remove the installer's PATH entry (optional but tidy)
 $p = [Environment]::GetEnvironmentVariable('Path', 'User')
 [Environment]::SetEnvironmentVariable('Path', ($p -split ';' | Where-Object { $_ -notlike '*Programs\AX\bin*' }) -join ';', 'User')
-Remove-Item -Recurse -Force "$env:LOCALAPPDATA\Programs\AX"   # leftover dir (optional)
+Remove-Item -Recurse -Force "$env:LOCALAPPDATA\Programs\AX"   # deletes stored sessions and memory too (optional)
 ```
 
 ## Development
@@ -139,7 +145,7 @@ cargo build --release
 ## Providers & Models
 
 AX discovers providers from what is already on your machine — credentials in
-`~/.ax/auth.json` and standard environment variables like `DEEPSEEK_API_KEY`.
+`<install-dir>/.ax/auth.json` and standard environment variables like `DEEPSEEK_API_KEY`.
 No network call happens during startup.
 
 | Provider | Credential | How to use |
@@ -151,10 +157,10 @@ No network call happens during startup.
 | OpenAI | API key | `/login` → API key, or `OPENAI_API_KEY` |
 | OpenAI-compatible vendors (Groq, Mistral, OpenRouter, etc.) | Provider API key | `/login` → provider, or its API-key environment variable |
 
-Models are discovered dynamically into `~/.ax/models/` (a bundled catalog plus
+Models are discovered dynamically into `<install-dir>/.ax/models/` (a bundled catalog plus
 a per-provider refresh cache). Switch anytime with `/model`; the last
 selection — provider, model and reasoning effort — is persisted to
-`~/.ax/config.json` and restored on the next launch.
+`<install-dir>/.ax/config.json` and restored on the next launch.
 
 To pick a provider explicitly from the command line:
 
@@ -222,9 +228,9 @@ MIT OR Apache-2.0.
 
 ```powershell
 ax skill import C:/downloads/my-skill           # project skills/
-ax skill import C:/downloads/my-skill --global  # ~/.ax/skills
-ax mcp import C:/downloads/mcp.json             # project .ax/mcp.toml
-ax mcp import C:/downloads/mcp.toml --global     # ~/.ax/mcp.toml
+ax skill import C:/downloads/my-skill --global  # <install-dir>/.ax/skills
+ax mcp import C:/downloads/mcp.json             # installation .ax/projects/<project-key>/mcp.toml
+ax mcp import C:/downloads/mcp.toml --global     # <install-dir>/.ax/mcp.toml
 ```
 
 Imports validate their contents, preserve existing names and do not run scripts

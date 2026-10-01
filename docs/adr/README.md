@@ -14,6 +14,9 @@ discoverable.
 | [0004-acp-control-plane.md](0004-acp-control-plane.md) | ACP adapter at the AX CLI boundary | Accepted |
 | [0005-tool-round-scheduler.md](0005-tool-round-scheduler.md) | Dependency-aware tool-round scheduling | Accepted |
 | [0006-skill-evolution.md](0006-skill-evolution.md) | Skill evolution outside the runtime kernel | Accepted |
+| [0007-installation-storage.md](0007-installation-storage.md) | Installation-owned persistent state | Accepted |
+
+- [0008 — Durable lightweight Task Queue](0008-durable-task-queue.md)
 
 ## Adding an ADR
 

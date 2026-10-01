@@ -50,13 +50,13 @@ Inspect the full diff and report actionable regressions.
 AX indexes skills on first routing or `/skills`, reading only YAML frontmatter
 from each `SKILL.md`. The search order is the selected project skills directory
 (`--skills-dir` when set, otherwise `<project>/skills`), then
-`~/.ax/skills`. The first valid package with a given name wins; paths within
+`<install-dir>/.ax/skills`. The first valid package with a given name wins; paths within
 each root are sorted. A standard `SKILL.md` wins over legacy files in the
 same directory. Invalid packages and duplicates are reported individually in
 stderr and `/skills`; they do not suppress valid skills.
 
 Release archives carry the repository's bundled packages, and the installer
-places them in `$AX_HOME/skills` (usually `~/.ax/skills`) so they apply to every
+places them in `$AX_HOME/skills` (usually `<install-dir>/.ax/skills`) so they apply to every
 project. A package that already exists there is left untouched, so local edits
 survive an upgrade; `ax --update` refreshes them from the new release the same
 way. Skills are otherwise plain directories — copy one there (or

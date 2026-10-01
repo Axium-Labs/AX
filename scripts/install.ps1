@@ -6,7 +6,7 @@
 # Environment:
 #   AX_VERSION       release tag to install (default: latest)
 #   AX_INSTALL_DIR   install directory (default: $env:LOCALAPPDATA\Programs\AX\bin)
-#   AX_HOME          AX state directory (default: $env:USERPROFILE\.ax)
+#   AX_HOME          AX state directory (default: <install directory>\.ax)
 #
 # The downloaded archive is verified against the release's SHA256SUMS before
 # anything is written to disk. The install directory is added to the current
@@ -95,7 +95,7 @@ try {
     # Skill packages that already exist are left untouched so local edits survive an
     # upgrade; the MCP template is only written when no config exists yet, and every
     # server in it is disabled so nothing tries to launch a missing command.
-    $axHome = if ($env:AX_HOME) { $env:AX_HOME } else { Join-Path $env:USERPROFILE ".ax" }
+    $axHome = if ($env:AX_HOME) { $env:AX_HOME } else { Join-Path $installDir ".ax" }
 
     $bundledSkills = Join-Path $tmpDir "skills"
     if (Test-Path -Path $bundledSkills) {

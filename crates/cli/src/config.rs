@@ -1,8 +1,7 @@
-//! User-level AX configuration, persisted at `~/.ax/config.json`.
+//! AX configuration, persisted in `.ax/config.json` beside the executable.
 //!
-//! AX keeps runtime state and credentials separate: the session database
-//! lives in the project's `.ax` directory, credentials in `~/.ax/auth.json`,
-//! and the last successfully selected model here. CLI resolution prefers
+//! Sessions, memory and credentials share the installation-owned AX home.
+//! `AX_HOME` explicitly overrides that location. CLI resolution prefers
 //! explicit flags over this file, then falls back to local provider
 //! detection (see `model_selection`).
 
@@ -14,15 +13,16 @@ use std::{
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
-/// `AX_HOME` when set, otherwise `~/.ax`, mirroring the credential store.
+/// `AX_HOME` when set, otherwise `.ax` beside the running executable.
 #[must_use]
 pub(crate) fn ax_home() -> PathBuf {
     if let Some(root) = std::env::var_os("AX_HOME") {
         return PathBuf::from(root);
     }
-    std::env::var_os("USERPROFILE")
-        .or_else(|| std::env::var_os("HOME"))
-        .map_or_else(|| PathBuf::from("."), PathBuf::from)
+    std::env::current_exe()
+        .expect("cannot locate the AX executable")
+        .parent()
+        .expect("AX executable has no installation directory")
         .join(".ax")
 }
 

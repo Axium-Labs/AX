@@ -21,7 +21,14 @@ pub fn snapshot(cwd: &Path) -> BTreeMap<String, (Value, Vec<u8>)> {
         }
         let path = parts[2];
         let contents = std::fs::read(cwd.join(path)).unwrap_or_default();
-        files.insert(path.to_owned(),(json!({"path":path,"additions":parts[0].parse::<usize>().unwrap_or(0),"deletions":parts[1].parse::<usize>().unwrap_or(0)}),contents));
+        let diff = std::process::Command::new("git")
+            .args(["diff", "--no-ext-diff", "--no-color", "HEAD", "--", path])
+            .current_dir(cwd)
+            .output()
+            .ok()
+            .filter(|output| output.status.success())
+            .map(|output| String::from_utf8_lossy(&output.stdout).into_owned());
+        files.insert(path.to_owned(),(json!({"path":path,"additions":parts[0].parse::<usize>().unwrap_or(0),"deletions":parts[1].parse::<usize>().unwrap_or(0),"diff":diff}),contents));
     }
     if let Ok(output) = std::process::Command::new("git")
         .args(["ls-files", "--others", "--exclude-standard"])
@@ -40,7 +47,7 @@ pub fn snapshot(cwd: &Path) -> BTreeMap<String, (Value, Vec<u8>)> {
                 files.insert(
                     path.to_owned(),
                     (
-                        json!({"path":path,"additions":additions,"deletions":0}),
+                        json!({"path":path,"additions":additions,"deletions":0,"diff":if contents.contains(&0) { None } else { Some(format!("--- /dev/null\n+++ b/{path}\n@@ -0,0 +1,{additions} @@\n{}", String::from_utf8_lossy(&contents).lines().map(|line| format!("+{line}\n")).collect::<String>())) }}),
                         contents,
                     ),
                 );
