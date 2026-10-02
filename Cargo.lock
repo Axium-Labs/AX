@@ -259,7 +259,7 @@ checksum = "1c133bc6a41be0d194c306b5506d15e6feeea7b1d6604bd3f8310dfb2ca96486"
 
 [[package]]
 name = "cli"
-version = "0.2.9"
+version = "0.2.10"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -281,6 +281,7 @@ dependencies = [
  "reqwest",
  "runtime-core",
  "rusqlite",
+ "sandbox",
  "scoped",
  "serde",
  "serde_json",
@@ -584,7 +585,7 @@ dependencies = [
 
 [[package]]
 name = "evolution"
-version = "0.2.9"
+version = "0.2.10"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -909,6 +910,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6dbf3de79e51f3d586ab4cb9d5c3e2c14aa28ed23d180cf89b4df0454a69cc87"
 
 [[package]]
+name = "httpdate"
+version = "1.0.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "df3b46402a9d5adb4c86a0cf463f42e19994e3ee891101b1841f30a545cb49a9"
+
+[[package]]
 name = "hyper"
 version = "1.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1216,8 +1223,9 @@ dependencies = [
 
 [[package]]
 name = "lexical"
-version = "0.2.9"
+version = "0.2.10"
 dependencies = [
+ "serde",
  "unicode-normalization",
 ]
 
@@ -1311,11 +1319,12 @@ dependencies = [
 
 [[package]]
 name = "mcp"
-version = "0.2.9"
+version = "0.2.10"
 dependencies = [
  "async-trait",
  "futures-util",
  "reqwest",
+ "sandbox",
  "serde",
  "serde_json",
  "thiserror",
@@ -1323,6 +1332,7 @@ dependencies = [
  "tokio-tungstenite",
  "toml",
  "tool",
+ "uuid",
 ]
 
 [[package]]
@@ -1333,7 +1343,7 @@ checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
 name = "memory"
-version = "0.2.9"
+version = "0.2.10"
 dependencies = [
  "lexical",
  "rusqlite",
@@ -1369,11 +1379,12 @@ dependencies = [
 
 [[package]]
 name = "model"
-version = "0.2.9"
+version = "0.2.10"
 dependencies = [
  "async-trait",
  "base64",
  "futures-util",
+ "httpdate",
  "reqwest",
  "serde",
  "serde_json",
@@ -1825,7 +1836,7 @@ dependencies = [
 
 [[package]]
 name = "runtime-core"
-version = "0.2.9"
+version = "0.2.10"
 dependencies = [
  "async-trait",
  "futures-util",
@@ -1949,8 +1960,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "sandbox"
+version = "0.2.10"
+dependencies = [
+ "rustix 1.1.5",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
 name = "scoped"
-version = "0.2.9"
+version = "0.2.10"
 dependencies = [
  "anyhow",
  "serde",
@@ -2144,7 +2167,7 @@ checksum = "8ee5873ec9cce0195efcb7a4e9507a04cd49aec9c83d0389df45b1ef7ba2e649"
 
 [[package]]
 name = "skill"
-version = "0.2.9"
+version = "0.2.10"
 dependencies = [
  "lexical",
  "serde",
@@ -2332,6 +2355,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "tempfile"
+version = "3.27.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
+dependencies = [
+ "fastrand",
+ "getrandom 0.4.3",
+ "once_cell",
+ "rustix 1.1.5",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "tendril"
 version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2483,7 +2519,7 @@ checksum = "7d56353a2a665ad0f41a421187180aab746c8c325620617ad883a99a1cbe66d2"
 
 [[package]]
 name = "tool"
-version = "0.2.9"
+version = "0.2.10"
 dependencies = [
  "async-trait",
  "base64",
@@ -2492,6 +2528,7 @@ dependencies = [
  "html5ever",
  "markup5ever_rcdom",
  "reqwest",
+ "sandbox",
  "serde",
  "serde_json",
  "thiserror",

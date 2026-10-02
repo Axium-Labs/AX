@@ -74,6 +74,24 @@ impl ApprovalPolicy for AcpApproval {
             PermissionDecision::Ask if permission.safety == SafetyLevel::Safe => return true,
             PermissionDecision::Ask => {}
         }
+        self.request(name, input, permission, true).await
+    }
+    fn capability_decision(&self, capability: tool::Capability) -> Option<PermissionDecision> {
+        Some(self.permissions.decision(capability))
+    }
+    async fn ask(&self, name: &str, input: &Value, permission: tool::ToolPermission) -> bool {
+        self.request(name, input, permission, false).await
+    }
+}
+
+impl AcpApproval {
+    async fn request(
+        &self,
+        name: &str,
+        input: &Value,
+        permission: tool::ToolPermission,
+        grant_session: bool,
+    ) -> bool {
         let id = Uuid::new_v4().to_string();
         let (tx, rx) = oneshot::channel();
         self.pending.lock().unwrap().insert(id.clone(), tx);
@@ -92,7 +110,9 @@ impl ApprovalPolicy for AcpApproval {
         match rx.await.as_deref() {
             Ok("allow_once") => true,
             Ok("allow_session") => {
-                self.permissions.allow_session(permission.capability);
+                if grant_session {
+                    self.permissions.allow_session(permission.capability);
+                }
                 true
             }
             _ => false,
@@ -914,7 +934,16 @@ pub async fn run(cli: &Cli, data_dir: PathBuf, skills_dir: PathBuf) -> Result<()
                             update(&task_out, &task_session, event, &mut calls);
                         })
                         .await;
-                        let files=crate::worktree_changes::changed(&before,crate::worktree_changes::snapshot(&task_cwd));
+                        let files = match (before, crate::worktree_changes::snapshot(&task_cwd)) {
+                            (Ok(before), Ok(after)) => crate::worktree_changes::changed(&before, after),
+                            (Err(error), _) | (_, Err(error)) => {
+                                // A failed snapshot is not an unchanged workspace.
+                                state.persist_messages(&[model::Message::system(format!(
+                                    "[ax-changes]\nworkspace snapshot failed: {error}"
+                                ))])?;
+                                Vec::new()
+                            }
+                        };
                         if !files.is_empty() {
                             state.persist_messages(&[model::Message::system(format!("[ax-changes]\n{}",json!(files)))])?;
                             let body=stamp(json!({"sessionUpdate":"turn_changes","changedFiles":files}),now_seconds());

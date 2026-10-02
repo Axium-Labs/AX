@@ -140,6 +140,9 @@ fn validate_command(command: &str, windows: bool) -> Result<(), ToolError> {
 
 #[async_trait]
 impl Tool for ChildShell {
+    fn execution_boundary(&self) -> crate::ExecutionBoundary {
+        crate::ExecutionBoundary::WorkspaceWorker
+    }
     fn name(&self) -> &'static str {
         "shell"
     }
@@ -168,6 +171,9 @@ struct ShellInput {
 #[async_trait]
 #[allow(clippy::unnecessary_literal_bound)]
 impl Tool for ShellTool {
+    fn execution_boundary(&self) -> crate::ExecutionBoundary {
+        crate::ExecutionBoundary::WorkspaceWorker
+    }
     fn fork_for_run(&self, context: &crate::RunContext) -> Option<std::sync::Arc<dyn Tool>> {
         Some(std::sync::Arc::new(ChildShell {
             context: context.clone(),

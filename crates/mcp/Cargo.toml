@@ -6,6 +6,7 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+sandbox = { path = "../sandbox" }
 async-trait.workspace = true
 futures-util.workspace = true
 reqwest.workspace = true
@@ -19,3 +20,10 @@ tool = { path = "../tool" }
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+uuid.workspace = true
+
+[[test]]
+name = "runtime_sandbox"
+harness = false

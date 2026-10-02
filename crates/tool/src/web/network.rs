@@ -212,6 +212,39 @@ async fn get_once(
     })
 }
 
+pub(super) fn policy_client(
+    profiles: Vec<crate::PermissionProfile>,
+) -> Result<reqwest::Client, ToolError> {
+    policy_client_builder(profiles)
+        .build()
+        .map_err(|e| ToolError::Execution(e.to_string()))
+}
+
+pub(super) fn policy_client_builder(
+    profiles: Vec<crate::PermissionProfile>,
+) -> reqwest::ClientBuilder {
+    reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(2))
+        .read_timeout(Duration::from_secs(3))
+        .timeout(Duration::from_secs(8))
+        .redirect(reqwest::redirect::Policy::custom(move |attempt| {
+            if attempt.previous().len() >= 5 {
+                return attempt.error("redirect limit");
+            }
+            if profiles.iter().any(|p| {
+                matches!(
+                    p.network_decision(attempt.url()),
+                    Some(crate::PermissionDecision::Deny | crate::PermissionDecision::Ask)
+                )
+            }) {
+                return attempt.error("redirect target requires separate permission");
+            }
+            attempt.follow()
+        }))
+        .dns_resolver(Arc::new(CachedDns::default()))
+        .user_agent(concat!("AX/", env!("CARGO_PKG_VERSION")))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

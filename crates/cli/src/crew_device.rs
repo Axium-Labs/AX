@@ -194,11 +194,30 @@ async fn connected(url: &str, device_id: &str, key: &SigningKey) -> Result<()> {
         match value["type"].as_str().unwrap_or("") {
             "open" => {
                 let result = async {
-                    let cwd = value["cwd"]
+                    if value.get("cwd").is_some() {
+                        return Err(anyhow!(
+                            "Crew must send workspace_id; arbitrary cwd is forbidden"
+                        ));
+                    }
+                    let workspace_id = value["workspace_id"]
                         .as_str()
-                        .ok_or_else(|| anyhow!("cwd missing"))?;
-                    let mut cmd = Command::new(std::env::current_exe()?);
+                        .ok_or_else(|| anyhow!("workspace_id missing"))?;
+                    let cwd = crate::session_projects::list()?
+                        .into_iter()
+                        .find(|project| project.id == workspace_id)
+                        .ok_or_else(|| anyhow!("unknown local workspace_id"))?
+                        .root
+                        .canonicalize()?;
+                    // Trusted control-plane bootstrap: pin the running AX object,
+                    // even when a writable workspace replaces its on-disk pathname.
+                    #[cfg(target_os = "linux")]
+                    let runtime_binary = PathBuf::from("/proc/self/exe");
+                    #[cfg(not(target_os = "linux"))]
+                    let runtime_binary = std::env::current_exe()?;
+                    let mut cmd = Command::new(runtime_binary);
                     cmd.arg("acp")
+                        .arg("--sandbox")
+                        .arg("strict")
                         .current_dir(cwd)
                         .stdin(Stdio::piped())
                         .stdout(Stdio::piped())

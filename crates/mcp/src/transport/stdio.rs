@@ -4,13 +4,14 @@ use async_trait::async_trait;
 use serde_json::Value;
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
-    process::{Child, ChildStdin, ChildStdout, Command},
+    process::{Child, ChildStdin, ChildStdout},
 };
 
 use super::Transport;
 use crate::McpError;
 
 pub(crate) struct StdioTransport {
+    _sandbox: sandbox::SandboxManager,
     _child: Child,
     input: ChildStdin,
     output: BufReader<ChildStdout>,
@@ -28,20 +29,18 @@ impl StdioTransport {
                 "stdio command must not be empty".to_owned(),
             ));
         }
-        let mut process = Command::new(command);
-        process
-            .args(args)
-            .envs(env)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
-            .kill_on_drop(true);
-        if let Some(cwd) = cwd {
-            process.current_dir(cwd);
-        }
-        let mut child = process
-            .spawn()
-            .map_err(|error| McpError::Transport(error.to_string()))?;
+        let sandbox = sandbox::SandboxManager::for_workspace(
+            std::env::current_dir().map_err(|e| McpError::Transport(e.to_string()))?,
+        )
+        .map_err(|e| McpError::Transport(e.to_string()))?;
+        let mut spec = sandbox::CommandSpec::new(command);
+        spec.args = args.to_vec();
+        spec.env = env.clone();
+        spec.cwd = cwd.map(std::path::PathBuf::from);
+        spec.stdin = Stdio::piped();
+        let mut child = sandbox
+            .spawn(spec)
+            .map_err(|e| McpError::Transport(e.to_string()))?;
         let input = child
             .stdin
             .take()
@@ -51,6 +50,7 @@ impl StdioTransport {
             .take()
             .ok_or_else(|| McpError::Transport("stdio server stdout was not piped".to_owned()))?;
         Ok(Self {
+            _sandbox: sandbox,
             _child: child,
             input,
             output: BufReader::new(output),

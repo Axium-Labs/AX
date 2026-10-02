@@ -15,6 +15,7 @@ design decisions that shaped the code are recorded as ADRs in
 | [storage.md](storage.md) | Storage: SQLite schema, JSONL event streams, data directories, migration |
 | [backup.md](backup.md) | Versioned axpack export/import, data boundaries and project remapping |
 | [tools.md](tools.md) | Tools, permissions, safety |
+| [security.md](security.md) | Runtime Workspace Sandbox, OS enforcement and escape tests |
 | [web-latency.md](web-latency.md) | Reproducible web scheduling latency benchmark |
 | [mcp.md](mcp.md) | MCP integration: configuration, transports, lazy connection |
 | [skills.md](skills.md) | Skills: package format, routing, enable/disable |

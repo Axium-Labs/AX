@@ -39,7 +39,7 @@ const NGRAM_SIZES: [usize; 3] = [2, 3, 4];
 const MAX_WORD_CHARS: usize = 32;
 
 /// Set-based features of one text, computed once per stored item or per query.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct LexicalFeatures {
     words: BTreeSet<String>,
     bigrams: BTreeSet<String>,

@@ -20,7 +20,38 @@ impl ModelProvider for QueueProvider {
         100_000
     }
     async fn complete(&self, request: ModelRequest) -> Result<ModelResponse, ModelError> {
+        let should_plan = !request
+            .messages
+            .iter()
+            .any(|m| m.content.starts_with(PROGRESS_PREFIX))
+            && request
+                .messages
+                .iter()
+                .rev()
+                .find(|m| m.role == model::Role::User)
+                .is_some_and(|m| task_queue::TaskQueue::list_hints(&m.content).len() >= 2);
+        let tasks = request
+            .messages
+            .iter()
+            .rev()
+            .find(|m| m.role == model::Role::User)
+            .map(|m| task_queue::TaskQueue::list_hints(&m.content))
+            .unwrap_or_default();
+        let goal = request
+            .messages
+            .iter()
+            .rev()
+            .find(|m| m.role == model::Role::User)
+            .map(|m| m.content.clone())
+            .unwrap_or_default();
         self.requests.lock().unwrap().push(request);
+        if should_plan {
+            return call(
+                "model-plan",
+                "task_queue",
+                serde_json::json!({"action":"start","overall_goal":goal,"tasks":tasks}),
+            );
+        }
         self.responses
             .lock()
             .unwrap()
@@ -66,7 +97,11 @@ fn provider(responses: Vec<Result<ModelResponse, ModelError>>) -> Arc<QueueProvi
     })
 }
 fn kernel(provider: Arc<QueueProvider>) -> AgentKernel {
-    AgentKernel::new(provider, ToolRegistry::new(), Arc::new(AllowAll))
+    AgentKernel::new(
+        provider,
+        ToolRegistry::with_mode(tool::SandboxMode::Off),
+        Arc::new(AllowAll),
+    )
 }
 
 #[tokio::test]
@@ -148,7 +183,7 @@ async fn twenty_three_tasks_first_fails_remaining_execute_and_only_summary_is_em
         })
         .collect::<Vec<_>>();
     assert_eq!(deltas, [result.as_str()]);
-    for request in provider.requests.lock().unwrap().iter() {
+    for request in provider.requests.lock().unwrap().iter().skip(1) {
         assert_eq!(
             request
                 .messages
@@ -187,7 +222,7 @@ async fn twenty_three_tasks_first_fails_remaining_execute_and_only_summary_is_em
 #[tokio::test]
 async fn reconnect_keeps_completed_tasks_and_resumes_original_queue() {
     let mut first = kernel(provider(vec![finish("completed", "first done")]));
-    first.budget.max_steps = 1;
+    first.budget.max_steps = 2;
     let mut saved = vec![];
     assert!(matches!(
         first
@@ -200,7 +235,7 @@ async fn reconnect_keeps_completed_tasks_and_resumes_original_queue() {
                 }
             )
             .await,
-        Err(AgentError::StepLimit(1))
+        Err(AgentError::StepLimit(2))
     ));
     let second_provider = provider(vec![
         finish("completed", "second done"),
@@ -337,10 +372,22 @@ async fn semantic_queue_initialization_and_explicit_outcomes() {
 #[tokio::test]
 async fn repeated_provider_failure_blocks_goal_without_fanning_out_over_tasks() {
     let failing_provider = provider(vec![
-        Err(ModelError::InvalidResponse("temporary".into())),
-        Err(ModelError::InvalidResponse("still unavailable".into())),
+        Err(ModelError::HttpStatus {
+            status: 503,
+            message: "temporary".into(),
+        }),
+        Err(ModelError::HttpStatus {
+            status: 503,
+            message: "still unavailable".into(),
+        }),
     ]);
     let mut runtime = kernel(failing_provider.clone());
+    runtime.configure_retry(model::RetryPolicy {
+        max_attempts: 2,
+        base_delay_ms: 0,
+        max_delay_ms: 0,
+        time_budget_ms: 1000,
+    });
     assert!(
         runtime
             .run_turn("goal\n1. one\n2. two", |_| {})
@@ -352,7 +399,7 @@ async fn repeated_provider_failure_blocks_goal_without_fanning_out_over_tasks() 
         runtime.task_queue().unwrap().tasks[1].status,
         TaskStatus::Pending
     );
-    assert_eq!(failing_provider.requests.lock().unwrap().len(), 2);
+    assert_eq!(failing_provider.requests.lock().unwrap().len(), 3);
     runtime
         .run_goal_turn(
             "resume",
@@ -363,7 +410,7 @@ async fn repeated_provider_failure_blocks_goal_without_fanning_out_over_tasks() 
         )
         .await
         .unwrap();
-    assert_eq!(failing_provider.requests.lock().unwrap().len(), 2);
+    assert_eq!(failing_provider.requests.lock().unwrap().len(), 3);
     let auth_provider = provider(vec![Err(ModelError::HttpStatus {
         status: 401,
         message: "expired credential".into(),
@@ -373,22 +420,26 @@ async fn repeated_provider_failure_blocks_goal_without_fanning_out_over_tasks() 
         runtime.run_turn("goal\n1. one\n2. two", |_| {}).await,
         Err(AgentError::Model(_))
     ));
-    assert_eq!(auth_provider.requests.lock().unwrap().len(), 1);
+    assert_eq!(auth_provider.requests.lock().unwrap().len(), 2);
     assert_eq!(runtime.task_queue().unwrap().state, QueueState::Blocked);
 }
 
 #[test]
-fn explicit_queue_detection_preserves_multiline_details_and_ignores_code() {
-    let queue = task_queue::TaskQueue::from_input("目标\n1、第一项\n  details\n2、第二项").unwrap();
-    assert!(queue.tasks[0].title.contains("details"));
-    assert_eq!(queue.tasks[1].title, "第二项");
-    assert!(task_queue::TaskQueue::from_input("```\n1. data\n2. data\n```").is_none());
+fn list_formatting_is_only_a_hint_and_ignores_code() {
+    let input = "目标\n1、第一项\n  details\n2、第二项";
+    let hints = task_queue::TaskQueue::list_hints(input);
+    assert!(hints[0].contains("details"));
+    assert_eq!(hints[1], "第二项");
+    assert!(task_queue::TaskQueue::list_hints("```\n1. data\n2. data\n```").is_empty());
+    // Formatting alone is not a queue: the only producer is an explicit call.
+    let queue = task_queue::TaskQueue::new(input.into(), Vec::new());
+    assert!(queue.tasks.is_empty());
 }
 
 #[tokio::test]
 async fn explicit_user_cancel_stops_without_executing_remaining_tasks() {
     let mut runtime = kernel(provider(vec![finish("completed", "one complete")]));
-    runtime.budget.max_steps = 1;
+    runtime.budget.max_steps = 2;
     assert!(
         runtime
             .run_turn("Goal\n1. one\n2. two", |_| {})
@@ -576,7 +627,7 @@ async fn explicit_global_stop_does_not_call_model_for_a_summary_or_remaining_tas
         "workspace globally inaccessible"
     );
     assert_eq!(runtime.task_queue().unwrap().state, QueueState::Blocked);
-    assert_eq!(provider.requests.lock().unwrap().len(), 1);
+    assert_eq!(provider.requests.lock().unwrap().len(), 2);
     assert_eq!(
         events
             .iter()
@@ -739,11 +790,55 @@ async fn typed_global_tool_failure_stops_pending_dag_work_and_blocks_goal() {
     ));
     assert_eq!(runtime.task_queue().unwrap().state, QueueState::Blocked);
     assert!(executions.lock().unwrap().is_empty());
-    assert_eq!(provider.requests.lock().unwrap().len(), 1);
+    assert_eq!(provider.requests.lock().unwrap().len(), 2);
     assert!(
         runtime
             .messages()
             .iter()
             .any(|m| m.tool_call_id.as_deref() == Some("dependent"))
     );
+}
+
+#[tokio::test]
+async fn factual_list_does_not_create_tasks_or_spawn_children() {
+    struct ListAnswer;
+    #[async_trait]
+    impl ModelProvider for ListAnswer {
+        fn name(&self) -> &'static str {
+            "list-answer"
+        }
+        fn model_id(&self) -> &'static str {
+            "list-answer"
+        }
+        fn context_window(&self) -> usize {
+            32000
+        }
+        async fn complete(&self, _: ModelRequest) -> Result<ModelResponse, ModelError> {
+            text("These are requirements.")
+        }
+    }
+    let mut runtime = AgentKernel::new(
+        Arc::new(ListAnswer),
+        ToolRegistry::with_mode(tool::SandboxMode::Off),
+        Arc::new(AllowAll),
+    );
+    for prompt in [
+        "Explain these constraints\n1. memory is local\n2. skills load lazily",
+        "Compare:\n- fast\n- slow",
+    ] {
+        runtime.run_turn(prompt, |_| {}).await.unwrap();
+        assert!(runtime.task_queue().is_none());
+    }
+}
+#[test]
+fn explicit_dependencies_validate_and_failed_dependency_skips_only_dependents() {
+    let mut queue = None;
+    task_queue::apply(&mut queue,&serde_json::json!({"action":"start","overall_goal":"goal","tasks":["a","b","c"],"dependencies":[[],[0],[]]}),"g",None).unwrap();
+    let queue = queue.as_mut().unwrap();
+    queue.tasks[0].recovery_attempts = 1;
+    queue.finish(TaskStatus::Failed, "failed".into()).unwrap();
+    assert_eq!(queue.tasks[1].status, TaskStatus::Skipped);
+    assert_eq!(queue.tasks[2].status, TaskStatus::Running);
+    assert!(!queue.delegate);
+    assert!(task_queue::apply(&mut None,&serde_json::json!({"action":"start","overall_goal":"goal","tasks":["a","b"],"dependencies":[[1],[]]}),"g",None).is_err());
 }

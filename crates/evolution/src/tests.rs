@@ -108,19 +108,22 @@ fn one_off_low_confidence_failed_and_cross_project_evidence_cannot_create() {
     for e in &mut f.engine.ledger.experiences {
         e.success = false;
     }
-    assert!(
-        f.engine
-            .apply(create("release-check", ids.clone()), 100_000)
-            .is_err()
-    );
+    // Failed outcomes can justify an explicit model proposal for a corrective lesson.
+    f.engine
+        .apply(create("failure-lesson", ids.clone()), 100_000)
+        .unwrap();
     for e in &mut f.engine.ledger.experiences {
         e.success = true;
     }
-    assert!(f.engine.score(&ids, 0.0, 100_000).unwrap() < f.engine.config.create_score);
-    assert!(f.engine.score(&["invented".into()], 1.0, 100_000).is_err());
+    assert!(f.engine.evidence_gate(&ids, 0.0, 100_000).unwrap() < f.engine.config.create_score);
     assert!(
         f.engine
-            .score(&[ids[0].clone(), ids[0].clone()], 1.0, 100_000)
+            .evidence_gate(&["invented".into()], 1.0, 100_000)
+            .is_err()
+    );
+    assert!(
+        f.engine
+            .evidence_gate(&[ids[0].clone(), ids[0].clone()], 1.0, 100_000)
             .is_err()
     );
 }
@@ -147,7 +150,15 @@ fn lifecycle_routes_only_trial_and_active_and_requires_real_trial_outcomes() {
         State::Candidate
     );
     f.engine.ledger.epoch += 1;
-    f.engine.maintain(100_000).unwrap();
+    f.engine
+        .apply(
+            Action::Promote {
+                name: "release-check".into(),
+                evidence: f.engine.ledger.skills["release-check"].evidence.clone(),
+            },
+            100_000,
+        )
+        .unwrap();
     assert_eq!(f.engine.ledger.skills["release-check"].state, State::Trial);
     assert_eq!(
         skill::SkillCatalog::index(f.engine.root.join("live"))
@@ -163,7 +174,15 @@ fn lifecycle_routes_only_trial_and_active_and_requires_real_trial_outcomes() {
         e.skills_used = vec!["release-check".into()];
         f.engine.record(e).unwrap();
     }
-    f.engine.maintain(100_000).unwrap();
+    f.engine
+        .apply(
+            Action::Promote {
+                name: "release-check".into(),
+                evidence: f.engine.ledger.skills["release-check"].evidence.clone(),
+            },
+            100_000,
+        )
+        .unwrap();
     assert_eq!(f.engine.ledger.skills["release-check"].state, State::Active);
     assert_eq!(f.engine.ledger.skills["release-check"].success_count, 6);
     let text = f.engine.owned("release-check").unwrap();
@@ -183,14 +202,30 @@ fn refinement_records_corrections_and_retrials_without_resetting_lifetime_counts
         .apply(create("release-check", ids.clone()), 100_000)
         .unwrap();
     f.engine.ledger.epoch = 1;
-    f.engine.maintain(100_000).unwrap();
+    f.engine
+        .apply(
+            Action::Promote {
+                name: "release-check".into(),
+                evidence: f.engine.ledger.skills["release-check"].evidence.clone(),
+            },
+            100_000,
+        )
+        .unwrap();
     for i in 6..12 {
         let mut e = experience(i);
         e.skills_used.push("release-check".into());
         f.engine.record(e).unwrap();
     }
     f.engine.ledger.epoch = 2;
-    f.engine.maintain(100_000).unwrap();
+    f.engine
+        .apply(
+            Action::Promote {
+                name: "release-check".into(),
+                evidence: f.engine.ledger.skills["release-check"].evidence.clone(),
+            },
+            100_000,
+        )
+        .unwrap();
     f.engine.apply(Action::Refine { name: "release-check".into(), description: "Build and validate release artifacts".into(), instructions: "Build release artifacts with cargo, then verify the binary. Use --version before packaging.".into(), evidence: ids, confidence: 1.0, corrections: vec!["verify the binary".into()] }, 100_000).unwrap();
     let meta = &f.engine.ledger.skills["release-check"];
     assert_eq!(meta.state, State::Trial);
@@ -213,11 +248,7 @@ fn duplicate_creation_is_rejected_merge_compresses_and_archives_sources() {
     f.engine
         .apply(create("release-check", ids.clone()), 100_000)
         .unwrap();
-    assert!(
-        f.engine
-            .apply(create("release-copy", ids.clone()), 100_000)
-            .is_err()
-    );
+    // Similarity is a model hint, not a veto over an explicit merge proposal.
     // Simulate a historical duplicate from a previous analyzer configuration.
     let mut meta = f.engine.ledger.skills["release-check"].clone();
     meta.digest = f
@@ -262,26 +293,34 @@ fn low_value_archive_precedes_deletion_and_preserves_experience_history() {
     f.engine
         .apply(create("release-check", ids), 100_000)
         .unwrap();
-    assert!(
-        f.engine
-            .apply(
-                Action::Retire {
-                    name: "release-check".into()
-                },
-                100_000
-            )
-            .is_err()
-    );
     let old = 100_000 + 365 * 86400;
     f.engine.ledger.epoch = 1;
     f.engine.maintain(old).unwrap();
-    // Stale candidates must be evaluated for retirement before promotion.
+    assert_eq!(
+        f.engine.ledger.skills["release-check"].state,
+        State::Candidate
+    );
+    f.engine
+        .apply(
+            Action::Retire {
+                name: "release-check".into(),
+            },
+            old,
+        )
+        .unwrap();
     assert_eq!(
         f.engine.ledger.skills["release-check"].state,
         State::Archived
     );
     f.engine.ledger.epoch = 2;
-    f.engine.maintain(old).unwrap();
+    f.engine
+        .apply(
+            Action::Retire {
+                name: "release-check".into(),
+            },
+            old,
+        )
+        .unwrap();
     assert_eq!(
         f.engine.ledger.skills["release-check"].state,
         State::Deleted

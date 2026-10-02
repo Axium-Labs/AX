@@ -899,8 +899,8 @@ fn merge(
         } else {
             "scoped_memories"
         };
-        tx.execute(&format!("INSERT OR IGNORE INTO {table}(scope,owner,key,value,source,updated_at,always_include) VALUES (?1,?2,?3,?4,?5,?6,?7)"),
-            params![record.scope.key(), owner, record.key, record.value, record.source, record.updated_at, record.always_include])?;
+        tx.execute(&format!("INSERT OR IGNORE INTO {table}(scope,owner,key,value,source,updated_at,always_include,memory_type,usage_count,confidence,last_used_at,superseded,expired,tags,paths) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)"),
+            params![record.scope.key(), owner, record.key, record.value, record.source, record.updated_at, record.always_include, record.memory_type.key(),record.usage_count,record.confidence,record.last_used_at,record.superseded,record.expired,serde_json::to_string(&record.tags)?,serde_json::to_string(&record.paths)?])?;
     }
     for record in &package.legacy {
         let table = if record.origin == "global" {
@@ -964,10 +964,17 @@ mod tests {
                     scope: MemoryScope::Project,
                     owner: self.project_id.clone(),
                     key: "build".into(),
+                    memory_type: crate::MemoryType::Decision,
+                    confidence: 90,
+                    usage_count: 7,
+                    last_used_at: Some(123),
+                    tags: vec!["测试".into()],
+                    paths: vec!["src/lib.rs".into()],
                     value: "cargo test".into(),
                     source: "test".into(),
                     updated_at: 0,
                     always_include: false,
+                    ..Default::default()
                 })
                 .unwrap();
             project
@@ -979,6 +986,7 @@ mod tests {
                     source: "test".into(),
                     updated_at: 0,
                     always_include: false,
+                    ..Default::default()
                 })
                 .unwrap();
             global
@@ -990,6 +998,7 @@ mod tests {
                     source: "test".into(),
                     updated_at: 0,
                     always_include: true,
+                    ..Default::default()
                 })
                 .unwrap();
             global
@@ -1075,6 +1084,23 @@ mod tests {
                 .value,
             "cargo test"
         );
+        let imported = project
+            .read_memory(MemoryScope::Project, &target.project_id, "build")
+            .unwrap()
+            .unwrap();
+        assert_eq!(imported.memory_type, crate::MemoryType::Decision);
+        assert_eq!(imported.confidence, 90);
+        assert_eq!(imported.usage_count, 7);
+        assert_eq!(imported.last_used_at, Some(123));
+        assert_eq!(imported.tags, vec!["测试"]);
+        assert_eq!(imported.paths, vec!["src/lib.rs"]);
+        assert_eq!(
+            project
+                .memory_index(MemoryScope::Project, &target.project_id)
+                .unwrap()
+                .len(),
+            1
+        );
         assert!(
             project
                 .scoped_memories(MemoryScope::Project, &source.project_id)
@@ -1140,6 +1166,7 @@ mod tests {
                 source: "local".into(),
                 updated_at: 0,
                 always_include: false,
+                ..Default::default()
             })
             .unwrap();
         drop(global);

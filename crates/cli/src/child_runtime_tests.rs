@@ -35,17 +35,30 @@ impl ModelProvider for Provider {
             .iter()
             .any(|m| m.content.starts_with("[ax-child-runtime]"))
         {
-            if matches!(self.behavior, Behavior::SemanticPlan)
-                && !request
+            if !request
+                .messages
+                .iter()
+                .any(|m| m.content.starts_with("[ax-task-summary]"))
+            {
+                // This test model explicitly chooses decomposition and delegation.
+                let prompt = request
                     .messages
                     .iter()
-                    .any(|m| m.content.starts_with("[ax-task-summary]"))
-            {
-                return Ok(call(
-                    "plan",
-                    "task_queue",
-                    json!({"action":"start","overall_goal":"independent work","tasks":(1..=23).map(|i| format!("child {i}")).collect::<Vec<_>>()}),
-                ));
+                    .rev()
+                    .find(|m| m.role == model::Role::User)
+                    .map_or("", |m| m.content.as_str());
+                let tasks = if matches!(self.behavior, Behavior::SemanticPlan) {
+                    (1..=23).map(|i| format!("child {i}")).collect::<Vec<_>>()
+                } else {
+                    runtime_core::task_queue::TaskQueue::list_hints(prompt)
+                };
+                if tasks.len() >= 2 {
+                    return Ok(call(
+                        "plan",
+                        "task_queue",
+                        json!({"action":"start","execution":"children","overall_goal":"independent work","tasks":tasks}),
+                    ));
+                }
             }
             return Ok(text("all children finished"));
         }
@@ -202,6 +215,7 @@ impl Fixture {
         std::fs::create_dir_all(&source).unwrap();
         std::fs::write(source.join("project.txt"), "controller baseline").unwrap();
         let host = Arc::new(LocalChildHost {
+            sandbox: std::sync::OnceLock::new(),
             policy: WorkspacePolicy::default(),
             source,
             root: root.join("children"),
@@ -210,7 +224,7 @@ impl Fixture {
         Self { root, host }
     }
     fn kernel(&self, provider: Arc<dyn ModelProvider>) -> AgentKernel {
-        let mut tools = ToolRegistry::new();
+        let mut tools = ToolRegistry::with_mode(tool::SandboxMode::Off);
         tools.register(tool::FilesystemTool);
         tools.register(tool::ShellTool);
         tools.register(crate::memory_tool::MemoryTool::default());
@@ -306,12 +320,21 @@ fn check_isolation(kernel: &AgentKernel, provider: &Provider, count: usize) {
                 .iter()
                 .any(|m| m.content.starts_with("[ax-child-runtime]")))
             .count(),
-        1
+        if requests.iter().any(|r| !r
+            .messages
+            .iter()
+            .any(|m| m.content.starts_with("[ax-child-runtime]")
+                || m.content.starts_with("[ax-task-summary]")))
+        {
+            2
+        } else {
+            1
+        }
     );
 }
 
 #[tokio::test]
-async fn twenty_three_children_automatically_execute_in_isolated_contexts_and_finish_once() {
+async fn twenty_three_explicitly_delegated_children_execute_in_isolated_contexts_and_finish_once() {
     let fixture = Fixture::new();
     let provider = provider(false, false, false);
     let mut kernel = fixture.kernel(provider.clone());
@@ -474,7 +497,7 @@ async fn child_timeout_ends_only_that_child() {
                 .iter()
                 .any(|m| m.content.starts_with("[ax-child-runtime]")))
             .count(),
-        1
+        2
     );
 }
 
@@ -660,7 +683,7 @@ async fn unresolved_child_tool_failure_is_failed_not_a_successful_text_answer() 
 }
 
 #[tokio::test]
-async fn child_workspace_excludes_controller_store_and_rejects_cross_workspace_file_access() {
+async fn child_workspace_excludes_controller_store_and_binds_relative_file_paths() {
     use tool::Tool;
     let mut fixture = Fixture::new();
     let database = fixture.host.source.join("memory.sqlite3");
@@ -685,13 +708,8 @@ async fn child_workspace_excludes_controller_store_and_rejects_cross_workspace_f
         input: "isolated files".into(),
     };
     let filesystem = tool::FilesystemTool.fork_for_run(&context).unwrap();
-    assert!(filesystem.execute(json!({"operation":"write","path":fixture.host.source.join("project.txt"),"content":"leaked"})).await.is_err());
-    assert!(
-        filesystem
-            .execute(json!({"operation":"write","path":"../sibling.txt","content":"leaked"}))
-            .await
-            .is_err()
-    );
+    // This fixture explicitly uses off mode. Escape assertions live in the
+    // Linux runtime_sandbox suite and exercise the actual kernel boundary.
     filesystem
         .execute(json!({"operation":"write","path":"child.txt","content":"owned"}))
         .await
@@ -1142,4 +1160,32 @@ async fn resume_over_quota_child_persists_failure_before_cleanup() {
             .unwrap()
             .is_some()
     );
+}
+
+#[tokio::test]
+async fn shared_child_workspace_keeps_parent_outputs_and_cleanup_is_owned() {
+    let fixture = Fixture::new();
+    let provider = provider(false, false, false);
+    let controller = fixture.kernel(provider);
+    let policy = runtime_core::ChildPolicy {
+        workspace: runtime_core::child_policy::WorkspaceInheritance::Shared,
+        ..Default::default()
+    };
+    let mut child = fixture
+        .host
+        .prepare_with_policy(&controller, "child 1", &policy)
+        .await
+        .unwrap();
+    let disposable = child.run.cwd.clone();
+    let output = child.kernel.run_turn("child 1", |_| {}).await.unwrap();
+    assert!(fixture.host.source.join("result.txt").is_file());
+    child
+        .checkpoint
+        .finish(&ChildOutcome {
+            success: true,
+            output,
+        })
+        .unwrap();
+    assert!(!disposable.exists());
+    assert!(fixture.host.source.join("result.txt").is_file());
 }

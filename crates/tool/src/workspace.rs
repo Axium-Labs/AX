@@ -22,39 +22,21 @@ impl WorkspaceTool {
     pub fn new(tool: Arc<dyn Tool>, cwd: PathBuf) -> Self {
         Self { tool, cwd }
     }
-    fn resolve(&self, mut input: Value) -> Result<Value, ToolError> {
+    /// Binds a relative `path` argument to this workspace. Path binding only;
+    /// object confinement belongs to Sandbox Manager.
+    fn resolve(&self, mut input: Value) -> Value {
         if let Some(path) = input["path"].as_str() {
             let path = self.cwd.join(path);
-            if !path.starts_with(&self.cwd)
-                || path
-                    .strip_prefix(&self.cwd)
-                    .unwrap()
-                    .components()
-                    .any(|part| matches!(part, std::path::Component::ParentDir))
-            {
-                return Err(ToolError::InvalidInput(
-                    "path is outside this child workspace".into(),
-                ));
-            }
-            let root = self.cwd.canonicalize()?;
-            let mut ancestor = path.as_path();
-            while !ancestor.exists() {
-                ancestor = ancestor
-                    .parent()
-                    .ok_or_else(|| ToolError::InvalidInput("invalid child path".into()))?;
-            }
-            if !ancestor.canonicalize()?.starts_with(root) {
-                return Err(ToolError::InvalidInput(
-                    "path follows a link outside this child workspace".into(),
-                ));
-            }
             input["path"] = Value::String(path.to_string_lossy().into_owned());
         }
-        Ok(input)
+        input
     }
 }
 #[async_trait]
 impl Tool for WorkspaceTool {
+    fn execution_boundary(&self) -> crate::ExecutionBoundary {
+        self.tool.execution_boundary()
+    }
     fn runtime_owned_resources(&self) -> bool {
         self.tool.runtime_owned_resources()
     }
@@ -77,15 +59,12 @@ impl Tool for WorkspaceTool {
         self.tool.capability(input)
     }
     fn resources(&self, input: &Value) -> Vec<ResourceAccess> {
-        self.resolve(input.clone()).map_or_else(
-            |_| vec![ResourceAccess::exclusive()],
-            |input| self.tool.resources(&input),
-        )
+        self.tool.resources(&self.resolve(input.clone()))
     }
     async fn execute(&self, input: Value) -> Result<String, ToolError> {
-        self.tool.execute(self.resolve(input)?).await
+        self.tool.execute(self.resolve(input)).await
     }
     async fn execute_output(&self, input: Value) -> Result<ToolOutput, ToolError> {
-        self.tool.execute_output(self.resolve(input)?).await
+        self.tool.execute_output(self.resolve(input)).await
     }
 }

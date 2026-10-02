@@ -30,6 +30,34 @@ const MAX_THRESHOLD: Duration = Duration::from_millis(5000);
 /// EMA weight for tokens/s updates.
 const EMA_ALPHA: f64 = 0.3;
 
+/// Counts are converted to `f64` for rates, scores and throughput. These are
+/// per-session request/token counters and millisecond samples, far below 2^53,
+/// so the conversion is exact for every value that can occur. The lint is
+/// suppressed once, here, instead of at each metric.
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "request, token and millisecond counters stay far below 2^53"
+)]
+#[must_use]
+pub(crate) fn to_f64(value: u64) -> f64 {
+    value as f64
+}
+
+/// Exact integer nearest-rank percentile, in permille. Staying in integers keeps
+/// the index from being rounded or sign-converted by float arithmetic.
+fn nearest_rank(samples: &[u64], permille: u32) -> Option<u64> {
+    if samples.is_empty() {
+        return None;
+    }
+    let len = u64::try_from(samples.len()).unwrap_or(u64::MAX);
+    let rank = len
+        .saturating_mul(u64::from(permille))
+        .div_ceil(1000)
+        .max(1);
+    let index = usize::try_from(rank - 1).unwrap_or(usize::MAX);
+    Some(samples[index.min(samples.len() - 1)])
+}
+
 /// Historical performance of one provider serving one model.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct ProviderPerf {
@@ -47,7 +75,8 @@ pub struct ProviderPerf {
 
 impl ProviderPerf {
     fn record_ttft(&mut self, duration: Duration) {
-        self.ttft_ms.push_back(duration.as_millis() as u64);
+        self.ttft_ms
+            .push_back(u64::try_from(duration.as_millis()).unwrap_or(u64::MAX));
         while self.ttft_ms.len() > TTFT_WINDOW {
             self.ttft_ms.pop_front();
         }
@@ -67,26 +96,27 @@ impl ProviderPerf {
     /// Share of requests that ended in a transport or HTTP error.
     #[must_use]
     pub fn error_rate(&self) -> f64 {
-        let total = self.requests.max(1) as f64;
-        (self.errors as f64 / total).min(1.0)
+        (to_f64(self.errors) / to_f64(self.requests.max(1))).min(1.0)
     }
 
     /// Nearest-rank percentile of recent TTFT samples, in milliseconds.
     #[must_use]
-    pub fn ttft_percentile(&self, percentile: f64) -> Option<u64> {
-        if self.ttft_ms.is_empty() {
-            return None;
-        }
+    pub fn ttft_percentile(&self, permille: u32) -> Option<u64> {
         let mut sorted: Vec<u64> = self.ttft_ms.iter().copied().collect();
         sorted.sort_unstable();
-        let rank = ((sorted.len() as f64) * percentile).ceil() as usize;
-        Some(sorted[rank.max(1) - 1])
+        nearest_rank(&sorted, permille)
     }
 
     /// Median TTFT, used when ranking hedge candidates.
     #[must_use]
     pub fn ttft_p50(&self) -> Option<u64> {
-        self.ttft_percentile(0.50)
+        self.ttft_percentile(500)
+    }
+
+    /// Tail TTFT, used for the adaptive hedge threshold.
+    #[must_use]
+    pub fn ttft_p95(&self) -> Option<u64> {
+        self.ttft_percentile(950)
     }
 
     /// Composite score for picking a hedge secondary; lower is better.
@@ -96,7 +126,7 @@ impl ProviderPerf {
     /// Providers without history land on neutral defaults.
     #[must_use]
     pub fn hedge_score(&self) -> f64 {
-        let ttft = self.ttft_p50().unwrap_or(1000) as f64;
+        let ttft = to_f64(self.ttft_p50().unwrap_or(1000));
         5000.0f64.mul_add(self.error_rate(), ttft) - 2.0 * self.tokens_per_sec
     }
 }
@@ -131,7 +161,8 @@ pub struct HedgeStats {
 impl HedgeStats {
     fn record_winner(&mut self, tokens: u64, ttft: Duration, tokens_per_sec: f64) {
         self.winner_tokens += tokens;
-        self.winner_ttft_ms.push_back(ttft.as_millis() as u64);
+        self.winner_ttft_ms
+            .push_back(u64::try_from(ttft.as_millis()).unwrap_or(u64::MAX));
         while self.winner_ttft_ms.len() > WINNER_WINDOW {
             self.winner_ttft_ms.pop_front();
         }
@@ -144,14 +175,10 @@ impl HedgeStats {
         }
     }
 
-    fn winner_ttft_percentile(&self, percentile: f64) -> Option<u64> {
-        if self.winner_ttft_ms.is_empty() {
-            return None;
-        }
+    fn winner_ttft_percentile(&self, permille: u32) -> Option<u64> {
         let mut sorted: Vec<u64> = self.winner_ttft_ms.iter().copied().collect();
         sorted.sort_unstable();
-        let rank = ((sorted.len() as f64) * percentile).ceil() as usize;
-        Some(sorted[rank.max(1) - 1])
+        nearest_rank(&sorted, permille)
     }
 
     /// Share of Fast-mode requests that triggered a hedge.
@@ -160,7 +187,7 @@ impl HedgeStats {
         if self.fast_requests == 0 {
             0.0
         } else {
-            self.hedged as f64 / self.fast_requests as f64
+            to_f64(self.hedged) / to_f64(self.fast_requests)
         }
     }
 
@@ -172,7 +199,7 @@ impl HedgeStats {
         if self.winner_tokens == 0 {
             return 1.0;
         }
-        (self.winner_tokens + self.extra_tokens) as f64 / self.winner_tokens as f64
+        to_f64(self.winner_tokens + self.extra_tokens) / to_f64(self.winner_tokens)
     }
 }
 
@@ -265,7 +292,7 @@ pub fn record_completion(provider: &str, model: &str, output_tokens: u64, elapse
     if seconds <= 0.0 {
         return;
     }
-    let tokens_per_sec = output_tokens as f64 / seconds;
+    let tokens_per_sec = to_f64(output_tokens) / seconds;
     let key = key(provider, model);
     mutate(|store| {
         store
@@ -335,7 +362,7 @@ pub fn hedge_threshold(provider: &str, model: &str) -> Duration {
     if perf.ttft_ms.len() < MIN_SAMPLES_FOR_THRESHOLD {
         return DEFAULT_THRESHOLD;
     }
-    perf.ttft_percentile(0.95).map_or(DEFAULT_THRESHOLD, |p95| {
+    perf.ttft_p95().map_or(DEFAULT_THRESHOLD, |p95| {
         Duration::from_millis(p95).clamp(MIN_THRESHOLD, MAX_THRESHOLD)
     })
 }
@@ -376,8 +403,8 @@ pub fn hedge_snapshot() -> HedgeSnapshot {
         winner_tokens: hedge.winner_tokens,
         trigger_rate: hedge.trigger_rate(),
         extra_cost_factor: hedge.extra_cost_factor(),
-        ttft_p50_ms: hedge.winner_ttft_percentile(0.50),
-        ttft_p95_ms: hedge.winner_ttft_percentile(0.95),
+        ttft_p50_ms: hedge.winner_ttft_percentile(500),
+        ttft_p95_ms: hedge.winner_ttft_percentile(950),
         tokens_per_sec: hedge.tokens_per_sec,
     }
 }
@@ -389,7 +416,7 @@ mod tests {
     #[test]
     fn cold_start_threshold_is_default() {
         let store = Store::default();
-        assert!(store.providers.get("none/model").is_none());
+        assert!(!store.providers.contains_key("none/model"));
         assert_eq!(DEFAULT_THRESHOLD, Duration::from_millis(1000));
     }
 
@@ -400,7 +427,7 @@ mod tests {
             perf.record_ttft(Duration::from_millis(sample));
         }
         assert_eq!(perf.ttft_p50(), Some(500));
-        assert_eq!(perf.ttft_percentile(0.95), Some(1000));
+        assert_eq!(perf.ttft_p95(), Some(1000));
     }
 
     #[test]
@@ -414,21 +441,23 @@ mod tests {
 
     #[test]
     fn error_rate_is_bounded() {
-        let mut perf = ProviderPerf::default();
-        perf.requests = 4;
-        perf.errors = 2;
+        let mut perf = ProviderPerf {
+            requests: 4,
+            errors: 2,
+            ..ProviderPerf::default()
+        };
         assert!((perf.error_rate() - 0.5).abs() < f64::EPSILON);
         perf.requests = 0;
         perf.errors = 0;
-        assert_eq!(perf.error_rate(), 0.0);
+        assert!(perf.error_rate().abs() < f64::EPSILON);
     }
 
     #[test]
     fn extra_cost_factor_reflects_actual_spend() {
         let mut hedge = HedgeStats::default();
-        assert_eq!(hedge.extra_cost_factor(), 1.0);
+        assert!((hedge.extra_cost_factor() - 1.0).abs() < f64::EPSILON);
         hedge.winner_tokens = 10_000;
-        assert_eq!(hedge.extra_cost_factor(), 1.0);
+        assert!((hedge.extra_cost_factor() - 1.0).abs() < f64::EPSILON);
         hedge.extra_tokens = 1_400;
         assert!((hedge.extra_cost_factor() - 1.14).abs() < 1e-9);
     }
@@ -436,7 +465,7 @@ mod tests {
     #[test]
     fn trigger_rate_uses_fast_requests_as_base() {
         let mut hedge = HedgeStats::default();
-        assert_eq!(hedge.trigger_rate(), 0.0);
+        assert!(hedge.trigger_rate().abs() < f64::EPSILON);
         hedge.fast_requests = 24;
         hedge.hedged = 3;
         assert!((hedge.trigger_rate() - 0.125).abs() < 1e-9);
@@ -446,9 +475,12 @@ mod tests {
     fn throughput_uses_ema() {
         let mut perf = ProviderPerf::default();
         perf.record_completion(100.0);
-        assert_eq!(perf.tokens_per_sec, 100.0);
+        assert!((perf.tokens_per_sec - 100.0).abs() < f64::EPSILON);
         perf.record_completion(0.0);
-        assert_eq!(perf.tokens_per_sec, 100.0, "zero-rate samples are ignored");
+        assert!(
+            (perf.tokens_per_sec - 100.0).abs() < f64::EPSILON,
+            "zero-rate samples are ignored"
+        );
         perf.record_completion(50.0);
         assert!(perf.tokens_per_sec < 100.0 && perf.tokens_per_sec > 50.0);
     }

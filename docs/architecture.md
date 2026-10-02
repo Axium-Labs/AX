@@ -29,6 +29,7 @@ cli ───────────────┬──> runtime-core ──>
 | `mcp` | MCP client for stdio / Streamable HTTP / WebSocket, lazy connection, capability catalog, `McpToolProxy` and `McpGateway`. |
 | `skill` | `SKILL.md` frontmatter indexing, precomputed Unicode routing features, and language-independent similarity routing; Markdown body is loaded only when a route hits. Legacy packages remain supported. |
 | `scoped` | Shared Global/Project registry, config policies and override/mask resolution. Metadata only, no execution or UI dependencies. |
+| `sandbox` | Runtime confinement policies, reusable OS execution backends and workspace managers below tools and local MCP transport. |
 | `lexical` | Language-independent lexical features (NFKC, case fold, word tokens, character n-grams) and normalized similarity, shared by skill routing and memory retrieval so the two cannot drift apart. Leaf crate: no dependency on other AX crates. |
 | `memory` | SQLite session/message repository, effective-context snapshots, scoped facts, JSONL event streams, resume and compaction state. |
 | `cli` | The only composition root: clap arguments, provider selection, lazy SQLite/Skill/MCP initialization, REPL, ratatui TUI, session commands, permission dialogs. |
@@ -107,8 +108,7 @@ Owns:
   unfinished tool-call round.
 - **`ContextBudget`** (`runtime-core::budget`): one structure from which every
   context-space limit is derived — reserved output tokens, tool-schema
-  estimate, skill reserve, memory reserve, session-summary share, recent-message
-  budget and the compaction threshold. Modules no longer hard-code their own
+  estimate, one elastic context pool, per-source maxima and projected next-request compaction. Modules no longer hard-code their own
   character counts or fixed fractions of the raw window. See
   [context.md](context.md).
 - **Capacity-aware compaction**: compression only affects what is fed to the
@@ -140,18 +140,11 @@ name, description and declared capabilities are visible to the model via
 ### `skill`
 
 On first use, indexes only standard `SKILL.md` YAML frontmatter (or a legacy
-`skill.toml`), and derives each skill's Unicode routing features once at index
-time. Routing compares the task text with the name and description by
-normalized lexical similarity (words plus character n-grams, from the shared
-`lexical` crate), with no language
-detection, stemming or stopwords, so every script ranks through one code path.
-After activation, the selected Markdown body is read and injected within the
-`ContextBudget` skill reserve; optional resources remain on demand. Project
-skills take precedence over global skills and malformed packages are isolated.
-A compact metadata-only catalog lets the model select a skill by meaning through
-the ordinary filesystem tool when strong automatic matching misses it; AX omits
-that catalog when automatic routing has already selected a skill.
-`allowed-tools` never changes AX tool permissions. See [skills.md](skills.md).
+`skill.toml`) and precomputes lexical routing features. Features only rank
+candidates. The main model receives compact eligible metadata and explicitly
+calls `invoke_skill`; body/resources stay lazy. Deterministic enabled/scope/
+path/dependency/implicit-invocation filters constrain selection. No extra
+routing model request is added. See [skills.md](skills.md).
 
 ### `memory`
 
@@ -165,10 +158,12 @@ workspace deletion. See [storage.md](storage.md) for migration and path keys.
 Explicit `remember key=value` declarations default to Session scope. Natural
 language intent is handled by the main model through a session-bound `memory`
 tool; code validates scope ownership, quoted user provenance, credential
-patterns, and optimistic-update preconditions. Retrieval ranks facts by a
-composite of the shared `lexical` similarity (computed once per turn for the
-query, precomputed and cached per fact), scope priority, recency and
-importance, then applies the shared token budget — with no per-language rules.
+patterns, and optimistic-update preconditions. Retrieval filters the current Session/Project and Global owners, recalls at
+most 32 lexical/exact/tag/path candidates, then lightly reranks by relevance,
+usage, confidence and type-aware freshness. Scope is a filter, never a score.
+Only a few SQLite index summaries enter the shared context budget; details
+are fetched by key on demand. Existing Unicode routing features are preserved.
+There are no embeddings, vector stores, per-language rules or extra model calls.
 
 Every complete conversation message is checkpointed before execution
 advances. Resume queries pages after the snapshot watermark and marks
@@ -218,7 +213,7 @@ Guarantees:
 
 ```text
 user task
-  → lazy Skill routing
+  → compact eligible Skill metadata
   → retrieve memory and checkpoint user input
   → context pressure check / layered compression
   → model streaming request
@@ -261,12 +256,14 @@ Step-by-step guidance lives in [development.md](development.md).
 ## Lightweight long-task orchestration
 
 The existing Agent Loop and tool-round DAG remain the execution mechanisms. A
-small Task Queue recognizes top-level numbered/bulleted multi-task requests;
-the execution model can also initialize semantic subtasks through `task_queue`.
+small Task Queue stores only explicit model-created tasks through `task_queue`;
+numbered/bulleted formatting is a hint and never creates a queue.
 There is no separate planner call or fixed orchestration system prompt.
 
 Queues belong to a `goal_id`, not a session. Ordinary user turns start a new goal,
 supersede and archive any resumable old queue, and persist a fresh state head.
+Supersede, archive and the replacement head reach durable storage in one
+checkpoint, so an interrupted turn cannot restore a half-applied supersede.
 `GoalTurn::Resume` restores only the explicitly requested saved goal ID. Budget
 interruptions suspend that goal for explicit resume. CLI exposes `ax run --session
 <ID> --resume-goal <GOAL_ID> <PROMPT>` and `--cancel-goal`; ACP uses prompt metadata
@@ -278,7 +275,7 @@ controls advance the queue; task failures require a recovery opportunity first.
 Tool failures and tool timeouts remain local, allowing independent tasks to
 continue. Recovery is bound to the failed execution step and its task directories.
 Unbounded recovery tools are rejected; successful retries restore the original
-step scope, and repeated failures require a different bounded strategy. Provider failures retry once within the goal; configuration,
+step scope, and repeated failures require a different bounded strategy. Provider failures use classified attempt/time-bounded retry policy; configuration,
 authentication, persistence and exhausted provider retries block the goal.
 
 Queue states are active/summarizing/suspended/completed/blocked/cancelled/superseded.
@@ -295,8 +292,8 @@ Queue checkpoints use the existing AgentState path; see [context.md](context.md)
 
 ### Automatic isolated child execution
 
-The CLI attaches a `ChildHost` to the kernel. Once a queue exists, the controller
-consumes its running/pending entries automatically, calls `AgentSupervisor::run_child`
+The CLI attaches a `ChildHost` to the kernel. Once the model explicitly sets `execution="children"`, the controller
+consumes that queue's running/pending entries, calls `AgentSupervisor::run_child`
 and collects each outcome. Children use the existing kernel loop; they do not
 receive the controller queue or siblings' messages. The controller makes a single
 text-only summary request after all children are terminal. Plain single-task
@@ -351,7 +348,10 @@ and remaining space; each raw checkpoint checks actual workspace usage. Over-quo
 execution fails only that child, persists its failure and releases workspace space.
 These are admission/checkpoint limits, not an OS filesystem quota: a subprocess
 can temporarily exceed them between checkpoints. Durable state is excluded from
-workspace quota accounting and is preserved by GC.
+workspace quota accounting and is preserved by GC. GC reclaims terminal and
+expired workspaces; a child directory with no readable manifest is an orphan from
+an interrupted provisioning step and is reclaimed after the same idle TTL, so it
+cannot leak indefinitely.
 
 
 ### Goal-bound execution invariants
@@ -395,3 +395,12 @@ management boundary. Named Agent instructions are read at invocation. Portable
 project capability config carries the existing project UUID; runtime stores keep
 their existing ownership and migration rules. See [capabilities.md](capabilities.md)
 and [ADR 0011](adr/0011-scoped-capabilities.md).
+
+## Workspace runtime boundary
+
+The independent `sandbox` crate sits below ToolRegistry and MCP stdio transport.
+Agent, subagent and Skill execution reach SandboxManager before local OS effects.
+Bound tools retain a manager and reuse a persistent Linux namespace broker; child
+registries bind their own workspace. Permission remains independent. See
+[security.md](security.md) and [ADR 0013](adr/0013-workspace-runtime-sandbox.md)
+for backend requirements, lifecycle capabilities and platform limitations.

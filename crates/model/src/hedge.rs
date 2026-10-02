@@ -194,7 +194,6 @@ impl ModelProvider for HedgingProvider {
         on_thinking: &mut (dyn FnMut(String) + Send),
     ) -> Result<ModelResponse, ModelError> {
         stats::record_fast_request();
-        let prompt_tokens = estimate_prompt_tokens(&request);
         let (tx, mut rx) = mpsc::unbounded_channel::<RaceEvent>();
         let mut candidates: Vec<Candidate> = Vec::new();
         Self::spawn_candidate(&mut candidates, self.primary.clone(), &request, &tx);
@@ -213,26 +212,25 @@ impl ModelProvider for HedgingProvider {
         let result = loop {
             tokio::select! {
                 () = &mut hedge_timer, if !hedged && winner.is_none() && self.config.max_parallel > 1 => {
-                    hedged = true;
-                    active += 1;
-                    stats::record_hedge_triggered(prompt_tokens);
-                    Self::spawn_candidate(&mut candidates, self.secondary(), &request, &tx);
+                    self.hedge_now(&mut hedged, &mut active, &mut candidates, &request, &tx);
                 }
                 event = rx.recv() => {
                     let Some(event) = event else {
-                        break Err(last_error.unwrap_or_else(|| {
-                            ModelError::InvalidResponse(
-                                "all hedged requests ended without a response".to_owned(),
-                            )
-                        }));
+                        break last_words(
+                            &mut empty_response,
+                            last_error.take(),
+                            "all hedged requests ended without a response",
+                        );
                     };
                     match event {
                         RaceEvent::Delta { index, text, thinking } => {
                             if winner.is_none() && !text.is_empty() {
                                 winner = Some(index);
                                 winner_first_delta = Some(Instant::now());
-                                let canceled = Self::cancel_losers(&mut candidates, index);
-                                stats::record_canceled(canceled);
+                                stats::record_canceled(Self::cancel_losers(
+                                    &mut candidates,
+                                    index,
+                                ));
                             }
                             if winner == Some(index) {
                                 if thinking {
@@ -248,44 +246,22 @@ impl ModelProvider for HedgingProvider {
                             active = active.saturating_sub(1);
                             match outcome {
                                 Ok(response) => {
-                                    if winner == Some(index) {
-                                        record_winner_metrics(
-                                            &candidates,
-                                            index,
-                                            winner_first_delta,
-                                            &response,
-                                        );
-                                        break Ok(response);
-                                    }
-                                    // A loser that finished before abort landed; ignore.
-                                    if winner.is_some() {
-                                        continue;
-                                    }
-                                    // A response with no content and no tool calls is
-                                    // degenerate: it cannot claim the win while other
-                                    // candidates are still running, but it beats an
-                                    // error if everything else fails.
-                                    let useful = !response.content.is_empty()
-                                        || !response.tool_calls.is_empty();
-                                    if useful {
-                                        let canceled = Self::cancel_losers(&mut candidates, index);
-                                        stats::record_canceled(canceled);
-                                        record_winner_metrics(
-                                            &candidates,
-                                            index,
-                                            winner_first_delta,
-                                            &response,
-                                        );
-                                        break Ok(response);
-                                    }
-                                    empty_response = Some(response);
-                                    if active == 0 {
-                                        break Ok(empty_response.unwrap_or(ModelResponse {
-            usage: None,
-                                            content: String::new(),
-                                            tool_calls: Vec::new(),
-                                            finish_reason: None,
-                                        }));
+                                    match Self::settle(
+                                        &mut candidates,
+                                        index,
+                                        winner,
+                                        winner_first_delta,
+                                        response,
+                                    ) {
+                                        Settled::Win(response) => break Ok(response),
+                                        // A loser that finished before abort landed.
+                                        Settled::Ignore => {}
+                                        Settled::Degenerate(response) => {
+                                            empty_response = Some(response);
+                                            if active == 0 {
+                                                break Ok(empty_response.take().unwrap_or_default());
+                                            }
+                                        }
                                     }
                                 }
                                 Err(error) => {
@@ -296,24 +272,13 @@ impl ModelProvider for HedgingProvider {
                                     // Failed fast before the threshold fired: hedge now
                                     // instead of waiting out the timer.
                                     if !hedged && winner.is_none() && self.config.max_parallel > 1 {
-                                        hedged = true;
-                                        active += 1;
-                                        stats::record_hedge_triggered(prompt_tokens);
-                                        Self::spawn_candidate(
-                                            &mut candidates,
-                                            self.secondary(),
-                                            &request,
-                                            &tx,
-                                        );
+                                        self.hedge_now(&mut hedged, &mut active, &mut candidates, &request, &tx);
                                     } else if active == 0 {
-                                        if let Some(empty) = empty_response {
-                                            break Ok(empty);
-                                        }
-                                        break Err(last_error.unwrap_or_else(|| {
-                                            ModelError::InvalidResponse(
-                                                "all hedged requests failed".to_owned(),
-                                            )
-                                        }));
+                                        break last_words(
+                                            &mut empty_response,
+                                            last_error.take(),
+                                            "all hedged requests failed",
+                                        );
                                     }
                                 }
                             }
@@ -331,6 +296,86 @@ impl ModelProvider for HedgingProvider {
         }
         result
     }
+}
+
+/// What a completed candidate means to the race.
+enum Settled {
+    /// This candidate wins; its metrics are already recorded.
+    Win(ModelResponse),
+    /// A loser that finished after the winner: ignore it.
+    Ignore,
+    /// No content and no tool calls: it cannot claim the win while others run,
+    /// but it still beats a synthetic error if everything else fails.
+    Degenerate(ModelResponse),
+}
+
+impl HedgingProvider {
+    /// Classifies a completed candidate. A candidate that currently owns the
+    /// stream wins, a late loser is ignored, and a degenerate response is held
+    /// back as a fallback rather than accepted early.
+    fn settle(
+        candidates: &mut Vec<Candidate>,
+        index: usize,
+        winner: Option<usize>,
+        winner_first_delta: Option<Instant>,
+        response: ModelResponse,
+    ) -> Settled {
+        if winner == Some(index) {
+            Self::claim_winner(candidates, index, winner_first_delta, &response);
+            return Settled::Win(response);
+        }
+        if winner.is_some() {
+            return Settled::Ignore;
+        }
+        if response.content.is_empty() && response.tool_calls.is_empty() {
+            return Settled::Degenerate(response);
+        }
+        Self::claim_winner(candidates, index, winner_first_delta, &response);
+        Settled::Win(response)
+    }
+
+    /// Starts the secondary request exactly once, whether the timer fired or the
+    /// primary failed before the threshold.
+    fn hedge_now(
+        &self,
+        hedged: &mut bool,
+        active: &mut usize,
+        candidates: &mut Vec<Candidate>,
+        request: &ModelRequest,
+        tx: &mpsc::UnboundedSender<RaceEvent>,
+    ) {
+        *hedged = true;
+        *active += 1;
+        stats::record_hedge_triggered(estimate_prompt_tokens(request));
+        Self::spawn_candidate(candidates, self.secondary(), request, tx);
+    }
+
+    /// Cancels the losers and records the winner's metrics. Shared by the
+    /// first-useful-content and useful-completion paths so the two cannot drift.
+    fn claim_winner(
+        candidates: &mut Vec<Candidate>,
+        index: usize,
+        winner_first_delta: Option<Instant>,
+        response: &ModelResponse,
+    ) {
+        let canceled = Self::cancel_losers(candidates, index);
+        stats::record_canceled(canceled);
+        record_winner_metrics(candidates, index, winner_first_delta, response);
+    }
+}
+
+/// The outcome once no candidate can produce anything better: a degenerate
+/// response is still preferable to a synthetic error. Shared by both terminal
+/// paths so their error text cannot drift.
+fn last_words(
+    empty: &mut Option<ModelResponse>,
+    last_error: Option<ModelError>,
+    fallback: &str,
+) -> Result<ModelResponse, ModelError> {
+    if let Some(empty) = empty.take() {
+        return Ok(empty);
+    }
+    Err(last_error.unwrap_or_else(|| ModelError::InvalidResponse(fallback.to_owned())))
 }
 
 /// Rough chars/4 estimate; only used for cost accounting, never for billing.
@@ -380,7 +425,7 @@ fn record_winner_metrics(
     let tokens = estimate_tokens(output_chars);
     let generated_in = candidate.started.elapsed().as_secs_f64();
     let tokens_per_sec = if generated_in > 0.0 {
-        tokens as f64 / generated_in
+        stats::to_f64(tokens) / generated_in
     } else {
         0.0
     };
@@ -443,7 +488,7 @@ mod tests {
             self.name
         }
 
-        fn model_id(&self) -> &str {
+        fn model_id(&self) -> &'static str {
             "fake-model"
         }
 

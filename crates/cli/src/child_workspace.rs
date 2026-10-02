@@ -131,6 +131,15 @@ pub(super) fn gc(root: &Path, policy: Policy) -> io::Result<()> {
             continue;
         };
         let Ok(mut manifest) = read_manifest(&state) else {
+            // A child directory without a readable manifest is an orphan from an
+            // interrupted provisioning step: it has no owner, no receipt and no
+            // resume path, so it is reclaimed on the same idle TTL instead of
+            // being skipped forever.
+            if now().saturating_sub(modified_secs(&entry.path())) >= policy.ttl_secs
+                && let Err(error) = std::fs::remove_dir_all(entry.path())
+            {
+                eprintln!("child workspace GC deferred: {error}");
+            }
             continue;
         };
         let terminal = matches!(manifest.status.as_str(), "completed" | "failed" | "expired");
@@ -178,6 +187,10 @@ pub(super) fn check_quota(root: &Path, cwd: &Path, policy: Policy) -> io::Result
     }
     Ok(())
 }
+/// Total disposable bytes owned by every child directory. The durable `state`
+/// directory is deliberately excluded: it holds retained history that outlives
+/// the workspace, and `SQLite`'s minimum page size alone would dwarf a small
+/// configured workspace quota.
 pub(super) fn usage(root: &Path) -> io::Result<u64> {
     let mut bytes = 0_u64;
     for entry in std::fs::read_dir(root)? {
@@ -187,6 +200,14 @@ pub(super) fn usage(root: &Path) -> io::Result<u64> {
         }
     }
     Ok(bytes)
+}
+
+fn modified_secs(path: &Path) -> u64 {
+    std::fs::metadata(path)
+        .and_then(|metadata| metadata.modified())
+        .ok()
+        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+        .map_or(0, |elapsed| elapsed.as_secs())
 }
 
 fn files(source: &Path, child_root: &Path, excluded: &[PathBuf]) -> io::Result<Vec<PathBuf>> {
@@ -296,22 +317,51 @@ pub(super) fn provision(
             return Err(io::Error::other("child Git checkout disk quota exceeded"));
         }
         let mut manifest = read_manifest(state)?;
-        manifest.repository = Some(repository);
+        let confined = super::service_sandbox_mode() != sandbox::SandboxMode::Off;
+        manifest.repository = if confined { None } else { Some(repository) };
         write_manifest(state, &manifest)?;
-        let result = git(
-            source,
-            &[
-                OsStr::new("worktree"),
-                OsStr::new("add"),
-                OsStr::new("--detach"),
-                destination.as_os_str(),
-                OsStr::new(String::from_utf8_lossy(&head.unwrap().stdout).trim()),
-            ],
-        )?;
+        let result = if confined {
+            git(
+                source,
+                &[
+                    OsStr::new("clone"),
+                    OsStr::new("--no-hardlinks"),
+                    OsStr::new("--no-checkout"),
+                    source.as_os_str(),
+                    destination.as_os_str(),
+                ],
+            )?
+        } else {
+            git(
+                source,
+                &[
+                    OsStr::new("worktree"),
+                    OsStr::new("add"),
+                    OsStr::new("--detach"),
+                    destination.as_os_str(),
+                    OsStr::new(String::from_utf8_lossy(&head.as_ref().unwrap().stdout).trim()),
+                ],
+            )?
+        };
         if !result.status.success() {
             return Err(io::Error::other(
                 String::from_utf8_lossy(&result.stderr).into_owned(),
             ));
+        }
+        if confined {
+            let checkout = git(
+                destination,
+                &[
+                    OsStr::new("checkout"),
+                    OsStr::new("--detach"),
+                    OsStr::new(String::from_utf8_lossy(&head.as_ref().unwrap().stdout).trim()),
+                ],
+            )?;
+            if !checkout.status.success() {
+                return Err(io::Error::other(
+                    String::from_utf8_lossy(&checkout.stderr).into_owned(),
+                ));
+            }
         }
         overlay_git(source, destination, state, paths, policy)?;
     } else {

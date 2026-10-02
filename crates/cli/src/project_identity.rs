@@ -144,6 +144,7 @@ mod tests {
                 source: "test".into(),
                 updated_at: 0,
                 always_include: false,
+                ..Default::default()
             })
             .unwrap();
         drop(store);

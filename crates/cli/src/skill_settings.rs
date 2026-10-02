@@ -75,7 +75,13 @@ required_tools = ["mcp"]
         state.create_session("test").unwrap();
         let session = state.current_session_id().unwrap().to_owned();
         let routed = state.route_skills("review", 1000).unwrap();
-        assert_eq!(routed.len(), 1);
+        assert!(routed.is_empty());
+        // Seed a historical explicit invocation to verify disabling/resume cleanup.
+        let loaded = state.skills().unwrap().load("review").unwrap();
+        let routed = vec![Message::system(format!(
+            "[ax-skill:review]\n{}",
+            loaded.instructions
+        ))];
         state.persist_messages(&routed).unwrap();
         state.loaded_messages.extend(routed);
         state
@@ -119,7 +125,16 @@ required_tools = ["mcp"]
                 .all(|m| active_skill_name(m).is_none())
         );
         restored.toggle_skill("review").unwrap();
-        assert_eq!(restored.route_skills("review", 1000).unwrap().len(), 1);
+        assert!(restored.route_skills("review", 1000).unwrap().is_empty());
+        assert!(
+            restored
+                .skill_catalog_context(10_000)
+                .unwrap()
+                .0
+                .unwrap()
+                .content
+                .contains("Review code")
+        );
         drop(restored);
         std::fs::remove_dir_all(root).unwrap();
     }

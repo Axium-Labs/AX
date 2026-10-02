@@ -257,6 +257,7 @@ mod tests {
                 source: "user".into(),
                 updated_at: 0,
                 always_include: false,
+                ..Default::default()
             })
             .unwrap();
         fs::create_dir_all(&target).unwrap();

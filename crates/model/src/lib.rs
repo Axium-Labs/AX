@@ -1,5 +1,11 @@
 //! Provider-neutral model contracts and provider implementations.
 
+pub mod retry;
+pub use retry::{ErrorClass, RetryPolicy};
+/// Conservative reply reserve used when a provider does not report a maximum
+/// output size. Kept in the provider crate so every caller that has to guess a
+/// reply reserve guesses the same number instead of drifting apart.
+pub const DEFAULT_OUTPUT_RESERVE_TOKENS: usize = 8_000;
 mod auth;
 mod codex_device;
 mod hedge;
@@ -41,6 +47,12 @@ pub enum ModelError {
     InvalidResponse(String),
     #[error("model HTTP request failed with status {status}: {message}")]
     HttpStatus { status: u16, message: String },
+    #[error("model HTTP request failed with status {status}: {message}")]
+    HttpResponse {
+        status: u16,
+        message: String,
+        retry_after: Option<std::time::Duration>,
+    },
     #[error("model catalog I/O error: {0}")]
     Io(#[from] std::io::Error),
 }
@@ -224,6 +236,19 @@ pub struct ModelResponse {
     pub content: String,
     pub tool_calls: Vec<ToolCall>,
     pub finish_reason: Option<String>,
+}
+
+impl Default for ModelResponse {
+    /// A response with no content, no tool calls and no finish reason: the
+    /// degenerate outcome that is still preferable to a synthetic error.
+    fn default() -> Self {
+        Self {
+            usage: None,
+            content: String::new(),
+            tool_calls: Vec::new(),
+            finish_reason: None,
+        }
+    }
 }
 
 #[async_trait]

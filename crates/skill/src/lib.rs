@@ -17,24 +17,6 @@ const LEGACY_MANIFEST: &str = "skill.toml";
 const LEGACY_BODY: &str = "instructions.md";
 const MAX_FRONTMATTER_BYTES: usize = 64_000;
 
-/// Confidence at or above which a routed skill body is loaded automatically.
-///
-/// Calibrated against a mixed-language fixture set: the strongest unrelated
-/// input ("Summarize this code" sharing one common word) scores 0.29, while
-/// the weakest input that should inject ("please review my changes") scores
-/// 0.47. Everything in between stays a candidate for the metadata catalog.
-pub const AUTO_ROUTE_THRESHOLD: f64 = 0.40;
-/// Confidence a skill needs to be reported as a candidate at all. Unrelated
-/// English prose tops out near 0.11, so this keeps incidental n-gram overlap
-/// out while still ranking partial cross-script matches.
-pub const CANDIDATE_THRESHOLD: f64 = 0.12;
-/// Weight of the skill name in the combined score; the description carries
-/// the rest. Names are short, so n-gram-similar names alone stay below the
-/// automatic threshold.
-const NAME_WEIGHT: f64 = 0.40;
-/// Weight of the skill description in the combined score.
-const DESCRIPTION_WEIGHT: f64 = 0.60;
-
 #[derive(Debug, Error)]
 pub enum SkillError {
     #[error("failed to access skill path {path}: {source}")]
@@ -109,7 +91,7 @@ impl SkillStatus {
 #[derive(Clone, Debug, PartialEq)]
 pub struct SkillMatch {
     pub name: String,
-    /// Normalized routing confidence in `0.0..=1.0`.
+    /// Candidate ranking signal only; never an activation decision.
     pub score: f64,
 }
 
@@ -151,12 +133,10 @@ impl IndexedSkill {
     ///
     /// The name and description are two independent statements about the same
     /// skill, so they are combined rather than compared separately.
-    fn score(&self, query: &LexicalFeatures) -> f64 {
+    fn routing_features(&self, query: &LexicalFeatures) -> f64 {
         let name = self.name_features.similarity(query);
         let description = self.description_features.similarity(query);
-        NAME_WEIGHT
-            .mul_add(name, DESCRIPTION_WEIGHT * description)
-            .min(1.0)
+        name.max(description)
     }
 }
 
@@ -166,6 +146,13 @@ pub struct SkillCatalog {
     issues: Vec<SkillError>,
 }
 impl SkillCatalog {
+    #[must_use]
+    pub fn metadata_snapshot(&self) -> Self {
+        Self {
+            skills: self.skills.clone(),
+            issues: Vec::new(),
+        }
+    }
     /// Index one root. A missing root is an empty catalog.
     ///
     /// # Errors
@@ -356,8 +343,7 @@ impl SkillCatalog {
 
     /// Ranks skills by language-independent lexical similarity. Explicitly
     /// naming a skill always scores `1.0`; legacy triggers and allowed-tools
-    /// never affect routing. Candidates below [`CANDIDATE_THRESHOLD`] are
-    /// dropped so the caller can fall back to the metadata catalog.
+    /// never affect activation. All eligible metadata remains visible to the model.
     #[must_use]
     pub fn route_candidates<'a>(
         &self,
@@ -375,21 +361,34 @@ impl SkillCatalog {
             .filter(|skill| {
                 skill
                     .metadata
-                    .required_tools
-                    .iter()
-                    .all(|tool| available.contains(tool.as_str()))
+                    .extensions
+                    .get("enabled")
+                    .and_then(serde_yaml::Value::as_bool)
+                    != Some(false)
+                    && (skill
+                        .metadata
+                        .extensions
+                        .get("allow_implicit_invocation")
+                        .and_then(serde_yaml::Value::as_bool)
+                        != Some(false)
+                        || mentions_name(&lexical::normalize(input), &skill.metadata.name))
+                    && skill
+                        .metadata
+                        .required_tools
+                        .iter()
+                        .all(|tool| available.contains(tool.as_str()))
             })
-            .filter_map(|skill| {
+            .map(|skill| {
                 let name = &skill.metadata.name;
                 let score = if mentions_name(&normalized_input, name) {
                     1.0
                 } else {
-                    skill.score(&query)
+                    skill.routing_features(&query)
                 };
-                (score >= CANDIDATE_THRESHOLD).then(|| SkillMatch {
+                SkillMatch {
                     name: name.clone(),
                     score,
-                })
+                }
             })
             .collect::<Vec<_>>();
         matches.sort_by(|a, b| {
@@ -400,8 +399,7 @@ impl SkillCatalog {
         matches
     }
 
-    /// Restricts automatic body loading to explicit names or high-confidence
-    /// similarity. Weaker candidates remain visible in the metadata catalog.
+    /// Compatibility API: explicit names only. Similarity never activates a skill.
     #[must_use]
     pub fn auto_route_candidates<'a>(
         &self,
@@ -410,7 +408,7 @@ impl SkillCatalog {
     ) -> Vec<SkillMatch> {
         self.route_candidates(input, available_tools)
             .into_iter()
-            .filter(|matched| matched.score >= AUTO_ROUTE_THRESHOLD)
+            .filter(|matched| mentions_name(&lexical::normalize(input), &matched.name))
             .collect()
     }
 

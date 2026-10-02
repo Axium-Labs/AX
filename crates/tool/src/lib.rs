@@ -1,6 +1,9 @@
 //! Tool contracts, registry, and lightweight built-in tools.
 
 mod filesystem;
+mod sandboxed;
+pub use sandbox::SandboxMode;
+pub use sandboxed::{SandboxedTool, sandbox_worker};
 mod workspace;
 pub use workspace::{RunContext, WorkspaceTool};
 mod result;
@@ -21,7 +24,10 @@ mod resources;
 pub use resources::{Resource, ResourceAccess};
 mod shell;
 pub mod telemetry;
-pub use permission::{Capability, PermissionDecision, PermissionStore, ToolPermission};
+pub use permission::{
+    Capability, PermissionDecision, PermissionProfile, PermissionRule, PermissionStore,
+    ProfileDecision, RuleMatcher, SandboxBoundary, ToolPermission, resolve_profiles,
+};
 
 use std::{collections::HashMap, sync::Arc};
 
@@ -40,6 +46,8 @@ pub enum SafetyLevel {
 
 #[derive(Debug, Error)]
 pub enum ToolError {
+    #[error(transparent)]
+    SandboxViolation(#[from] sandbox::SandboxViolation),
     #[error("global execution blocker: {0}")]
     GlobalBlocked(String),
     #[error("unknown tool: {0}")]
@@ -54,7 +62,7 @@ pub enum ToolError {
     PermissionDenied(String),
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub enum ToolOutput {
     Text(String),
     Image {
@@ -70,8 +78,29 @@ impl From<std::io::Error> for ToolError {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InheritanceClass {
+    Tools,
+    Memory,
+    Skills,
+    Mcp,
+}
+
 #[async_trait]
 pub trait Tool: Send + Sync {
+    fn inheritance_class(&self) -> InheritanceClass {
+        InheritanceClass::Tools
+    }
+    fn fork_skills(&self, _selected: Option<&[String]>) -> Option<Arc<dyn Tool>> {
+        None
+    }
+    fn fork_memory(&self, _input: &str, _readonly: bool) -> Option<Arc<dyn Tool>> {
+        None
+    }
+    /// Explicit runtime placement; unbound extensions cannot run in confinement.
+    fn execution_boundary(&self) -> ExecutionBoundary {
+        ExecutionBoundary::Unbound
+    }
     /// Opt in only when all state is rebound to the child's scope. Unbound tools
     /// (including parent MCP processes) are not silently shared across children.
     fn fork_for_run(&self, _context: &RunContext) -> Option<Arc<dyn Tool>> {
@@ -103,14 +132,47 @@ pub trait Tool: Send + Sync {
         vec![ResourceAccess::exclusive()]
     }
     async fn execute(&self, input: Value) -> Result<String, ToolError>;
+    /// Network policy must reach the transport. Unknown transports fail closed.
+    async fn execute_output_constrained(
+        &self,
+        input: Value,
+        profiles: &[PermissionProfile],
+    ) -> Result<ToolOutput, ToolError> {
+        if self.capability(&input) == Capability::Network
+            && profiles.iter().any(PermissionProfile::has_network_rules)
+        {
+            return Err(ToolError::PermissionDenied(
+                "tool transport cannot enforce domain rules".into(),
+            ));
+        }
+        self.execute_output(input).await
+    }
     async fn execute_output(&self, input: Value) -> Result<ToolOutput, ToolError> {
         self.execute(input).await.map(ToolOutput::Text)
     }
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExecutionBoundary {
+    Unbound,
+    WorkspaceWorker,
+    Sandboxed,
+    Remote,
+    RuntimeOwned,
+}
+
+#[derive(Clone)]
 pub struct ToolRegistry {
     tools: HashMap<String, Arc<dyn Tool>>,
+    mode: sandbox::SandboxMode,
+}
+impl Default for ToolRegistry {
+    fn default() -> Self {
+        Self {
+            tools: HashMap::new(),
+            mode: sandbox::SandboxManager::configured_mode().unwrap_or_default(),
+        }
+    }
 }
 
 impl ToolRegistry {
@@ -118,14 +180,52 @@ impl ToolRegistry {
     pub fn new() -> Self {
         Self::default()
     }
+    #[must_use]
+    pub fn with_mode(mode: sandbox::SandboxMode) -> Self {
+        Self {
+            tools: HashMap::new(),
+            mode,
+        }
+    }
+
+    /// Applies the registry's execution-boundary policy to one tool. This is the
+    /// single place that decides what a declared boundary means:
+    ///
+    /// - `WorkspaceWorker` is wrapped in the sandbox executor for `root`;
+    /// - `Unbound` is replaced by a denying binding, because an extension with
+    ///   no confinement binding may not touch the host;
+    /// - `Sandboxed` already carries its own manager (for example a stdio MCP
+    ///   transport) and is passed through unchanged;
+    /// - `Remote` and `RuntimeOwned` never reach local OS effects.
+    ///
+    /// Confined wrapping only happens when the registry's mode requires it.
+    fn bind(&self, tool: Arc<dyn Tool>, root: &std::path::Path) -> Arc<dyn Tool> {
+        let confined = self.mode != sandbox::SandboxMode::Off;
+        match tool.execution_boundary() {
+            ExecutionBoundary::WorkspaceWorker if confined => {
+                Arc::new(SandboxedTool::new(tool, root.to_path_buf()))
+            }
+            ExecutionBoundary::Unbound if confined => Arc::new(sandboxed::UnboundTool(tool)),
+            _ => tool,
+        }
+    }
+
+    pub fn register_arc(&mut self, tool: Arc<dyn Tool>) {
+        self.tools.insert(tool.name().to_owned(), tool);
+    }
 
     pub fn register<T: Tool + 'static>(&mut self, tool: T) {
-        self.tools.insert(tool.name().to_owned(), Arc::new(tool));
+        let name = tool.name().to_owned();
+        let root = std::env::current_dir().unwrap_or_default();
+        let tool = self.bind(Arc::new(tool), &root);
+        self.tools.insert(name, tool);
     }
 
     #[must_use]
     pub fn get(&self, name: &str) -> Option<Arc<dyn Tool>> {
-        self.tools.get(name).cloned()
+        self.tools
+            .get(name)
+            .map(|tool| self.bind(tool.clone(), &std::env::current_dir().unwrap_or_default()))
     }
 
     #[must_use]
@@ -134,9 +234,15 @@ impl ToolRegistry {
             .tools
             .values()
             .filter_map(|tool| tool.fork_for_run(context))
-            .map(|tool| (tool.name().to_owned(), tool))
+            .map(|tool| {
+                let tool = self.bind(tool, &context.cwd);
+                (tool.name().to_owned(), tool)
+            })
             .collect();
-        Self { tools }
+        Self {
+            tools,
+            mode: self.mode,
+        }
     }
 
     pub fn remove(&mut self, name: &str) {

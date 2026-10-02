@@ -183,7 +183,7 @@ fn recorder(responses: Vec<ModelResponse>) -> Arc<Recorder> {
     })
 }
 fn kernel(provider: Arc<Recorder>, root: &std::path::Path) -> AgentKernel {
-    let mut tools = ToolRegistry::new();
+    let mut tools = ToolRegistry::with_mode(tool::SandboxMode::Off);
     tools.register(tool::FilesystemTool);
     AgentKernel::new(provider, tools, Arc::new(AllowAll)).with_execution_scope(root.to_owned())
 }
@@ -250,7 +250,7 @@ async fn loop_corrects_eight_ineffective_calls_and_history_survives_compression_
     )]);
     let mut restored = super::AgentKernel::new(
         history_provider.clone(),
-        ToolRegistry::new(),
+        ToolRegistry::with_mode(tool::SandboxMode::Off),
         Arc::new(AllowAll),
     )
     .with_messages(vec![last]);

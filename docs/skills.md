@@ -66,39 +66,27 @@ into `<project>/.ax/skills`) to install it by hand.
 
 ## Routing
 
-Routing is language-independent lexical similarity — there is no trigger-word
-list, no stopword list and no stemming:
+Skill activation is model-directed and policy-constrained. AX indexes compact
+metadata and precomputes Unicode lexical features once. `route_candidates()`
+ranks eligible names/descriptions using their strongest similarity signal;
+there are no activation weights or confidence thresholds. Every eligible skill
+can reach the bounded compact catalog, including lexically weak matches.
+The main model decides relevance and explicitly calls `invoke_skill(name)`.
+No planner call is added. The instruction body is read and validated only
+inside that tool call, and returned with its skill root. Resources remain lazy.
 
-1. Every text (each skill's `name`/`description` at index time, the task text
-   once per turn) is NFKC-normalized, case-folded and reduced to word-like
-   tokens plus Unicode character 2/3/4-grams.
-2. Similarity is the weighted overlap coefficient over those four families,
-   normalized to `0.0..=1.0`. Normalizing by the smaller side keeps a short
-   Chinese or Japanese request comparable with a long English description,
-   which a symmetric measure such as Sørensen–Dice cannot do.
-3. A skill scores `0.4 × name similarity + 0.6 × description similarity`.
-   Explicitly naming a skill always scores `1.0`. No language is detected or
-   special-cased, so Chinese, Japanese, English and mixed input share one code
-   path.
-4. Confidence `>= 0.40` loads the skill body automatically; `>= 0.12` reports
-   it as a ranked candidate; below that nothing is reported.
+Enabled state, Global/Project override/mask resolution, package paths,
+dependencies, and `allow_implicit_invocation: false` are deterministic admission
+filters. A manual-only skill is eligible only when the current user input
+explicitly names it. Selection cannot expand this eligible set. `allowed-tools`
+is metadata and never grants runtime permissions. The legacy
+`auto_route_candidates()` API now returns explicit-name candidates only and
+is not used to load bodies in the CLI. `route()` returns a ranking hint.
 
-Only an explicit skill name or a high-confidence match triggers automatic body
-loading. Otherwise AX puts a compact, bounded metadata catalog in model
-context so the agent can choose by meaning and read the listed instruction
-file through the ordinary permission-controlled filesystem tool. The catalog
-is omitted when automatic routing has already selected a skill. Because
-routing is lexical, write the skill description in the words — and the
-language — your users will actually type: a description that shares no
-vocabulary with a request can only reach the model through that catalog. An
-optional `metadata.ax.required-tools` dependency is checked against registered
-tools, but permission is still decided for each actual call. Fast-ranked skills
-are loaded on activation and injected as tagged system context (up to three per
-turn); the model can read another listed skill on demand through the filesystem
-tool. The catalog and injected instructions share the `ContextBudget` skill
-reserve. Injected instructions include the skill root so relative resource
-paths are available through ordinary
-tools. `scripts/`, `references/`, and `assets/` are never preloaded.
+Catalogs, loaded instructions, memory, summaries, history and tool results
+compete in the same elastic context pool. A large package does not reserve a
+fixed share of the window. Actual successful invocations, rather than routing
+predictions, feed Evolution usage telemetry.
 
 ## Legacy compatibility
 

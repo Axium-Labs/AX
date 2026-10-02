@@ -36,6 +36,8 @@ crates/
 ├── memory/              # SQLite + JSONL storage, scoped facts, resume
 ├── mcp/                 # MCP client, transports, gateway
 ├── model/               # provider abstraction, auth, catalogs
+├── sandbox/             # workspace confinement policies and OS execution backends
+├── scoped/              # shared capability registry and scope resolution
 ├── skill/               # skill metadata indexing and routing
 └── tool/                # Tool trait, built-ins, permissions, telemetry
 scripts/                 # install.sh / install.ps1

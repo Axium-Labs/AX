@@ -2,7 +2,9 @@
 
 mod budget;
 pub mod child;
+pub mod child_policy;
 pub use child::{ChildCheckpoint, ChildHost, ChildOutcome, ChildRun, PreparedChild};
+pub use child_policy::ChildPolicy;
 mod context;
 pub mod execution;
 mod scheduler;
@@ -10,7 +12,7 @@ pub mod subagent;
 pub use execution::{ExecutionState, NoProgressDetector};
 pub use subagent::{AgentTemplate, SpawnOptions, SubagentConfig, SubagentManager, SubagentResult};
 pub mod task_queue;
-pub use budget::{ContextBudget, ExecutionBudget};
+pub use budget::{ContextBudget, ContextDemand, ContextPoolPolicy, ExecutionBudget};
 pub use context::select_context;
 pub use task_queue::{GoalTurn, QueueState};
 
@@ -84,19 +86,6 @@ pub enum AgentEvent {
 }
 
 #[derive(Clone, Debug)]
-pub struct CompressionPolicy {
-    pub threshold_percent: u8,
-}
-
-impl Default for CompressionPolicy {
-    fn default() -> Self {
-        Self {
-            threshold_percent: ContextBudget::SOFT_PRESSURE_PERCENT,
-        }
-    }
-}
-
-#[derive(Clone, Debug)]
 pub struct CompressionResult {
     pub summary: String,
     pub removed_messages: usize,
@@ -136,6 +125,16 @@ pub enum AgentError {
 #[async_trait]
 pub trait ApprovalPolicy: Send + Sync {
     async fn approve(&self, tool: &str, input: &Value, permission: ToolPermission) -> bool;
+    /// Explicit Ask rules must not be bypassed by capability/session grants.
+    fn capability_decision(
+        &self,
+        _capability: tool::Capability,
+    ) -> Option<tool::PermissionDecision> {
+        None
+    }
+    async fn ask(&self, _tool: &str, _input: &Value, _permission: ToolPermission) -> bool {
+        false
+    }
 }
 
 pub struct DenyDangerous;
@@ -158,11 +157,14 @@ impl ApprovalPolicy for AllowAll {
 
 pub struct AgentKernel {
     provider: Arc<dyn ModelProvider>,
+    retry_policy: model::RetryPolicy,
+    permission_profiles: Vec<tool::PermissionProfile>,
+    child_models: std::collections::HashMap<String, Arc<dyn ModelProvider>>,
+    context_pool: ContextPoolPolicy,
     tools: ToolRegistry,
     approval: Arc<dyn ApprovalPolicy>,
     messages: Vec<Message>,
     budget: ExecutionBudget,
-    compression: CompressionPolicy,
     raw_turn_messages: Vec<Message>,
     compression_dirty: bool,
     tool_concurrency: usize,
@@ -194,11 +196,14 @@ impl AgentKernel {
         tools.register(result_reader.clone());
         Self {
             provider,
+            retry_policy: model::RetryPolicy::default(),
+            permission_profiles: vec![],
+            child_models: std::collections::HashMap::new(),
+            context_pool: ContextPoolPolicy::default(),
             tools,
             approval,
             messages: Vec::new(),
             budget: ExecutionBudget::default(),
-            compression: CompressionPolicy::default(),
             raw_turn_messages: Vec::new(),
             compression_dirty: false,
             tool_concurrency: 4,
@@ -227,6 +232,22 @@ impl AgentKernel {
     pub fn with_execution_budget(mut self, budget: ExecutionBudget) -> Self {
         self.budget = budget;
         self
+    }
+
+    pub fn configure_context_pool(&mut self, policy: ContextPoolPolicy) {
+        self.context_pool = policy;
+    }
+
+    pub fn register_child_model(&mut self, name: String, provider: Arc<dyn ModelProvider>) {
+        self.child_models.insert(name, provider);
+    }
+
+    pub fn constrain_permissions(&mut self, profile: tool::PermissionProfile) {
+        self.permission_profiles.push(profile);
+    }
+
+    pub fn configure_retry(&mut self, policy: model::RetryPolicy) {
+        self.retry_policy = policy;
     }
 
     #[must_use]
@@ -321,11 +342,14 @@ impl AgentKernel {
         tools.register(result_reader.clone());
         let mut worker = Self {
             provider: Arc::clone(&self.provider),
+            retry_policy: self.retry_policy,
+            permission_profiles: self.permission_profiles.clone(),
+            child_models: self.child_models.clone(),
+            context_pool: self.context_pool,
             tools,
             approval: Arc::clone(&self.approval),
             messages: Vec::new(),
             budget: self.budget,
-            compression: self.compression.clone(),
             tool_concurrency: self.tool_concurrency,
             raw_turn_messages: Vec::new(),
             compression_dirty: false,
@@ -348,23 +372,36 @@ impl AgentKernel {
     }
 
     #[must_use]
-    pub fn with_compression_policy(mut self, policy: CompressionPolicy) -> Self {
-        self.compression = policy;
-        self
-    }
-
-    #[must_use]
     pub fn estimated_context_tokens(&self) -> usize {
         estimate_tokens(&self.messages)
     }
 
     #[must_use]
     pub fn context_budget(&self) -> ContextBudget {
-        ContextBudget::new(
+        let mut budget = ContextBudget::new(
             self.provider.context_window(),
             self.provider.max_output_tokens(),
             estimate_tool_schema_tokens(&self.tools) + task_queue::schema_tokens(),
-        )
+        );
+        budget.pool = self.context_pool;
+        budget
+    }
+
+    /// Context this kernel is about to add on top of the current estimate: the
+    /// queue summary context is appended after the pressure check, and one
+    /// bounded tool-result round may follow the request. The projection is the
+    /// real pending addition, capped by the same policy value used elsewhere,
+    /// rather than a private constant.
+    #[must_use]
+    pub fn pending_request_growth(&self, budget: ContextBudget) -> usize {
+        let summary = self
+            .task_queue
+            .as_ref()
+            .filter(|queue| queue.state == QueueState::Summarizing)
+            .map_or(0, |queue| estimate_tokens(&[queue.summary_context()]));
+        summary
+            .min(budget.pool.tool_result_maximum)
+            .saturating_add(budget.pool.next_request_reserve)
     }
 
     /// Raw messages produced by the last turn, independent of effective-context cleanup.
@@ -420,11 +457,13 @@ impl AgentKernel {
         let before = self.estimated_context_tokens();
         let original = self.messages.clone();
         let budget = self.context_budget();
-        if !force && before < budget.compact_threshold(self.compression.threshold_percent) {
+        if !force && !budget.needs_compaction(before, self.pending_request_growth(budget)) {
             return Ok(None);
         }
         let target = if force {
-            budget.pressure_target() / 2
+            budget
+                .pressure_target()
+                .saturating_sub(budget.pool.next_request_reserve)
         } else {
             budget.pressure_target()
         };
@@ -451,7 +490,7 @@ impl AgentKernel {
                 break;
             }
             let old = self.messages[i].content.clone();
-            if let Some(short) = compact_tool_output(&old) {
+            if let Some(short) = compact_tool_output(&old, budget.compacted_tool_result_chars()) {
                 self.messages[i].content = short;
                 reduced += 1;
             }
@@ -853,7 +892,7 @@ impl AgentKernel {
         if self.child_run.is_none() {
             tool_specs.push(task_queue::spec());
         }
-        let mut model_failures = 0;
+
         let mut calls_used = 0;
         let mut steps_used = 0usize;
         loop {
@@ -871,7 +910,8 @@ impl AgentKernel {
             steps_used = steps_used.saturating_add(1);
             if self.child_host.is_some()
                 && self.task_queue.as_ref().is_some_and(|q| {
-                    q.state == QueueState::Active
+                    q.delegate
+                        && q.state == QueueState::Active
                         && q.tasks
                             .iter()
                             .any(|t| t.status == task_queue::TaskStatus::Running)
@@ -918,12 +958,12 @@ impl AgentKernel {
                 .task_queue
                 .as_ref()
                 .is_some_and(|q| q.active() && !q.tasks.is_empty());
-            let mut on_delta = |delta: String| {
+            let on_delta = |delta: String| {
                 if !queue_active {
                     (emit.lock().unwrap())(AgentEvent::ContentDelta { delta });
                 }
             };
-            let mut on_thinking = |delta: String| {
+            let on_thinking = |delta: String| {
                 (emit.lock().unwrap())(AgentEvent::ThinkingDelta { delta });
             };
             let model_timer = tool::telemetry::Timer::new("model.request");
@@ -940,47 +980,76 @@ impl AgentKernel {
                 && self
                     .task_queue
                     .as_ref()
-                    .is_some_and(|q| q.state == QueueState::Summarizing);
-            let response = self
-                .provider
-                .complete_stream(
-                    ModelRequest {
-                        messages: request_messages,
-                        tools: if child_summary {
-                            vec![]
-                        } else {
-                            tool_specs.clone()
-                        },
-                    },
-                    &mut on_delta,
-                    &mut on_thinking,
-                )
-                .await;
-            drop(model_timer);
-            let response = match response {
-                Ok(response) => {
-                    model_failures = 0;
-                    response
-                }
-                Err(error)
-                    if (queue_active || self.child_run.is_some())
-                        && !matches!(
-                            &error,
-                            ModelError::Configuration(_)
-                                | ModelError::HttpStatus {
-                                    status: 401 | 403,
-                                    ..
-                                }
-                        ) =>
-                {
-                    model_failures += 1;
-                    if model_failures < 2 {
-                        continue;
-                    }
-                    return Err(error.into());
-                }
-                Err(error) => return Err(error.into()),
+                    .is_some_and(|q| q.delegate && q.state == QueueState::Summarizing);
+            let request = ModelRequest {
+                messages: request_messages,
+                tools: if child_summary {
+                    vec![]
+                } else {
+                    tool_specs.clone()
+                },
             };
+            let started = std::time::Instant::now();
+            let mut attempts = 0;
+            let response = loop {
+                attempts += 1;
+                let emitted = std::sync::atomic::AtomicBool::new(false);
+                let response = {
+                    let mut delta = |text: String| {
+                        if !text.is_empty() {
+                            emitted.store(true, std::sync::atomic::Ordering::Relaxed);
+                        }
+                        on_delta(text);
+                    };
+                    let mut thinking = |text: String| {
+                        if !text.is_empty() {
+                            emitted.store(true, std::sync::atomic::Ordering::Relaxed);
+                        }
+                        on_thinking(text);
+                    };
+                    let request =
+                        self.provider
+                            .complete_stream(request.clone(), &mut delta, &mut thinking);
+                    if attempts == 1 {
+                        request.await
+                    } else {
+                        let remaining =
+                            std::time::Duration::from_millis(self.retry_policy.time_budget_ms)
+                                .saturating_sub(started.elapsed());
+                        tokio::time::timeout(remaining, request)
+                            .await
+                            .unwrap_or_else(|_| {
+                                Err(ModelError::Io(std::io::Error::new(
+                                    std::io::ErrorKind::TimedOut,
+                                    "provider retry time budget exhausted",
+                                )))
+                            })
+                    }
+                };
+                match response {
+                    Ok(response) => break response,
+                    Err(error) => {
+                        // Replaying a partially streamed response would duplicate output.
+                        if emitted.load(std::sync::atomic::Ordering::Relaxed) {
+                            return Err(error.into());
+                        }
+                        let entropy = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .subsec_nanos();
+                        let Some(delay) = self.retry_policy.delay(
+                            &error,
+                            attempts,
+                            started.elapsed(),
+                            u64::from(entropy),
+                        ) else {
+                            return Err(error.into());
+                        };
+                        tokio::time::sleep(delay).await;
+                    }
+                }
+            };
+            drop(model_timer);
             let content = response.content;
             let tool_calls = response.tool_calls;
             if child_summary && !tool_calls.is_empty() {
@@ -1115,6 +1184,7 @@ impl AgentKernel {
                 scheduler::run(
                     jobs,
                     Arc::clone(&self.approval),
+                    self.permission_profiles.clone(),
                     self.tool_concurrency,
                     self.budget.tool_timeout_secs,
                     &emit,
@@ -1228,32 +1298,36 @@ impl AgentKernel {
                     return Err(AgentError::GoalMismatch("new goal ID must be nonempty and fresh; use explicit resume for the saved goal".into()));
                 }
                 let had_queue = self.task_queue.is_some();
+                // A durable empty head prevents restoring an archived queue when
+                // the replacement goal is a plain single task.
+                let next = if had_queue {
+                    let mut queue = task_queue::TaskQueue::new(input.into(), vec![]);
+                    queue.goal_id.clone_from(&goal_id);
+                    queue.parent_goal_id.clone_from(&self.parent_goal_id);
+                    Some(queue)
+                } else {
+                    None
+                };
                 if let Some(previous) = &mut self.task_queue {
                     previous.stop(QueueState::Superseded, format!("superseded by {goal_id}"));
-                    self.raw_turn_messages.push(previous.snapshot());
                     self.raw_turn_messages.push(Message::system(format!(
                         "{}{}",
                         task_queue::ARCHIVE_PREFIX,
                         serde_json::to_string(&previous).unwrap()
                     )));
-                    checkpoint(&self.raw_turn_messages)?;
-                }
-                let mut next = task_queue::TaskQueue::from_input(input);
-                // A durable empty head prevents restoring an archived queue when
-                // the replacement goal is a plain single task.
-                if next.is_none() && had_queue {
-                    next = Some(task_queue::TaskQueue::new(input.into(), vec![]));
-                }
-                if let Some(queue) = &mut next {
-                    queue.goal_id.clone_from(&goal_id);
-                    queue.parent_goal_id.clone_from(&self.parent_goal_id);
                 }
                 self.goal_id = Some(goal_id);
                 self.task_queue = next;
                 self.set_context(task_queue::PROGRESS_PREFIX, None);
                 self.messages
                     .retain(|m| !m.content.starts_with("[ax-recovery]"));
-                self.checkpoint_queue(checkpoint)?;
+                // Supersede, archive and replacement head reach durable storage in
+                // one checkpoint, so an interrupted turn cannot restore a
+                // half-applied supersede. Raw history is still never truncated.
+                if let Some(queue) = &self.task_queue {
+                    self.raw_turn_messages.push(queue.snapshot());
+                }
+                checkpoint(&self.raw_turn_messages)?;
                 Ok(None)
             }
             GoalTurn::Resume { goal_id } | GoalTurn::Cancel { goal_id } => {
@@ -1485,14 +1559,20 @@ fn recent_raw_start(messages: &[Message], budget: usize) -> usize {
     start
 }
 
-fn compact_tool_output(output: &str) -> Option<String> {
-    if estimate_text_tokens(output) < 256 {
+/// Compact one oversized tool result into a bounded diagnostic slice of itself:
+/// a few leading lines plus lines that look like diagnostics. The allowance is
+/// supplied by the caller's `ContextBudget`, so this tier owns no private
+/// character count.
+fn compact_tool_output(output: &str, allowance_chars: usize) -> Option<String> {
+    let per_line = (allowance_chars / 8).max(1);
+    let retained_total = (allowance_chars * 3 / 4).max(per_line);
+    if output.len() <= retained_total {
         return None;
     }
     let lines = output.lines().collect::<Vec<_>>();
     let mut kept: Vec<String> = Vec::new();
     for line in lines.iter().take(2) {
-        kept.push(line.chars().take(240).collect());
+        kept.push(line.chars().take(per_line).collect());
     }
     for line in &lines {
         let lower = line.to_ascii_lowercase();
@@ -1512,9 +1592,9 @@ fn compact_tool_output(output: &str) -> Option<String> {
             || (line.contains(".rs:") && line.chars().any(|c| c.is_ascii_digit())))
             && !kept.iter().any(|saved| saved == line)
         {
-            kept.push(line.chars().take(240).collect());
+            kept.push(line.chars().take(per_line).collect());
         }
-        if kept.iter().map(String::len).sum::<usize>() > 1500 {
+        if kept.iter().map(String::len).sum::<usize>() > retained_total {
             break;
         }
     }
@@ -1633,6 +1713,45 @@ fn fit_summary(entries: &[StateEntry], budget: usize) -> Option<String> {
 /// Selects request context without changing the effective in-memory transcript.
 /// Old turns are removed first; optional retrieved context follows only when
 /// it fits the same budget used to decide whether to compact.
+/// Which pool a message joins when a request is assembled. Classification is
+/// purely by the runtime's own context marker, never by tool or model output.
+enum RequestPool {
+    /// Runtime bookkeeping that must never be re-sent.
+    Drop,
+    /// Transient progress/recovery state, always kept first.
+    Progress,
+    /// Retrieved memory, optional when space is tight.
+    Memory,
+    /// Eligible skill metadata.
+    Skill,
+    /// Conversation history.
+    History,
+}
+
+fn request_pool(message: &Message) -> RequestPool {
+    if message.role != model::Role::System {
+        return RequestPool::History;
+    }
+    let content = message.content.as_str();
+    if content.starts_with("[ax-changes]\n") || content.starts_with(execution::STATE_PREFIX) {
+        return RequestPool::Drop;
+    }
+    if content.starts_with(execution::CONTEXT_PREFIX)
+        || content.starts_with(task_queue::PROGRESS_PREFIX)
+        || content.starts_with("[ax-task-summary]")
+        || content.starts_with("[ax-recovery]")
+    {
+        return RequestPool::Progress;
+    }
+    if content.starts_with("[retrieved-memory]") {
+        return RequestPool::Memory;
+    }
+    if content.starts_with("[ax-skill:") {
+        return RequestPool::Skill;
+    }
+    RequestPool::History
+}
+
 fn request_context(
     messages: &[Message],
     budget: ContextBudget,
@@ -1642,36 +1761,20 @@ fn request_context(
     let mut skills = Vec::new();
     let mut progress = Vec::new();
     for message in messages {
-        if message.role == model::Role::System && message.content.starts_with("[ax-changes]\n") {
-            continue;
-        }
-        if message.role == model::Role::System
-            && message.content.starts_with(execution::STATE_PREFIX)
-        {
-            continue;
-        }
-        if message.role == model::Role::System
-            && (message.content.starts_with(execution::CONTEXT_PREFIX)
-                || message.content.starts_with(task_queue::PROGRESS_PREFIX)
-                || message.content.starts_with("[ax-task-summary]")
-                || message.content.starts_with("[ax-recovery]"))
-        {
-            progress.push(message.clone());
-            continue;
-        }
-        let mut projected = message.clone();
-        if message.role == model::Role::Tool
-            && let Ok(result) = serde_json::from_str::<tool::ToolResult>(&message.content)
-        {
-            projected.content = result.model_view(budget.tool_result_chars());
-        }
-        if message.role == model::Role::System && message.content.starts_with("[retrieved-memory]")
-        {
-            memory.push(message.clone());
-        } else if message.role == model::Role::System && message.content.starts_with("[ax-skill:") {
-            skills.push(message.clone());
-        } else {
-            history.push(projected);
+        match request_pool(message) {
+            RequestPool::Drop => {}
+            RequestPool::Progress => progress.push(message.clone()),
+            RequestPool::Memory => memory.push(message.clone()),
+            RequestPool::Skill => skills.push(message.clone()),
+            RequestPool::History => {
+                let mut projected = message.clone();
+                if message.role == model::Role::Tool
+                    && let Ok(result) = serde_json::from_str::<tool::ToolResult>(&message.content)
+                {
+                    projected.content = result.model_view(budget.tool_result_chars());
+                }
+                history.push(projected);
+            }
         }
     }
 
@@ -1685,16 +1788,36 @@ fn request_context(
                 .count()
         });
     let progress_tokens = estimate_tokens(&progress);
-    if progress_tokens >= budget.history_budget() {
-        return Err(AgentError::Budget(
-            "task progress exceeds input budget".into(),
-        ));
-    }
-    history = select_context(
-        &history,
-        budget.history_budget().saturating_sub(progress_tokens),
-        budget.session_summary_budget(),
-    );
+    let latest_start = history
+        .iter()
+        .rposition(|m| m.role == model::Role::User)
+        .unwrap_or(history.len());
+    let latest_tokens = estimate_tokens(&history[latest_start..]);
+    let allocations = budget
+        .allocate(&[
+            ContextDemand {
+                demand: progress_tokens,
+                minimum: progress_tokens,
+                maximum: budget.usable(),
+            },
+            ContextDemand {
+                demand: estimate_tokens(&skills),
+                minimum: 0,
+                maximum: budget.usable(),
+            },
+            ContextDemand {
+                demand: estimate_tokens(&memory),
+                minimum: 0,
+                maximum: budget.usable(),
+            },
+            ContextDemand {
+                demand: estimate_tokens(&history),
+                minimum: latest_tokens,
+                maximum: budget.usable(),
+            },
+        ])
+        .map_err(|e| AgentError::Budget(e.into()))?;
+    history = select_context(&history, allocations[3], allocations[3]);
     if history
         .iter()
         .filter(|message| message.role != model::Role::System)
@@ -1799,9 +1922,18 @@ pub struct AgentTaskResult {
 
 #[derive(Clone, Debug)]
 pub enum MultiAgentEvent {
-    Started { id: String },
-    Runtime { id: String, event: AgentEvent },
-    Finished { id: String },
+    Started {
+        id: String,
+    },
+    /// Boxed: `AgentEvent` is much larger than the lifecycle variants, and this
+    /// channel carries one event per streaming delta.
+    Runtime {
+        id: String,
+        event: Box<AgentEvent>,
+    },
+    Finished {
+        id: String,
+    },
 }
 
 pub struct AgentSupervisor {
@@ -1852,7 +1984,7 @@ impl AgentSupervisor {
                             if let Some(sender) = &sender {
                                 let _ = sender.send(MultiAgentEvent::Runtime {
                                     id: event_id.clone(),
-                                    event,
+                                    event: Box::new(event),
                                 });
                             }
                         })
@@ -1977,7 +2109,7 @@ mod tests {
                 },
             ])),
         };
-        let mut tools = ToolRegistry::new();
+        let mut tools = ToolRegistry::with_mode(tool::SandboxMode::Off);
         tools.register(tool::PatchTool);
         tools.register(tool::FilesystemTool);
         let mut kernel = AgentKernel::new(Arc::new(provider), tools, Arc::new(AllowAll))
@@ -2039,7 +2171,7 @@ mod tests {
                 finish_reason: None,
             }])),
         };
-        let mut registry = ToolRegistry::new();
+        let mut registry = ToolRegistry::with_mode(tool::SandboxMode::Off);
         registry.register(EchoTool);
         let mut kernel = AgentKernel::new(Arc::new(provider), registry, Arc::new(DenyDangerous));
         let mut saved = Vec::new();
@@ -2094,7 +2226,7 @@ mod tests {
                 },
             ])),
         };
-        let mut registry = ToolRegistry::new();
+        let mut registry = ToolRegistry::with_mode(tool::SandboxMode::Off);
         registry.register(EchoTool);
         let mut kernel = AgentKernel::new(Arc::new(provider), registry, Arc::new(DenyDangerous));
         let mut lengths = Vec::new();
@@ -2109,7 +2241,8 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(lengths, vec![2, 3, 5, 6, 6]);
+        // Goal admission checkpoints the empty history before the first input.
+        assert_eq!(lengths, vec![0, 2, 3, 5, 6, 6]);
     }
 
     struct EchoProvider;
@@ -2121,7 +2254,7 @@ mod tests {
         }
 
         #[allow(clippy::unnecessary_literal_bound)]
-        fn model_id(&self) -> &str {
+        fn model_id(&self) -> &'static str {
             "echo-model"
         }
 
@@ -2149,7 +2282,7 @@ mod tests {
     #[async_trait]
     #[allow(clippy::unnecessary_literal_bound)]
     impl Tool for EchoTool {
-        fn name(&self) -> &str {
+        fn name(&self) -> &'static str {
             "echo"
         }
 
@@ -2199,7 +2332,7 @@ mod tests {
                 },
             ])),
         };
-        let mut registry = ToolRegistry::new();
+        let mut registry = ToolRegistry::with_mode(tool::SandboxMode::Off);
         registry.register(EchoTool);
         let mut kernel = AgentKernel::new(Arc::new(provider), registry, Arc::new(DenyDangerous));
 
@@ -2222,6 +2355,8 @@ mod tests {
 
     #[tokio::test]
     async fn compresses_old_context_without_truncating_recent_messages() {
+        // Trigger comes from ContextBudget pressure alone; no configured
+        // percentage participates in the decision.
         let provider = ScriptedProvider {
             model: "scripted".to_owned(),
             responses: Mutex::new(VecDeque::from([ModelResponse {
@@ -2236,14 +2371,15 @@ mod tests {
             .collect();
         let mut kernel = AgentKernel::new(
             Arc::new(provider),
-            ToolRegistry::new(),
+            ToolRegistry::with_mode(tool::SandboxMode::Off),
             Arc::new(DenyDangerous),
         )
-        .with_messages(messages)
-        .with_compression_policy(CompressionPolicy {
-            threshold_percent: 1,
-        });
+        .with_messages(messages);
 
+        kernel.configure_context_pool(ContextPoolPolicy {
+            recent_raw_maximum: 1000,
+            ..Default::default()
+        });
         let result = kernel
             .compress_if_needed(|_| {})
             .await
@@ -2325,7 +2461,7 @@ mod tests {
             .collect();
         let mut kernel = AgentKernel::new(
             Arc::new(provider),
-            ToolRegistry::new(),
+            ToolRegistry::with_mode(tool::SandboxMode::Off),
             Arc::new(DenyDangerous),
         )
         .with_messages(messages);
@@ -2359,7 +2495,7 @@ mod tests {
             "recording"
         }
         #[allow(clippy::unnecessary_literal_bound)]
-        fn model_id(&self) -> &str {
+        fn model_id(&self) -> &'static str {
             "recording"
         }
         fn context_window(&self) -> usize {
@@ -2398,7 +2534,7 @@ mod tests {
     #[async_trait]
     impl Tool for LargeTestTool {
         #[allow(clippy::unnecessary_literal_bound)]
-        fn name(&self) -> &str {
+        fn name(&self) -> &'static str {
             "test"
         }
         #[allow(clippy::unnecessary_literal_bound)]
@@ -2462,7 +2598,7 @@ mod tests {
             ])),
             request_tokens: Mutex::new(vec![]),
         });
-        let mut registry = ToolRegistry::new();
+        let mut registry = ToolRegistry::with_mode(tool::SandboxMode::Off);
         registry.register(LargeTestTool);
         let mut kernel = AgentKernel::new(provider.clone(), registry, Arc::new(DenyDangerous));
         let mut events = Vec::new();
@@ -2483,7 +2619,7 @@ mod tests {
             kernel
                 .messages()
                 .iter()
-                .any(|message| message.content.contains("\"truncated\":true"))
+                .any(|message| message.role == model::Role::Tool && message.content.len() < 4000)
         );
         assert!(
             kernel
@@ -2502,7 +2638,7 @@ mod tests {
         ])) };
         let mut kernel = AgentKernel::new(
             Arc::new(provider),
-            ToolRegistry::new(),
+            ToolRegistry::with_mode(tool::SandboxMode::Off),
             Arc::new(DenyDangerous),
         )
         .with_messages(vec![
@@ -2543,15 +2679,23 @@ mod tests {
                 arguments: "{\"path\":\"src/lib.rs\"}".into(),
             },
         };
-        let mut kernel = AgentKernel::new(provider, ToolRegistry::new(), Arc::new(DenyDangerous))
-            .with_messages(vec![
-                Message::user("inspect file"),
-                Message::assistant("", vec![read("first")]),
-                Message::tool("first", "old file body \n".repeat(500)),
-                Message::assistant("", vec![read("second")]),
-                Message::tool("second", "new file body \n".repeat(500)),
-                Message::user("current task"),
-            ]);
+        let mut kernel = AgentKernel::new(
+            provider,
+            ToolRegistry::with_mode(tool::SandboxMode::Off),
+            Arc::new(DenyDangerous),
+        )
+        .with_messages(vec![
+            Message::user("inspect file"),
+            Message::assistant("", vec![read("first")]),
+            Message::tool("first", "old file body \n".repeat(500)),
+            Message::assistant("", vec![read("second")]),
+            Message::tool("second", "new file body \n".repeat(500)),
+            Message::user("current task"),
+        ]);
+        kernel.configure_context_pool(ContextPoolPolicy {
+            recent_raw_maximum: 100,
+            ..Default::default()
+        });
         kernel.compact_now(|_| {}).await.unwrap();
         assert!(
             kernel
@@ -2591,7 +2735,7 @@ mod tests {
         ])) };
         let mut kernel = AgentKernel::new(
             Arc::new(provider),
-            ToolRegistry::new(),
+            ToolRegistry::with_mode(tool::SandboxMode::Off),
             Arc::new(DenyDangerous),
         )
         .with_messages(vec![
@@ -2625,7 +2769,7 @@ mod tests {
         };
         let mut kernel = AgentKernel::new(
             Arc::new(provider),
-            ToolRegistry::new(),
+            ToolRegistry::with_mode(tool::SandboxMode::Off),
             Arc::new(DenyDangerous),
         )
         .with_messages(vec![
@@ -2643,7 +2787,7 @@ mod tests {
     async fn supervisor_runs_independent_tasks() {
         let template = AgentKernel::new(
             Arc::new(EchoProvider),
-            ToolRegistry::new(),
+            ToolRegistry::with_mode(tool::SandboxMode::Off),
             Arc::new(DenyDangerous),
         );
         let supervisor = AgentSupervisor::new(template, 2);
@@ -2710,7 +2854,7 @@ mod tests {
                 finish_reason: None,
             }])),
         };
-        let mut tools = ToolRegistry::new();
+        let mut tools = ToolRegistry::with_mode(tool::SandboxMode::Off);
         tools.register(EchoTool);
         let mut kernel = AgentKernel::new(Arc::new(provider), tools, Arc::new(AllowAll))
             .with_execution_budget(ExecutionBudget {
@@ -2755,7 +2899,7 @@ mod tests {
     async fn turn_timeout_is_enforced_while_model_is_waiting() {
         let mut kernel = AgentKernel::new(
             Arc::new(PendingProvider),
-            ToolRegistry::new(),
+            ToolRegistry::with_mode(tool::SandboxMode::Off),
             Arc::new(AllowAll),
         )
         .with_execution_budget(ExecutionBudget {
@@ -2775,3 +2919,113 @@ mod task_queue_tests;
 
 #[cfg(test)]
 mod execution_tests;
+
+#[cfg(test)]
+mod retry_integration_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    struct Flaky {
+        calls: AtomicUsize,
+        code: u16,
+        partial: bool,
+        hang_retry: bool,
+    }
+    #[async_trait]
+    impl ModelProvider for Flaky {
+        fn name(&self) -> &'static str {
+            "retry-test"
+        }
+        fn model_id(&self) -> &'static str {
+            "retry-test"
+        }
+        fn context_window(&self) -> usize {
+            32000
+        }
+        async fn complete(&self, _: ModelRequest) -> Result<model::ModelResponse, ModelError> {
+            unreachable!()
+        }
+        async fn complete_stream(
+            &self,
+            _: ModelRequest,
+            delta: &mut (dyn FnMut(String) + Send),
+            _: &mut (dyn FnMut(String) + Send),
+        ) -> Result<model::ModelResponse, ModelError> {
+            let n = self.calls.fetch_add(1, Ordering::SeqCst);
+            if n == 0 || self.partial {
+                if self.partial {
+                    delta("partial".into());
+                }
+                return Err(ModelError::HttpResponse {
+                    status: self.code,
+                    message: String::new(),
+                    retry_after: Some(std::time::Duration::ZERO),
+                });
+            }
+            if self.hang_retry {
+                std::future::pending::<()>().await;
+            }
+            Ok(model::ModelResponse {
+                content: "done".into(),
+                tool_calls: vec![],
+                usage: None,
+                finish_reason: None,
+            })
+        }
+    }
+    #[tokio::test]
+    async fn retries_transient_errors_only_and_never_replays_partial_stream() {
+        for (code, partial, expected) in [
+            (503, false, 2),
+            (429, false, 2),
+            (400, false, 1),
+            (401, false, 1),
+            (403, false, 1),
+            (503, true, 1),
+        ] {
+            let provider = Arc::new(Flaky {
+                calls: AtomicUsize::new(0),
+                code,
+                partial,
+                hang_retry: false,
+            });
+            let mut kernel = AgentKernel::new(
+                provider.clone(),
+                ToolRegistry::with_mode(tool::SandboxMode::Off),
+                Arc::new(AllowAll),
+            );
+            let result = kernel.run_turn("request", |_| {}).await;
+            assert_eq!(provider.calls.load(Ordering::SeqCst), expected);
+            assert_eq!(result.is_ok(), expected == 2);
+        }
+    }
+    #[tokio::test]
+    async fn retry_timeout_respects_remaining_time_budget() {
+        let provider = Arc::new(Flaky {
+            calls: AtomicUsize::new(0),
+            code: 503,
+            partial: false,
+            hang_retry: true,
+        });
+        let mut kernel = AgentKernel::new(
+            provider.clone(),
+            ToolRegistry::with_mode(tool::SandboxMode::Off),
+            Arc::new(AllowAll),
+        );
+        kernel.configure_retry(model::RetryPolicy {
+            max_attempts: 4,
+            time_budget_ms: 10,
+            base_delay_ms: 0,
+            max_delay_ms: 0,
+        });
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_millis(250),
+                kernel.run_turn("request", |_| {})
+            )
+            .await
+            .unwrap()
+            .is_err()
+        );
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 2);
+    }
+}

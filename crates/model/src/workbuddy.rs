@@ -230,6 +230,15 @@ fn region_error(error: ModelError, region: WorkBuddyRegion) -> ModelError {
             status,
             message: message.replace("ax auth login workbuddy", &help),
         },
+        ModelError::HttpResponse {
+            status,
+            message,
+            retry_after,
+        } => ModelError::HttpResponse {
+            status,
+            retry_after,
+            message: message.replace("ax auth login workbuddy", &help),
+        },
         ModelError::Configuration(message) => {
             ModelError::Configuration(message.replace("ax auth login workbuddy", &help))
         }
@@ -245,28 +254,41 @@ fn refresh_error(error: ModelError) -> ModelError {
     }
 }
 fn classify(error: ModelError) -> ModelError {
-    if let ModelError::HttpStatus { status, .. } = error {
-        let message = match status {
-            401 => "WorkBuddy authentication rejected; run ax auth login workbuddy",
-            403 => "WorkBuddy access denied: account or model is not entitled",
-            429 => "WorkBuddy rate limit or quota exceeded; retry later",
-            _ => "WorkBuddy upstream request failed",
-        };
-        ModelError::HttpStatus {
+    let message_for = |status| match status {
+        401 => "WorkBuddy authentication rejected; run ax auth login workbuddy",
+        403 => "WorkBuddy access denied: account or model is not entitled",
+        429 => "WorkBuddy rate limit or quota exceeded; retry later",
+        _ => "WorkBuddy upstream request failed",
+    };
+    match error {
+        ModelError::HttpStatus { status, .. } => ModelError::HttpStatus {
             status,
-            message: message.into(),
-        }
-    } else {
-        error
+            message: message_for(status).into(),
+        },
+        ModelError::HttpResponse {
+            status,
+            retry_after,
+            ..
+        } => ModelError::HttpResponse {
+            status,
+            retry_after,
+            message: message_for(status).into(),
+        },
+        other => other,
     }
 }
 fn checked(response: reqwest::Response) -> Result<reqwest::Response, ModelError> {
     if response.status().is_success() {
         Ok(response)
     } else {
-        Err(classify(ModelError::HttpStatus {
-            status: response.status().as_u16(),
+        let status = response.status().as_u16();
+        // Preserve the server's wait request so a 429 retries on its own terms
+        // instead of falling back to local backoff.
+        let retry_after = crate::retry::retry_after_header(response.headers());
+        Err(classify(ModelError::HttpResponse {
+            status,
             message: String::new(),
+            retry_after,
         }))
     }
 }
@@ -561,29 +583,15 @@ impl ModelProvider for WorkBuddyProvider {
         on_thinking: &mut (dyn FnMut(String) + Send),
     ) -> Result<ModelResponse, ModelError> {
         let c = self.credential(None).await?;
-        // HTTP 401 is returned before the SSE body, so this retry cannot replay deltas.
-        match self
-            .adapter(&c)?
-            .complete_stream(request.clone(), on_delta, on_thinking)
+        self.adapter(&c)?
+            .complete_stream(request, on_delta, on_thinking)
             .await
-        {
-            Err(ModelError::HttpStatus { status: 401, .. }) => {
-                let c = self.credential(Some(&c.access)).await?;
-                self.adapter(&c)?
-                    .complete_stream(request, on_delta, on_thinking)
-                    .await
-                    .map_err(|error| region_error(error, self.region))
-            }
-            result => result.map_err(|error| region_error(error, self.region)),
-        }
+            .map_err(|error| region_error(error, self.region))
     }
+
     async fn list_models(&self) -> Result<Vec<ModelInfo>, ModelError> {
-        let mut c = self.credential(None).await?;
-        let mut response = self.models_response(&c).await?;
-        if response.status() == 401 {
-            c = self.credential(Some(&c.access)).await?;
-            response = self.models_response(&c).await?;
-        }
+        let c = self.credential(None).await?;
+        let response = self.models_response(&c).await?;
         let v = envelope(response)
             .await
             .map_err(|error| region_error(error, self.region))?;
@@ -861,7 +869,7 @@ mod tests {
         let p = provider(&base, 0);
         assert!(matches!(
             p.list_models().await,
-            Err(ModelError::HttpStatus { status: 401, .. })
+            Err(ModelError::HttpResponse { status: 401, .. })
         ));
         task.await.unwrap();
         assert_eq!(
@@ -928,25 +936,19 @@ mod tests {
         cleanup(&p);
     }
     #[tokio::test]
-    async fn unauthorized_chat_refreshes_and_retries_once() {
-        let (base, captured, task) = mock(vec![
-            Reply {
-                status: 401,
-                ..reply(json!({}))
-            },
-            reply(json!({"code":0,"data":{"accessToken":"new-access","expiresAt":now()+3600}})),
-            text_reply("retried"),
-        ])
+    async fn unauthorized_chat_is_terminal_without_refresh_or_retry() {
+        let (base, captured, task) = mock(vec![Reply {
+            status: 401,
+            ..reply(json!({}))
+        }])
         .await;
         let p = provider(&base, now() + 3600);
-        assert_eq!(p.complete(request()).await.unwrap().content, "retried");
+        assert!(matches!(
+            p.complete(request()).await,
+            Err(ModelError::HttpResponse { status: 401, .. })
+        ));
         task.await.unwrap();
-        let r = captured.lock().await;
-        assert_eq!(r.len(), 3);
-        assert!(
-            r[2].to_lowercase()
-                .contains("authorization: bearer new-access")
-        );
+        assert_eq!(captured.lock().await.len(), 1);
         cleanup(&p);
     }
     #[tokio::test]
@@ -959,7 +961,7 @@ mod tests {
             .await;
             let p = provider(&base, now() + 3600);
             let err = p.complete(request()).await.unwrap_err();
-            assert!(matches!(err,ModelError::HttpStatus{status:s,..} if s==status));
+            assert!(matches!(err,ModelError::HttpResponse{status:s,..} if s==status));
             assert!(!err.to_string().contains("do-not-echo"));
             task.await.unwrap();
             assert_eq!(captured.lock().await.len(), 1);

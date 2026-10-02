@@ -6,6 +6,7 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+serde.workspace = true
 unicode-normalization = "0.1"
 
 [lints]

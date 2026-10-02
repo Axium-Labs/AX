@@ -85,6 +85,16 @@ pub(crate) fn config_path() -> PathBuf {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct AxConfig {
     #[serde(default)]
+    pub child_models: std::collections::BTreeMap<String, ModelConfig>,
+    #[serde(default)]
+    pub context_pool: runtime_core::ContextPoolPolicy,
+    #[serde(default)]
+    pub permissions: tool::PermissionProfile,
+    #[serde(default)]
+    pub retry: model::RetryPolicy,
+    #[serde(default)]
+    pub sandbox: sandbox::SandboxMode,
+    #[serde(default)]
     pub subagent: runtime_core::SubagentConfig,
     #[serde(default)]
     pub execution: ExecutionConfig,

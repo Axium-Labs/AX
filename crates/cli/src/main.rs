@@ -38,6 +38,7 @@ mod project_identity;
 mod providers;
 mod session_projects;
 mod session_restore;
+mod skill_invocation;
 mod skill_settings;
 mod storage_location;
 mod tui;
@@ -57,6 +58,9 @@ const SKILL_CATALOG_PREFIX: &str = "[skill-catalog]";
     about = "A fast, lightweight AI agent for the terminal"
 )]
 struct Cli {
+    /// Runtime isolation: off, workspace, strict. Never falls back to host.
+    #[arg(long, global = true)]
+    sandbox: Option<sandbox::SandboxMode>,
     /// Update this AX executable from the latest GitHub Release.
     #[arg(long)]
     update: bool,
@@ -680,17 +684,32 @@ impl ReplState {
 
     /// Expose only descriptions and paths for skills the agent may choose
     /// semantically when automatic metadata ranking does not find a match.
+    #[cfg(test)]
     fn skill_catalog_context(&mut self, token_budget: usize) -> Result<(Option<Message>, usize)> {
+        self.ranked_skill_catalog_context(token_budget, &[])
+    }
+    fn ranked_skill_catalog_context(
+        &mut self,
+        token_budget: usize,
+        ranking: &[String],
+    ) -> Result<(Option<Message>, usize)> {
         let available_tools = self.skill_tool_names();
         let disabled = self.disabled_skills()?;
         let active = self.active_skills.clone();
         let allowed = self.allowed_skills.clone();
         let catalog = self.skills()?;
         let mut content = format!(
-            "{SKILL_CATALOG_PREFIX}\nChoose a relevant skill by description; read its file with the filesystem tool. Tool permissions still apply.\n"
+            "{SKILL_CATALOG_PREFIX}\nChoose whether a skill is relevant from its metadata; explicitly call invoke_skill with its name to load instructions. Tool permissions still apply.\n"
         );
         let mut included = false;
-        for status in catalog.statuses(available_tools.iter().map(String::as_str)) {
+        let mut statuses = catalog.statuses(available_tools.iter().map(String::as_str));
+        statuses.sort_by_key(|s| {
+            ranking
+                .iter()
+                .position(|n| n == &s.metadata.name)
+                .unwrap_or(usize::MAX)
+        });
+        for status in statuses {
             if !status.available()
                 || disabled.contains(&status.metadata.name)
                 || active.contains(&status.metadata.name)
@@ -723,55 +742,53 @@ impl ReplState {
         Ok((Some(message), size))
     }
 
-    fn route_skills(&mut self, prompt: &str, token_budget: usize) -> Result<Vec<Message>> {
-        let available_tools = self.skill_tool_names();
-        let disabled_skills = self.disabled_skills()?;
-        let candidates = self
-            .skills()?
-            .auto_route_candidates(prompt, available_tools.iter().map(String::as_str));
-        let mut messages = Vec::new();
-        let mut remaining_tokens = token_budget;
-        for matched in candidates {
-            if disabled_skills.contains(&matched.name)
-                || self.active_skills.contains(&matched.name)
-                || self
-                    .allowed_skills
-                    .as_ref()
-                    .is_some_and(|allowed| !allowed.contains(&matched.name))
-            {
-                continue;
-            }
-            let loaded = match self.skills()?.load(&matched.name) {
-                Ok(loaded) => loaded,
-                Err(error) => {
-                    eprintln!("Skill loading: {error}");
-                    continue;
-                }
-            };
-            let message = Message::system(format!(
-                "{SKILL_CONTEXT_PREFIX}{}]\nSkill root: {}\n{}",
-                loaded.metadata.name,
-                loaded.directory.display(),
-                loaded.instructions
-            ));
-            let size = runtime_core::estimate_tokens(std::slice::from_ref(&message));
-            if size > remaining_tokens {
-                continue;
-            }
-            remaining_tokens -= size;
-            self.active_skills.insert(matched.name.clone());
-            messages.push(message);
-            if messages.len() == 3 {
-                break;
-            }
-        }
-        Ok(messages)
+    #[allow(clippy::unused_self, clippy::unnecessary_wraps)] // Legacy caller API is intentionally a no-op.
+    fn route_skills(&mut self, _prompt: &str, _token_budget: usize) -> Result<Vec<Message>> {
+        Ok(Vec::new()) // Main model selects metadata and lazily reads instructions.
     }
 
     fn prepare_skill_context(&mut self, prompt: &str, token_budget: usize) -> Result<()> {
+        let available = self.skill_tool_names();
+        let disabled = self.disabled_skills()?;
+        let allowed = self.allowed_skills.clone();
+        let catalog = Arc::new(self.skills()?.metadata_snapshot());
+        let eligible = catalog
+            .route_candidates(prompt, available.iter().map(String::as_str))
+            .into_iter()
+            .filter(|m| {
+                !disabled.contains(&m.name) && allowed.as_ref().is_none_or(|a| a.contains(&m.name))
+            })
+            .map(|m| m.name)
+            .collect();
+        self.runtime
+            .as_mut()
+            .ok_or_else(|| anyhow!("agent runtime was not initialized"))?
+            .register_tool(skill_invocation::SkillInvocation {
+                catalog,
+                allowed: eligible,
+            });
         let skill_messages = self.route_skills(prompt, token_budget)?;
         let catalog_context = if skill_messages.is_empty() {
-            self.skill_catalog_context(token_budget)?.0
+            let eligible: HashSet<_> = self
+                .skills()?
+                .route_candidates(prompt, available.iter().map(String::as_str))
+                .into_iter()
+                .map(|m| m.name)
+                .collect();
+            let original = self.allowed_skills.clone();
+            self.allowed_skills = Some(original.as_ref().map_or_else(
+                || eligible.clone(),
+                |a| a.intersection(&eligible).cloned().collect(),
+            ));
+            let ranking = self
+                .skills()?
+                .route_candidates(prompt, available.iter().map(String::as_str))
+                .into_iter()
+                .map(|m| m.name)
+                .collect::<Vec<_>>();
+            let result = self.ranked_skill_catalog_context(token_budget, &ranking);
+            self.allowed_skills = original;
+            result?.0
         } else {
             None
         };
@@ -957,12 +974,17 @@ fn migrate_legacy_project_auth(data_dir: &Path) -> Result<()> {
 
 fn tools(mcp_tools: &[McpToolProxy]) -> ToolRegistry {
     let mut registry = ToolRegistry::new();
-    registry.register(ShellTool);
-    registry.register(FilesystemTool);
-    registry.register(tool::PatchTool);
-    registry.register(tool::SearchTool);
+    let root = tool_workspace();
+    for local in [
+        Arc::new(ShellTool) as Arc<dyn tool::Tool>,
+        Arc::new(FilesystemTool),
+        Arc::new(tool::PatchTool),
+        Arc::new(tool::SearchTool),
+        Arc::new(tool::ViewImageTool::new(root.clone())),
+    ] {
+        registry.register(tool::SandboxedTool::new(local, root.clone()));
+    }
     registry.register(tool::WebTool::new());
-    registry.register(tool::ViewImageTool::new(tool_workspace()));
     for tool in mcp_tools {
         registry.register(tool.clone());
     }
@@ -1023,7 +1045,24 @@ fn kernel(
     if !messages.iter().any(|message| message.content == policy) {
         messages.insert(0, Message::system(policy));
     }
-    Ok(AgentKernel::new(provider, tool_registry, approval).with_messages(messages))
+    let config = AxConfig::load()?;
+    let mut kernel = AgentKernel::new(provider, tool_registry, approval).with_messages(messages);
+    for (name, child) in config.child_models {
+        let child_selection = model_selection::selection_for_provider_id(
+            &child.provider,
+            Some(child.model),
+            child
+                .reasoning_effort
+                .as_deref()
+                .and_then(model::ReasoningEffort::parse),
+            selection.codex_auth.clone(),
+        )?;
+        kernel.register_child_model(name, build_provider(&child_selection, auth_path)?);
+    }
+    kernel.configure_retry(config.retry);
+    kernel.configure_context_pool(config.context_pool);
+    kernel.constrain_permissions(config.permissions);
+    Ok(kernel)
 }
 
 /// Other configured providers that serve the same model. The hedge secondary
@@ -1207,6 +1246,11 @@ fn render_event(event: AgentEvent) {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    let mut raw_args = std::env::args().skip(1);
+    let internal = raw_args.next();
+    if let Some(result) = run_internal_entry(internal.as_deref(), &mut raw_args).await {
+        return result;
+    }
     let startup_timer = tool::telemetry::Timer::new("startup.resolve");
     let cli = Cli::parse();
     if cli.update {
@@ -1215,41 +1259,33 @@ async fn main() -> Result<()> {
         }
         return update::run().await;
     }
-    if let Some(Command::Settings {
-        subagent,
-        max_concurrent,
-        max_depth,
-    }) = cli.command
-    {
-        let mut config = AxConfig::load()?;
-        if let Some(value) = subagent {
-            config.subagent.enabled = value;
-        }
-        if let Some(value) = max_concurrent {
-            anyhow::ensure!((1..=64).contains(&value), "max_concurrent must be 1..=64");
-            config.subagent.max_concurrent = value;
-        }
-        if let Some(value) = max_depth {
-            anyhow::ensure!(value <= 1, "max_depth must be 0 or 1");
-            config.subagent.max_depth = value;
-        }
-        if subagent.is_some() || max_concurrent.is_some() || max_depth.is_some() {
-            config.save()?;
-        }
-        println!("{}", serde_json::to_string_pretty(&config.subagent)?);
+    if run_settings(&cli)? {
         return Ok(());
     }
     if let Some(Command::Environment {
         environment,
         terminal_shell,
-    }) = cli.command
+    }) = &cli.command
     {
-        return execution::configure(environment, terminal_shell);
+        return execution::configure(*environment, *terminal_shell);
     }
     if let Some(code) = execution::launch(&cli)? {
         std::process::exit(code);
     }
     let cwd = std::env::current_dir()?;
+    let mode = cli.sandbox.unwrap_or(AxConfig::load()?.sandbox);
+    let protected = vec![
+        config::ax_home()
+            .canonicalize()
+            .unwrap_or_else(|_| config::ax_home()),
+    ];
+    sandbox::SandboxManager::configure_workspaces(
+        session_projects::list()?
+            .into_iter()
+            .map(|p| p.root.canonicalize().unwrap_or(p.root))
+            .collect(),
+    )?;
+    sandbox::SandboxManager::configure(mode, protected)?;
     let (data_dir, skills_dir) =
         storage_location::initialize(&cwd, cli.data_dir.clone(), cli.skills_dir.clone())?;
     let budget = execution_budget(&cli);
@@ -1262,18 +1298,110 @@ async fn main() -> Result<()> {
         Arc::new(DenyDangerous)
     };
 
-    if let Some(Command::Auth { ref command }) = cli.command {
-        return auth_login::run(command).await;
+    if run_control_command(&cli, &data_dir, &skills_dir).await? {
+        return Ok(());
+    }
+
+    dispatch_command(
+        &cli,
+        &data_dir,
+        &skills_dir,
+        &cwd,
+        budget,
+        &auth_path,
+        approval,
+    )
+    .await
+}
+
+/// Sandbox worker, broker and proxy entry points. They are selected before
+/// argument parsing, so no provider, credential or storage initialization runs
+/// first, and they own the process for their lifetime.
+async fn run_internal_entry(
+    internal: Option<&str>,
+    raw_args: &mut std::iter::Skip<std::env::Args>,
+) -> Option<Result<()>> {
+    let failure = |message: &str| Some(Err(anyhow!("{message}")));
+    match internal? {
+        "--ax-sandbox-snapshot" => Some(worktree_changes::worker_snapshot()),
+        "--ax-sandbox-worker" => match raw_args.next() {
+            Some(name) => Some(tool::sandbox_worker(&name).await.map_err(Into::into)),
+            None => failure("worker tool missing"),
+        },
+        #[cfg(target_os = "linux")]
+        "--ax-sandbox-broker" => match raw_args.next() {
+            Some(socket) => Some(
+                sandbox::run_broker(PathBuf::from(socket))
+                    .await
+                    .map_err(Into::into),
+            ),
+            None => failure("broker socket missing"),
+        },
+        #[cfg(target_os = "linux")]
+        "--ax-sandbox-proxy" => {
+            let (Some(socket), Some(spec)) = (raw_args.next(), raw_args.next()) else {
+                return failure("proxy socket or command missing");
+            };
+            match sandbox::run_proxy(PathBuf::from(socket), &spec).await {
+                Ok(code) => std::process::exit(code),
+                Err(error) => Some(Err(error.into())),
+            }
+        }
+        _ => None,
+    }
+}
+
+/// `ax settings`: validates and optionally persists Subagent settings. Returns
+/// whether the command was handled, so `main` keeps one exit path per command.
+fn run_settings(cli: &Cli) -> Result<bool> {
+    let Some(Command::Settings {
+        subagent,
+        max_concurrent,
+        max_depth,
+    }) = &cli.command
+    else {
+        return Ok(false);
+    };
+    let (subagent, max_concurrent, max_depth) = (*subagent, *max_concurrent, *max_depth);
+    let mut config = AxConfig::load()?;
+    if let Some(value) = subagent {
+        config.subagent.enabled = value;
+    }
+    if let Some(value) = max_concurrent {
+        anyhow::ensure!((1..=64).contains(&value), "max_concurrent must be 1..=64");
+        config.subagent.max_concurrent = value;
+    }
+    if let Some(value) = max_depth {
+        anyhow::ensure!(value <= 1, "max_depth must be 0 or 1");
+        config.subagent.max_depth = value;
+    }
+    if subagent.is_some() || max_concurrent.is_some() || max_depth.is_some() {
+        config.save()?;
+    }
+    println!("{}", serde_json::to_string_pretty(&config.subagent)?);
+    Ok(true)
+}
+
+/// Credential, capability and gateway subcommands. None of them enters the
+/// interactive loop, and each returns before any session is opened.
+async fn run_control_command(cli: &Cli, data_dir: &Path, skills_dir: &Path) -> Result<bool> {
+    if let Some(Command::Auth { command }) = &cli.command {
+        auth_login::run(command).await?;
+        return Ok(true);
     }
     if let Some(Command::Capabilities {
-        ref kind,
-        ref action,
-        ref name,
-        ref scope,
-        ref source,
-    }) = cli.command
+        kind,
+        action,
+        name,
+        scope,
+        source,
+    }) = &cli.command
     {
-        let mut state = ReplState::new(data_dir, skills_dir, cli.mcp_config.clone())?;
+        let mut state = ReplState::new(
+            data_dir.to_path_buf(),
+            skills_dir.to_path_buf(),
+            cli.mcp_config.clone(),
+        )?;
         let kind = capabilities::Kind::parse(kind)?;
         let scope = capabilities::parse_scope(scope)?;
         if action != "list" {
@@ -1289,19 +1417,34 @@ async fn main() -> Result<()> {
             "{}",
             serde_json::to_string_pretty(&state.capability_rows(kind, Some(scope))?)?
         );
-        return Ok(());
+        return Ok(true);
     }
-    if capability_import::run(&cli, &data_dir, &skills_dir)? {
-        return Ok(());
+    if capability_import::run(cli, data_dir, skills_dir)? {
+        return Ok(true);
     }
     if matches!(cli.command, Some(Command::Acp)) {
-        return acp::run(&cli, data_dir, skills_dir).await;
+        acp::run(cli, data_dir.to_path_buf(), skills_dir.to_path_buf()).await?;
+        return Ok(true);
     }
-    if let Some(Command::Crew { ref command }) = cli.command {
-        return crew_device::run(command).await;
+    if let Some(Command::Crew { command }) = &cli.command {
+        crew_device::run(command).await?;
+        return Ok(true);
     }
+    Ok(false)
+}
 
-    match cli.command {
+/// The remaining one-shot subcommands and the interactive loop. The
+/// interactive path borrows nothing from the caller's owned paths.
+async fn dispatch_command(
+    cli: &Cli,
+    data_dir: &Path,
+    skills_dir: &Path,
+    cwd: &Path,
+    budget: runtime_core::ExecutionBudget,
+    auth_path: &Path,
+    approval: Arc<dyn ApprovalPolicy>,
+) -> Result<()> {
+    match &cli.command {
         Some(
             Command::Acp
             | Command::Environment { .. }
@@ -1315,23 +1458,27 @@ async fn main() -> Result<()> {
             unreachable!("handled before command dispatch")
         }
         Some(Command::Export {
-            ref path,
+            path,
             memory,
             sessions,
         }) => {
-            run_export(path, &data_dir, &cwd, memory, sessions)?;
+            run_export(path, data_dir, cwd, *memory, *sessions)?;
         }
-        Some(Command::Import { ref path, dry_run }) => {
-            run_import(path, &data_dir, &cwd, dry_run)?;
+        Some(Command::Import { path, dry_run }) => {
+            run_import(path, data_dir, cwd, *dry_run)?;
         }
         Some(Command::Run {
-            ref prompt,
-            ref session,
-            ref resume_goal,
-            ref cancel_goal,
+            prompt,
+            session,
+            resume_goal,
+            cancel_goal,
         }) => {
-            let selection = model_selection::require_resolved(&cli)?;
-            let mut state = ReplState::new(data_dir, skills_dir, cli.mcp_config.clone())?;
+            let selection = model_selection::require_resolved(cli)?;
+            let mut state = ReplState::new(
+                data_dir.to_path_buf(),
+                skills_dir.to_path_buf(),
+                cli.mcp_config.clone(),
+            )?;
             state.execution_budget = budget;
             state.child_timeout_secs = cli.child_timeout_secs;
             if let Some(session) = session
@@ -1353,11 +1500,11 @@ async fn main() -> Result<()> {
             evolution::run_once(&mut state, &selection, approval, prompt).await?;
         }
         Some(Command::Agents {
-            ref prompts,
+            prompts,
             concurrency,
         }) => {
-            let selection = model_selection::require_resolved(&cli)?;
-            let template = kernel(&selection, approval, Vec::new(), &[], &auth_path)?
+            let selection = model_selection::require_resolved(cli)?;
+            let template = kernel(&selection, approval, Vec::new(), &[], auth_path)?
                 .with_execution_budget(budget);
             let tasks = prompts
                 .iter()
@@ -1368,7 +1515,7 @@ async fn main() -> Result<()> {
                     context: Vec::new(),
                 })
                 .collect();
-            let results = AgentSupervisor::new(template, concurrency)
+            let results = AgentSupervisor::new(template, *concurrency)
                 .run_tasks(tasks, None)
                 .await?;
             for result in results {
@@ -1379,11 +1526,11 @@ async fn main() -> Result<()> {
             }
         }
         Some(Command::Tui) | None => {
-            let resolution = model_selection::resolve_model_selection(&cli)?;
+            let resolution = model_selection::resolve_model_selection(cli)?;
             run_tui(
                 resolution,
-                data_dir,
-                skills_dir,
+                data_dir.to_path_buf(),
+                skills_dir.to_path_buf(),
                 cli.mcp_config.clone(),
                 cli.allow_dangerous,
                 cli.codex_auth.clone(),
@@ -1548,62 +1695,8 @@ where
     } else {
         state.ensure_session(prompt)?;
     }
-    let child_host = Arc::new(child_runtime::LocalChildHost {
-        policy: child_runtime::WorkspacePolicy::default(),
-        source: state.project_root.clone(),
-        root: state.data_dir.join("child-runs"),
-        excluded: vec![
-            database_path(&state.data_dir),
-            state.data_dir.join("sessions"),
-            state.data_dir.join("evolution"),
-        ],
-    });
-    let runtime = state.runtime.take().expect("runtime initialized");
-    state.runtime = Some(
-        runtime
-            .with_child_host(child_host)
-            .with_child_execution_budget(runtime_core::ExecutionBudget {
-                turn_timeout_secs: state.child_timeout_secs,
-                ..state.execution_budget
-            }),
-    );
-    state.configure_scoped_subagents()?;
-    // Bind memory access to the current session and user request on every turn.
-    let global_root = config::ax_home();
-    fs::create_dir_all(&global_root)?;
-    let memory_tool = memory_tool::MemoryTool {
-        database: database_path(&state.data_dir),
-        global_database: global_root.join("memory.sqlite3"),
-        project: state.project_id.clone(),
-        session: state.current_session_id()?.to_owned(),
-        user_input: prompt.to_owned(),
-    };
-    state
-        .runtime
-        .as_mut()
-        .expect("runtime initialized")
-        .register_tool(memory_tool);
-    let budget = state
-        .runtime
-        .as_ref()
-        .expect("runtime initialized")
-        .context_budget();
-    state
-        .runtime
-        .as_mut()
-        .expect("runtime initialized")
-        .set_context("[retrieved-memory]", None);
-    let context_timer = tool::telemetry::Timer::new("context.prepare");
-    let memory_context = state.memory_context(prompt, budget.memory_budget_tokens())?;
-    state
-        .runtime
-        .as_mut()
-        .expect("runtime initialized")
-        .set_context("[retrieved-memory]", memory_context);
-    let remaining = state.prepare_file_context(prompt, budget.skills_budget_tokens())?;
-    state.evolution_prepare(selection);
-    state.prepare_skill_context(prompt, remaining)?;
-    drop(context_timer);
+    attach_child_host(state)?;
+    prepare_turn_context(state, selection, prompt)?;
     let mut runtime = state.runtime.take().expect("runtime initialized");
     let result = evolution::checkpointed_turn(&mut runtime, state, prompt, emit).await;
     let snapshot = if runtime.take_compression_dirty() {
@@ -1631,6 +1724,65 @@ where
         }
     }
     result.map_err(Into::into)
+}
+
+/// Binds this turn to a disposable child host and the current scoped subagents.
+/// The controller keeps its own budget; children get their own timeout.
+fn attach_child_host(state: &mut ReplState) -> Result<()> {
+    let child_host = Arc::new(child_runtime::LocalChildHost {
+        sandbox: std::sync::OnceLock::new(),
+        policy: child_runtime::WorkspacePolicy::default(),
+        source: state.project_root.clone(),
+        root: state.data_dir.join("child-runs"),
+        excluded: vec![
+            database_path(&state.data_dir),
+            state.data_dir.join("sessions"),
+            state.data_dir.join("evolution"),
+        ],
+    });
+    let runtime = state.runtime.take().expect("runtime initialized");
+    state.runtime = Some(
+        runtime
+            .with_child_host(child_host)
+            .with_child_execution_budget(runtime_core::ExecutionBudget {
+                turn_timeout_secs: state.child_timeout_secs,
+                ..state.execution_budget
+            }),
+    );
+    state.configure_scoped_subagents()
+}
+
+/// Binds memory access to the current session and request, then fills the
+/// retrieved-memory, file and skill context for this turn, all measured against
+/// the same `ContextBudget` the request will use.
+fn prepare_turn_context(
+    state: &mut ReplState,
+    selection: &ModelSelection,
+    prompt: &str,
+) -> Result<()> {
+    let global_root = config::ax_home();
+    fs::create_dir_all(&global_root)?;
+    let memory_tool = memory_tool::MemoryTool {
+        database: database_path(&state.data_dir),
+        global_database: global_root.join("memory.sqlite3"),
+        project: state.project_id.clone(),
+        session: state.current_session_id()?.to_owned(),
+        user_input: prompt.to_owned(),
+    };
+    let runtime = state.runtime.as_mut().expect("runtime initialized");
+    runtime.register_tool(memory_tool);
+    let budget = runtime.context_budget();
+    runtime.set_context("[retrieved-memory]", None);
+    let _timer = tool::telemetry::Timer::new("context.prepare");
+    let memory_context = state.memory_context(prompt, budget.memory_budget_tokens())?;
+    state
+        .runtime
+        .as_mut()
+        .expect("runtime initialized")
+        .set_context("[retrieved-memory]", memory_context);
+    let remaining = state.prepare_file_context(prompt, budget.skills_budget_tokens())?;
+    state.evolution_prepare(selection);
+    state.prepare_skill_context(prompt, remaining)
 }
 
 async fn refresh_codex_credential_if_needed(selection: &ModelSelection) -> Result<()> {

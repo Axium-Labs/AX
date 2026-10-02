@@ -12,44 +12,43 @@ compresses the visible portion when pressure builds.
 
 ## ContextBudget
 
-`ContextBudget` (`runtime-core::budget`) is the single source of every
-context-space limit. Instead of each module hard-coding character counts or
-fixed fractions of the raw window, all limits derive from one structure:
+AX uses one elastic input pool:
 
 ```text
-context window (provider-reported)
-  − reserved output (max_output_tokens, else RESERVED_OUTPUT_TOKENS)
-  − tool schema token estimate
-  ────────────────────────────────
-  usable()
-  − skills_budget_tokens()          → min(usable()/4, SKILLS_RESERVE_TOKENS)
-  − memory_budget_tokens()          → min(usable()/10, MEMORY_RESERVE_TOKENS)
-  ────────────────────────────────
-  history_budget()
+provider context window
+  - hard output reserve (model max_output_tokens; fallback 8000)
+  - actual tool schema estimate
+  = usable shared context pool
 ```
 
-The history budget is further viewed through two explicit accessors:
+There are no Skill/Memory/Summary percentage partitions. Legacy budget
+accessors return maxima against this same pool; they are not additive
+allocations. `ContextDemand { demand, minimum, maximum }` expresses actual
+request needs. `allocate()` honors every hard minimum, rejects impossible
+minima, then distributes the remaining pool in caller priority order.
+The latest complete user turn and runtime progress are hard minima; selected
+skills and relevant memory compete before older optional history. Whole
+conversation turns remain intact. Summary/system context consumes only space
+left after selected recent conversation.
 
-- `session_summary_budget()` — 50% of `history_budget()`
-  (`SESSION_SUMMARY_SHARE_PERCENT`): the cap for the restored persisted
-  summary / agent state.
-- `recent_messages_budget()` — `history_budget()` itself: the total cap for
-  restored conversation when a session is reopened.
+`context_pool` in `.ax/config.json` centrally defines operational maxima and
+the next-request reserve:
 
-When a session is restored, `select_context(messages, total_budget,
-system_budget)` is called with `recent_messages_budget()` and
-`session_summary_budget()`: the summary/system state may not exceed the 50%
-share, and the whole restored set may not exceed the total — so a large
-summary can never crowd out the recent messages.
+```json
+"context_pool": { "next_request_reserve": 1024,
+                  "tool_result_maximum": 4096, "recent_raw_maximum": 4096,
+                  "memory_maximum": 8192, "skill_metadata_maximum": 4096 }
+```
 
-Key behaviors:
-
-- Compaction pressure is a percentage of `history_budget()`:
-  `compact_threshold(percent)`. Automatic checks use `SAFE_WATERMARK_PERCENT`
-  (65) as the soft target and `HARD_PRESSURE_PERCENT` (90) as the hard
-  threshold; `RECENT_RAW_PERCENT` (40) bounds the raw recent-history budget.
-- Every layer is an explicitly named method/constant; adding a new consumer of
-  context space starts from this structure rather than a new magic number.
+Before a request, compaction projects the growth that request will actually
+carry: the queue summary context appended after the pressure check, capped by
+`tool_result_maximum`, plus the next-request reserve. It checks projected input
+against `usable()`, rather than triggering from current percentage occupancy.
+The hard pressure boundary is the usable pool. Manual compaction uses the same
+pipeline. No percentage threshold or fixed-fraction helper decides automatic
+compaction, and the cleanup tier derives its retained slice from
+`tool_result_maximum` rather than a private character count. All arithmetic
+saturates for tiny windows.
 
 ## Context selection
 
@@ -71,7 +70,7 @@ the watermark advances.
 3. Semantic compression when still needed.
 
 **Automatic** pressure checks run before each model request, using
-`compact_threshold()` derived from `ContextBudget`.
+projected next-request size against the shared `ContextBudget` pool.
 
 **Manual** — `/compact` requests immediate compaction of the active session's
 effective context:
@@ -161,9 +160,10 @@ Full queue snapshots and archived goals are removed from model context.
 Worker contexts also remove the controller queue. Compaction uses the existing
 pipeline.
 
-Automatic child runs receive only their explicit task input plus small runtime
-metadata (session, cwd, memory scope, platform and shell), never controller or
-sibling conversation/skill/retrieved-memory state. A resumed child reloads only
+Explicitly delegated queue children default to their task input plus small runtime
+metadata (session, cwd, memory scope, platform and shell). Explicit subagent
+`ChildPolicy` can select bounded parent context, skill and memory inheritance;
+controller queue state and sibling history are excluded. See [tools.md](tools.md). A resumed child reloads only
 its own raw history and raw result reader. Child queue tools are disabled so a
 child cannot accidentally orchestrate the controller queue. Parent progress
 remains compact; the summary includes child workspace/session/state references and

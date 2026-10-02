@@ -381,12 +381,14 @@ impl OpenAiProvider {
             .send()
             .await?;
         let status = response.status();
+        let retry_after = crate::retry::retry_after_header(response.headers());
         if !status.is_success() {
             let message = response
                 .text()
                 .await
                 .unwrap_or_else(|_| "response body unavailable".to_owned());
-            return Err(ModelError::HttpStatus {
+            return Err(ModelError::HttpResponse {
+                retry_after,
                 status: status.as_u16(),
                 message: truncate_error(&message),
             });
@@ -421,12 +423,14 @@ impl OpenAiProvider {
             .send()
             .await?;
         let status = response.status();
+        let retry_after = crate::retry::retry_after_header(response.headers());
         if !status.is_success() {
             let message = response
                 .text()
                 .await
                 .unwrap_or_else(|_| "response body unavailable".to_owned());
-            return Err(ModelError::HttpStatus {
+            return Err(ModelError::HttpResponse {
+                retry_after,
                 status: status.as_u16(),
                 message: truncate_error(&message),
             });

@@ -67,6 +67,12 @@ pub async fn discover_tool_proxies(
 
 #[async_trait]
 impl Tool for McpToolProxy {
+    fn inheritance_class(&self) -> tool::InheritanceClass {
+        tool::InheritanceClass::Mcp
+    }
+    fn execution_boundary(&self) -> tool::ExecutionBoundary {
+        tool::ExecutionBoundary::Sandboxed
+    }
     fn name(&self) -> &str {
         &self.registered_name
     }

@@ -26,6 +26,9 @@ enum FilesystemInput {
 #[async_trait]
 #[allow(clippy::unnecessary_literal_bound)]
 impl Tool for FilesystemTool {
+    fn execution_boundary(&self) -> crate::ExecutionBoundary {
+        crate::ExecutionBoundary::WorkspaceWorker
+    }
     fn fork_for_run(&self, context: &crate::RunContext) -> Option<std::sync::Arc<dyn Tool>> {
         Some(std::sync::Arc::new(crate::WorkspaceTool::new(
             std::sync::Arc::new(FilesystemTool),

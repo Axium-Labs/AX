@@ -16,6 +16,12 @@ impl McpGateway {
 }
 #[async_trait]
 impl Tool for McpGateway {
+    fn inheritance_class(&self) -> tool::InheritanceClass {
+        tool::InheritanceClass::Mcp
+    }
+    fn execution_boundary(&self) -> tool::ExecutionBoundary {
+        tool::ExecutionBoundary::Sandboxed
+    }
     fn resources(&self, input: &Value) -> Vec<tool::ResourceAccess> {
         let resource =
             tool::Resource::Named(format!("mcp-manager:{:p}", Arc::as_ptr(&self.manager)));

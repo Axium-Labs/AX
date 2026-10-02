@@ -109,6 +109,25 @@ impl ApprovalPolicy for ChannelApproval {
             PermissionDecision::Ask if safety == SafetyLevel::Safe => return true,
             PermissionDecision::Ask => {}
         }
+        self.request(tool, input, permission, true).await
+    }
+    fn capability_decision(&self, capability: tool::Capability) -> Option<PermissionDecision> {
+        Some(self.permissions.decision(capability))
+    }
+    async fn ask(&self, tool: &str, input: &Value, permission: tool::ToolPermission) -> bool {
+        self.request(tool, input, permission, false).await
+    }
+}
+
+impl ChannelApproval {
+    async fn request(
+        &self,
+        tool: &str,
+        input: &Value,
+        permission: tool::ToolPermission,
+        grant_session: bool,
+    ) -> bool {
+        let safety = permission.safety;
         let (tx, rx) = oneshot::channel();
         let sent = self.tx.send(WorkerMessage::Approval(ApprovalRequest {
             tool: tool.to_owned(),
@@ -123,7 +142,9 @@ impl ApprovalPolicy for ChannelApproval {
             ApprovalChoice::AllowOnce => true,
             ApprovalChoice::Deny => false,
             ApprovalChoice::AllowSession => {
-                self.permissions.allow_session(permission.capability);
+                if grant_session {
+                    self.permissions.allow_session(permission.capability);
+                }
                 true
             }
         }
@@ -1225,6 +1246,7 @@ mod tests {
             source: "user/test".into(),
             updated_at: 0,
             always_include: false,
+            ..Default::default()
         };
         state.store().unwrap().remember_scoped(&record).unwrap();
         let mut selection = selection();
@@ -1414,6 +1436,53 @@ mod tests {
             approval
                 .approve("name-with-no-prefix", &serde_json::json!({}), metadata)
                 .await
+        );
+    }
+    #[tokio::test]
+    async fn explicit_rule_ask_is_not_relaxed_by_session_grants() {
+        let input = serde_json::json!({});
+        let permissions = PermissionStore::default();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let approval = ChannelApproval {
+            tx,
+            permissions: permissions.clone(),
+        };
+        let permission = tool::ToolPermission {
+            capability: tool::Capability::Shell,
+            safety: SafetyLevel::RequiresApproval,
+        };
+        let answer = async {
+            let Some(WorkerMessage::Approval(request)) = rx.recv().await else {
+                panic!("missing approval")
+            };
+            request.reply.send(ApprovalChoice::AllowSession).unwrap();
+        };
+        let (allowed, ()) = tokio::join!(approval.approve("shell", &input, permission), answer);
+        assert!(allowed);
+        assert_eq!(
+            permissions.decision(tool::Capability::Shell),
+            PermissionDecision::Allow
+        );
+        let answer = async {
+            let Some(WorkerMessage::Approval(request)) = rx.recv().await else {
+                panic!("missing explicit approval")
+            };
+            request.reply.send(ApprovalChoice::Deny).unwrap();
+        };
+        let (allowed, ()) = tokio::join!(approval.ask("shell", &input, permission), answer);
+        assert!(!allowed);
+        permissions.reset_session();
+        let answer = async {
+            let Some(WorkerMessage::Approval(request)) = rx.recv().await else {
+                panic!("missing explicit approval")
+            };
+            request.reply.send(ApprovalChoice::AllowSession).unwrap();
+        };
+        let (allowed, ()) = tokio::join!(approval.ask("shell", &input, permission), answer);
+        assert!(allowed);
+        assert_eq!(
+            permissions.decision(tool::Capability::Shell),
+            PermissionDecision::Ask
         );
     }
 }

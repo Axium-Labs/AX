@@ -22,6 +22,8 @@ pub const CREATOR: &str = include_str!("../../../skills/skill-creator/SKILL.md")
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
     pub enabled: bool,
+    pub minimum_evidence: usize,
+    pub independent_sessions: usize,
     pub batch_size: usize,
     pub cooldown_secs: u64,
     pub analysis_timeout_secs: u64,
@@ -43,6 +45,8 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             enabled: true,
+            minimum_evidence: 2,
+            independent_sessions: 2,
             batch_size: 12,
             cooldown_secs: 1800,
             analysis_timeout_secs: 30,
@@ -64,6 +68,10 @@ impl Default for Config {
 }
 impl Config {
     pub fn validate(&self) -> Result<()> {
+        ensure!(
+            self.minimum_evidence > 0 && self.independent_sessions > 0,
+            "invalid evidence gates"
+        );
         ensure!(
             self.batch_size > 0
                 && self.max_experiences >= self.batch_size
@@ -212,6 +220,10 @@ pub enum Action {
     },
     Retire {
         name: String,
+    },
+    Promote {
+        name: String,
+        evidence: Vec<String>,
     },
     Memory {
         key: String,
@@ -430,42 +442,25 @@ impl Engine {
             })
             .collect()
     }
-    #[allow(clippy::cast_precision_loss)] // Bounded counts and elapsed-time ranking signals.
-    fn score(&self, ids: &[String], confidence: f64, time: u64) -> Result<f64> {
+    fn evidence_gate(&self, ids: &[String], confidence: f64, _time: u64) -> Result<f64> {
         ensure!(
             confidence.is_finite() && (0.0..=1.0).contains(&confidence),
             "invalid confidence"
         );
         let evidence = self.evidence(ids)?;
+        ensure!(
+            evidence
+                .iter()
+                .all(|e| !e.session.trim().is_empty() && !e.task.trim().is_empty()),
+            "missing provenance"
+        );
         let sessions: std::collections::BTreeSet<_> = evidence.iter().map(|e| &e.session).collect();
-        let count = evidence.len() as f64;
-        let recurrence = 0.5 * (count / (count + 2.0))
-            + 0.5 * (sessions.len() as f64 / (sessions.len() as f64 + 1.0));
-        let success = evidence
-            .iter()
-            .filter(|e| e.success && e.errors.is_empty())
-            .count() as f64
-            / count;
-        let latest = evidence.iter().map(|e| e.at).max().unwrap_or(0);
-        let recent = 2_f64.powf(-(time.saturating_sub(latest) as f64) / self.config.half_life_secs);
-        let corrections = evidence
-            .iter()
-            .map(|e| e.user_corrections.len())
-            .sum::<usize>() as f64
-            / count;
-        let signals = [
-            recurrence,
-            success,
-            recent,
-            1.0 / (1.0 + corrections),
-            1.0,
-            confidence,
-        ];
-        Ok(signals
-            .iter()
-            .zip(self.config.weights)
-            .map(|(s, w)| s * w)
-            .sum())
+        ensure!(
+            evidence.len() >= self.config.minimum_evidence
+                && sessions.len() >= self.config.independent_sessions,
+            "insufficient independent evidence"
+        );
+        Ok(confidence) // telemetry only
     }
     fn write_package(
         &self,
@@ -551,77 +546,8 @@ impl Engine {
         self.audit(&format!("{name}: {previous:?} -> {next:?}"), "applied")?;
         self.save()
     }
-    #[allow(clippy::cast_precision_loss)] // Approximate utility, never an identity or counter.
-    fn utility(&self, meta: &Metadata, time: u64) -> f64 {
-        let total = if meta.state == State::Trial {
-            meta.use_count.saturating_sub(meta.trial_baseline)
-        } else {
-            meta.use_count
-        } as f64;
-        let successes = if meta.state == State::Trial {
-            meta.success_count
-                .saturating_sub(meta.trial_success_baseline)
-        } else {
-            meta.success_count
-        } as f64;
-        let success = (successes + 1.0) / (total + 2.0);
-        let recent = 2_f64
-            .powf(-(time.saturating_sub(meta.last_used_at) as f64) / self.config.half_life_secs);
-        let recurrence = total / (total + 3.0) * recent.sqrt();
-        let correction = 1.0 / (1.0 + meta.corrections as f64 / (total + 1.0));
-        [
-            recurrence,
-            success * recent.sqrt(),
-            recent,
-            correction,
-            recent,
-            meta.confidence * recent,
-        ]
-        .iter()
-        .zip(self.config.weights)
-        .map(|(s, w)| s * w)
-        .sum()
-    }
-    pub fn maintain(&mut self, time: u64) -> Result<()> {
-        let names: Vec<_> = self.ledger.skills.keys().cloned().collect();
-        for name in names {
-            let meta = self.ledger.skills[&name].clone();
-            if self.owned(&name).is_err() || meta.epoch >= self.ledger.epoch {
-                continue;
-            }
-            let utility = self.utility(&meta, time);
-            match meta.state {
-                State::Candidate
-                    if utility >= self.config.retire_score
-                        && meta.confidence >= self.config.trial_score =>
-                {
-                    self.transition(&name, State::Trial)?;
-                }
-                State::Trial
-                    if meta.use_count > meta.trial_baseline
-                        && meta.success_count > meta.trial_success_baseline
-                        && utility >= self.config.active_score =>
-                {
-                    self.transition(&name, State::Active)?;
-                }
-                State::Archived
-                    if utility < self.config.retire_score && meta.low_value_reviews > 0 =>
-                {
-                    self.transition(&name, State::Deleted)?;
-                }
-                State::Candidate | State::Trial | State::Active
-                    if utility < self.config.retire_score =>
-                {
-                    self.ledger
-                        .skills
-                        .get_mut(&name)
-                        .expect("owned")
-                        .low_value_reviews += 1;
-                    self.transition(&name, State::Archived)?;
-                }
-                _ => {}
-            }
-        }
+    pub fn maintain(&mut self, _time: u64) -> Result<()> {
+        // No semantic lifecycle decisions in maintenance.
         let mut deleted: Vec<_> = self
             .ledger
             .skills
@@ -673,27 +599,7 @@ impl Engine {
                         < self.config.max_skills,
                     "growth cap: merge/retire first"
                 );
-                let score = self.score(&evidence, confidence, time)?;
-                ensure!(
-                    score >= self.config.create_score,
-                    "insufficient durable evidence"
-                );
-                let features = skill::LexicalFeatures::from_text(&description);
-                for existing in self.ledger.skills.keys() {
-                    if let Ok(text) = self.owned(existing) {
-                        let path = self.path(existing, self.ledger.skills[existing].state)?;
-                        let loaded = skill::validate_skill_directory(&path)?;
-                        ensure!(
-                            features.similarity(&skill::LexicalFeatures::from_text(
-                                &loaded.metadata.description
-                            )) < self.config.similarity
-                                && skill::LexicalFeatures::from_text(&instructions)
-                                    .similarity(&skill::LexicalFeatures::from_text(&text))
-                                    < self.config.similarity,
-                            "redundant skill: merge/refine first"
-                        );
-                    }
-                }
+                let score = self.evidence_gate(&evidence, confidence, time)?;
                 let digest = self.write_package(
                     &name,
                     &description,
@@ -732,11 +638,7 @@ impl Engine {
                 corrections,
             } => {
                 self.owned(&name)?;
-                let score = self.score(&evidence, confidence, time)?;
-                ensure!(
-                    score >= self.config.trial_score,
-                    "low refinement confidence"
-                );
+                let score = self.evidence_gate(&evidence, confidence, time)?;
                 let records = self.evidence(&evidence)?;
                 for quote in &corrections {
                     ensure!(
@@ -797,19 +699,11 @@ impl Engine {
                 );
                 let texts: Vec<_> = names.iter().map(|n| self.owned(n)).collect::<Result<_>>()?;
                 ensure!(
-                    texts.iter().enumerate().all(|(i, t)| i == 0
-                        || skill::LexicalFeatures::from_text(t)
-                            .similarity(&skill::LexicalFeatures::from_text(&texts[0]))
-                            >= self.config.similarity),
-                    "merge sources not similar"
-                );
-                ensure!(
                     description.len() + instructions.len()
                         < texts.iter().map(String::len).sum::<usize>(),
                     "merge must compress"
                 );
-                let score = self.score(&evidence, confidence, time)?;
-                ensure!(score >= self.config.create_score, "low merge confidence");
+                let score = self.evidence_gate(&evidence, confidence, time)?;
                 for n in &names {
                     ensure!(
                         matches!(
@@ -852,13 +746,26 @@ impl Engine {
                     self.transition(&source, State::Archived)?;
                 }
             }
+            Action::Promote { name, evidence } => {
+                self.owned(&name)?;
+                self.evidence_gate(&evidence, 1.0, time)?;
+                let meta = &self.ledger.skills[&name];
+                let next = match meta.state {
+                    State::Candidate => State::Trial,
+                    State::Trial
+                        if meta.use_count > meta.trial_baseline
+                            && meta.success_count > meta.trial_success_baseline =>
+                    {
+                        State::Active
+                    }
+                    _ => anyhow::bail!("promotion requires trial usage telemetry"),
+                };
+                self.transition(&name, next)?;
+            }
             Action::Retire { name } => {
                 self.owned(&name)?;
                 let meta = &self.ledger.skills[&name];
-                ensure!(
-                    self.utility(meta, time) < self.config.retire_score,
-                    "valuable skill protected"
-                );
+                self.evidence_gate(&meta.evidence, meta.confidence, time)?;
                 let next = if meta.state == State::Archived && meta.epoch < self.ledger.epoch {
                     State::Deleted
                 } else {
@@ -873,10 +780,7 @@ impl Engine {
                 quote,
                 confidence,
             } => {
-                ensure!(
-                    self.score(&evidence, confidence, time)? >= self.config.create_score,
-                    "low memory confidence"
-                );
+                self.evidence_gate(&evidence, confidence, time)?;
                 ensure!(
                     !quote.is_empty()
                         && self
@@ -904,7 +808,9 @@ impl Engine {
                         owner: self.project.clone(),
                         source: "evolved".into(),
                         updated_at: 0,
+                        memory_type: memory::MemoryType::Experience,
                         always_include: false,
+                        ..Default::default()
                     },
                     existing.as_ref().map(|m| m.value.as_str()),
                     false,

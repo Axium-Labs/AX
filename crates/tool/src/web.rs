@@ -301,6 +301,7 @@ struct Page {
     truncated: bool,
 }
 
+#[derive(Clone)]
 pub struct WebTool {
     client: reqwest::Client,
     search: Option<Arc<dyn SearchProvider>>,
@@ -577,6 +578,9 @@ const fn default_limit() -> usize {
 
 #[async_trait]
 impl Tool for WebTool {
+    fn execution_boundary(&self) -> crate::ExecutionBoundary {
+        crate::ExecutionBoundary::Remote
+    }
     fn fork_for_run(&self, _context: &crate::RunContext) -> Option<std::sync::Arc<dyn Tool>> {
         Some(std::sync::Arc::new(Self::new()))
     }
@@ -617,6 +621,29 @@ impl Tool for WebTool {
     }
     fn safety(&self, _input: &Value) -> SafetyLevel {
         SafetyLevel::Safe
+    }
+    async fn execute_output_constrained(
+        &self,
+        input: Value,
+        profiles: &[crate::PermissionProfile],
+    ) -> Result<crate::ToolOutput, ToolError> {
+        if !profiles
+            .iter()
+            .any(crate::PermissionProfile::has_network_rules)
+        {
+            return self.execute_output(input).await;
+        }
+        if input["operation"] != "fetch" {
+            return Err(ToolError::PermissionDenied(
+                "search provider transport cannot enforce domain policy".into(),
+            ));
+        }
+        let mut constrained = self.clone();
+        // Redirects can introduce unapproved domains. Validate each transport hop;
+        // new Ask targets require a new explicit tool call and approval.
+        let profiles = profiles.to_vec();
+        constrained.client = network::policy_client(profiles)?;
+        constrained.execute_output(input).await
     }
     async fn execute(&self, input: Value) -> Result<String, ToolError> {
         let input: Input =
@@ -899,4 +926,43 @@ fn merge_blank_lines(text: &str) -> String {
         }
     }
     out.trim().to_owned()
+}
+
+#[cfg(test)]
+mod domain_policy_tests {
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    #[tokio::test]
+    async fn redirects_cannot_cross_into_denied_domain() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0; 2048];
+            let count = socket.read(&mut request).await.unwrap();
+            assert!(count > 0);
+            socket.write_all(format!("HTTP/1.1 302 Found\r\nLocation: http://localhost:{port}/blocked\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").as_bytes()).await.unwrap();
+        });
+        let profile = crate::PermissionProfile {
+            rules: vec![crate::PermissionRule {
+                decision: crate::PermissionDecision::Deny,
+                matcher: crate::RuleMatcher::Domain {
+                    pattern: "localhost".into(),
+                },
+            }],
+            ..Default::default()
+        };
+        let result = network::policy_client_builder(vec![profile])
+            .no_proxy()
+            .build()
+            .unwrap()
+            .get(format!("http://127.0.0.1:{port}/start"))
+            .send()
+            .await;
+        tokio::time::timeout(std::time::Duration::from_secs(5), server)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(result.unwrap_err().is_redirect());
+    }
 }

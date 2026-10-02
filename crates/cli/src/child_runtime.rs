@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 const OUTCOME_PREFIX: &str = "[ax-child-outcome]\n";
 
 pub(crate) struct LocalChildHost {
+    pub sandbox: std::sync::OnceLock<Result<sandbox::SandboxManager, String>>,
     pub source: PathBuf,
     pub root: PathBuf,
     pub excluded: Vec<PathBuf>,
@@ -36,18 +37,99 @@ fn absolute_path(path: &Path) -> std::io::Result<PathBuf> {
 }
 
 fn git(source: &Path, args: &[&std::ffi::OsStr]) -> std::io::Result<std::process::Output> {
-    let mut command = std::process::Command::new("git");
-    command
-        .arg("-C")
-        .arg(source)
-        .args(args)
-        .stdin(std::process::Stdio::null());
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        command.creation_flags(0x0800_0000);
+    let source = absolute_path(source)?;
+    let state = source.parent().unwrap_or(&source).join("state");
+    let managed = workspace::read_manifest(&state).is_ok_and(|m| m.cwd == source);
+    let mut policy = if managed {
+        sandbox::SandboxManager::policy_for_child(source.clone(), &state)
+    } else {
+        sandbox::SandboxManager::policy_for_workspace(source.clone())
     }
-    command.output()
+    .map_err(std::io::Error::other)?;
+    policy.mode = service_sandbox_mode();
+    let first = args.first().and_then(|arg| arg.to_str());
+    if first == Some("clone") {
+        let destination = Path::new(
+            args.last()
+                .ok_or_else(|| std::io::Error::other("clone destination missing"))?,
+        );
+        let parent = destination
+            .parent()
+            .ok_or_else(|| std::io::Error::other("managed clone parent missing"))?;
+        let manifest = workspace::read_manifest(&parent.join("state"))?;
+        if manifest.cwd != destination {
+            return Err(std::io::Error::other("invalid managed clone capability"));
+        }
+        policy.runtime_mounts.push(sandbox::RuntimeMount {
+            path: parent.to_path_buf(),
+            read_only: false,
+        });
+    }
+    if managed && first == Some("apply") {
+        policy.runtime_mounts.push(sandbox::RuntimeMount {
+            path: state.clone(),
+            read_only: true,
+        });
+    }
+    if first == Some("worktree") && args.get(1).and_then(|arg| arg.to_str()) == Some("remove") {
+        let destination = Path::new(args.last().unwrap());
+        let parent = destination
+            .parent()
+            .ok_or_else(|| std::io::Error::other("managed worktree parent missing"))?;
+        let manifest = workspace::read_manifest(&parent.join("state"))?;
+        if manifest.cwd != destination || manifest.repository.as_ref() != Some(&source) {
+            return Err(std::io::Error::other("invalid worktree cleanup capability"));
+        }
+        policy.runtime_mounts.push(sandbox::RuntimeMount {
+            path: parent.to_path_buf(),
+            read_only: false,
+        });
+    }
+    // A policy carrying extra lifecycle capabilities needs its own manager; the
+    // plain case can reuse the process-wide cached one.
+    let runner = if policy.runtime_mounts.is_empty() {
+        manager_for(&policy, &source, managed.then_some(state.as_path()))
+    } else {
+        sandbox::SandboxManager::prepare(&policy)
+    }
+    .map_err(std::io::Error::other)?;
+    let mut spec = sandbox::CommandSpec::new("git");
+    spec.args = vec![
+        "-c".into(),
+        "core.hooksPath=/dev/null".into(),
+        "-c".into(),
+        "core.fsmonitor=false".into(),
+        "-C".into(),
+        source.to_string_lossy().into_owned(),
+    ];
+    spec.args
+        .extend(args.iter().map(|arg| arg.to_string_lossy().into_owned()));
+    runner.output_blocking(spec).map_err(std::io::Error::other)
+}
+
+/// Reuses the cached manager when the requested mode is the process-wide one,
+/// and otherwise prepares the caller's policy as its own manager. `child_state`
+/// selects the managed-child capability when the caller has one.
+pub(super) fn manager_for(
+    policy: &sandbox::SandboxPolicy,
+    source: &Path,
+    child_state: Option<&Path>,
+) -> sandbox::Result<sandbox::SandboxManager> {
+    if sandbox::SandboxManager::configured_mode() == Some(policy.mode) {
+        match child_state {
+            Some(state) => {
+                sandbox::SandboxManager::for_child_workspace(source.to_path_buf(), state)
+            }
+            None => sandbox::SandboxManager::for_workspace(source.to_path_buf()),
+        }
+    } else {
+        sandbox::SandboxManager::prepare(policy)
+    }
+}
+pub(super) fn service_sandbox_mode() -> sandbox::SandboxMode {
+    // Falls back to the platform default so service calls, tests and interactive
+    // runs resolve the same mode instead of three different ones.
+    sandbox::SandboxManager::configured_mode().unwrap_or_default()
 }
 
 #[path = "child_workspace.rs"]
@@ -220,6 +302,15 @@ impl LocalChildHost {
     ) -> Result<ChildStorage, AgentError> {
         let policy = self.policy;
         let source = absolute_path(&self.source).map_err(failure)?;
+        self.sandbox
+            .get_or_init(|| {
+                let mut policy = sandbox::SandboxManager::policy_for_workspace(source.clone())
+                    .map_err(|e| e.to_string())?;
+                policy.mode = service_sandbox_mode();
+                manager_for(&policy, &source, None).map_err(|e| e.to_string())
+            })
+            .as_ref()
+            .map_err(failure)?;
         let excluded = self
             .excluded
             .iter()
@@ -311,6 +402,22 @@ impl LocalChildHost {
 
 #[async_trait]
 impl ChildHost for LocalChildHost {
+    async fn prepare_with_policy(
+        &self,
+        controller: &AgentKernel,
+        input: &str,
+        policy: &runtime_core::ChildPolicy,
+    ) -> Result<PreparedChild, AgentError> {
+        let mut child = self.prepare(controller, input, None).await?;
+        if policy.workspace == runtime_core::child_policy::WorkspaceInheritance::Shared {
+            // Keep disposable lifecycle paths intact; bind only the execution view to parent cwd.
+            let mut binding = child.run.clone();
+            binding.cwd.clone_from(&self.source);
+            child.kernel = controller.fork_child(binding, input, child.kernel.messages().to_vec());
+        }
+        Ok(child)
+    }
+
     async fn prepare(
         &self,
         controller: &AgentKernel,

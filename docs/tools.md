@@ -382,7 +382,7 @@ max_depth = 1
 
 When disabled, no delegation tool, manager, child provisioning, extra prompt,
 planner request or model call is created. Enabling adds only
-`subagent(task, context?, tools?)`; the model decides whether to use it. The
+`subagent(task, context?, tools?, policy?)`; the model decides whether to use it. The
 runtime primitives are `spawn_agent`, `wait_agent`, and `cancel_agent` on the
 kernel or its optional manager handle. Embedders attach a `ChildHost`, configure
 subagents and call `prepare_subagents` before direct primitive use; normal agent
@@ -410,3 +410,116 @@ receipt. Primitive timeouts include admission/provisioning; model-tool children
 inherit the configured child timeout. Dropping a parent tool round cancels its
 outstanding delegated calls. Provider, provisioning, receipt and worker failures
 are returned locally in the result envelope.
+
+## Permission profiles and sandbox boundaries
+
+The runtime evaluates `PermissionProfile` rules on resolved tool arguments and
+declared resources before executing a tool, including after result references
+are resolved. `RuleMatcher` supports command globs, command prefixes,
+normalized filesystem path globs, domain globs and JSON-pointer tool arguments.
+Overlapping rules resolve **deny > ask > allow**, independent of order.
+Explicit capability Deny remains a ceiling. Explicit Ask requires an interactive
+approval even when a capability has a session Allow; approving it never grants
+other calls. Noninteractive explicit Ask fails closed. Rules are enforced in
+Runtime/transport, never through model instructions.
+
+```json
+"permissions": {
+  "rules": [
+    {"decision":"allow", "matcher":{"kind":"command","pattern":"cargo *"}},
+    {"decision":"ask", "matcher":{"kind":"prefix","value":"git push"}},
+    {"decision":"deny", "matcher":{"kind":"path","pattern":"~/.ssh/**"}},
+    {"decision":"deny", "matcher":{"kind":"path","pattern":"/etc/**"}},
+    {"decision":"deny", "matcher":{"kind":"domain","pattern":"*.internal.example"}},
+    {"decision":"ask", "matcher":{"kind":"tool_parameter","tool":"mcp*",
+       "pointer":"/arguments/action","pattern":"delete"}}
+  ],
+  "boundary": {"read_only":false, "deny_network":false}
+}
+```
+
+Paths expand `~`, resolve aliases/existing symlinks and normalize missing
+components. Parent-tree/unknown resource access cannot bypass a denied subtree.
+Command Allow never authorizes compound shell/substitution syntax without Ask.
+Arbitrary shell, Process and MCP effects cannot be determined from arguments:
+restrictive path/domain rules conservatively reject or ask for those calls.
+The OS sandbox remains an additional, independently enforced boundary; a rule
+cannot relax it or select an unavailable backend. Web fetch checks redirect
+hops; a new denied/Ask host stops the redirect. Search/unknown network
+transports fail closed when domain rules cannot be enforced. This conservative
+fallback keeps policy enforcement local without adding a privileged proxy.
+
+## ChildPolicy inheritance
+
+The same `ChildPolicy` controls every explicit subagent invocation:
+
+```yaml
+context: none          # none | summary | last_n | full
+last_n: 0             # positive complete-turn count when context=last_n
+memory: isolated      # none | parent_readonly | isolated | shared_project
+skills: none          # none | selected | inherit
+selected_skills: []
+tools: inherit        # none | selected | inherit; only child-bindable parent tools
+selected_tools: []
+mcp: none             # none | selected | inherit
+selected_mcp: []
+model: inherit        # inherit | override
+model_override: null  # parent-registered key
+workspace: isolated   # shared | snapshot | isolated
+permissions: inherit_restricted # inherit_restricted | custom
+custom_permissions: { rules: [], boundary: {} }
+```
+
+Defaults preserve legacy safe isolation and no recursive delegation. Legacy
+`context` text is explicit task input and `tools` is an additional narrowing
+whitelist. Parent history is readonly context, with queue/execution state
+removed; last_n keeps complete turns. Memory `none` removes memory access,
+`parent_readonly` rejects mutation, and `shared_project` permits only the
+parent project store, with child input provenance. Isolated memory retains its
+own session/database. Selected/inherited skills retain the parent's eligible
+catalog and lazily load only selected bodies. Unbound extensions are never
+silently inherited.
+
+LocalChildHost maps snapshot and isolated to its existing filtered workspace
+provisioner (Git worktree plus dirty inputs, otherwise filtered copy). Shared
+binds tools to the parent's workspace while retaining separate durable child
+state and a disposable lifecycle workspace; cleanup never deletes the shared
+parent workspace. A host that cannot implement a requested binding rejects it.
+Parent MCP inheritance requires explicit shared workspace because existing
+server resources are parent-scoped. All children retain the parent's effective
+profiles and capability approval object; custom rules only add restrictions.
+
+Model overrides must be configured by the parent. Embedders call
+`register_child_model`; CLI uses the optional local `child_models` map:
+
+```json
+"child_models": { "reviewer": { "provider":"openai", "model":"gpt-4.1" } }
+```
+
+Building an approved provider performs no model/network request. An unknown
+model key is rejected; the child cannot create credentials or providers.
+
+## Explicit task queue planning
+
+Formatting alone never creates tasks. `TaskQueue::list_hints()` is optional
+metadata for a caller/model; it cannot schedule or spawn anything. The main
+model explicitly calls `task_queue(action="start", overall_goal, tasks)`.
+`execution="controller"` is the default; only explicit `execution="children"`
+delegates tasks through ChildHost. `dependencies` contains zero-based prior
+task indices, one list per task. Invalid/forward dependencies are rejected;
+a failed dependency skips dependents while independent tasks continue.
+Queue responsibilities are state, dependencies, scheduling and outcomes.
+Old serialized queues retain their state; existing child receipts allow an
+explicit goal resume to continue an already delegated run.
+
+## Sandbox enforcement
+
+Permission expresses AX's willingness to request an action. Workspace Sandbox
+is the separate OS boundary underneath it. Workspace workers run normal development
+operations without repeated approval; explicit denials still apply. That reduced
+approval is decided by the confined policy actually bound to the executing tool,
+never by the process-wide configured mode, and an unprepared or unconfined binding
+keeps the tool's own approval requirement. An escape returns
+SandboxViolation and never triggers an automatic host retry. New local-effect tools
+must declare a workspace worker boundary and use SandboxManager, rather than adding
+path-string checks or host spawn paths. See [security.md](security.md).

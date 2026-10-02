@@ -1,6 +1,6 @@
 //! Configurable limits for one user turn.
 
-/// Splits a model's raw context window into what is actually usable for
+/// Shares a model's raw context window according to actual demand for
 /// system/runtime context, skills, memory, and conversation history, after
 /// reserving room for the model's own reply and the tool schemas sent with
 /// every request. Callers derive every context-related limit from this
@@ -11,27 +11,13 @@ pub struct ContextBudget {
     pub context_window: usize,
     pub reserved_output: usize,
     pub tool_schema_tokens: usize,
+    pub pool: ContextPoolPolicy,
 }
 
 impl ContextBudget {
-    pub const SOFT_PRESSURE_PERCENT: u8 = 75;
-    pub const HARD_PRESSURE_PERCENT: u8 = 90;
-    pub const SAFE_WATERMARK_PERCENT: u8 = 65;
-    pub const RECENT_RAW_PERCENT: u8 = 40;
     /// Conservative reserve used only when the model catalog does not expose
-    /// a maximum output size.
-    pub const RESERVED_OUTPUT_TOKENS: usize = 8_000;
-    /// Tokens carved out of the usable budget for lazily loaded skill
-    /// instructions.
-    pub const SKILLS_RESERVE_TOKENS: usize = 3_000;
-    /// Tokens carved out of the usable budget for retrieved long-term memory
-    /// facts.
-    pub const MEMORY_RESERVE_TOKENS: usize = 512;
-    /// Share of the history budget available to the persisted session
-    /// summary and other restored system state when a session is reopened;
-    /// the remainder is reserved for verbatim recent messages.
-    pub const SESSION_SUMMARY_SHARE_PERCENT: u8 = 50;
-
+    /// a maximum output size. Shared with every other budget that must guess.
+    pub const RESERVED_OUTPUT_TOKENS: usize = model::DEFAULT_OUTPUT_RESERVE_TOKENS;
     #[must_use]
     pub const fn new(
         context_window: usize,
@@ -45,6 +31,7 @@ impl ContextBudget {
                 None => Self::RESERVED_OUTPUT_TOKENS,
             },
             tool_schema_tokens,
+            pool: ContextPoolPolicy::DEFAULT,
         }
     }
 
@@ -60,82 +47,120 @@ impl ContextBudget {
 
     /// Share of history reserved for one tool's compact projection.
     #[must_use]
-    pub const fn tool_result_chars(&self) -> usize {
-        self.history_budget().saturating_mul(4) / 32
+    pub fn tool_result_chars(&self) -> usize {
+        self.usable()
+            .min(self.pool.tool_result_maximum)
+            .saturating_mul(4)
     }
 
-    /// Trigger compaction at a fraction of the same history allowance used
-    /// when preparing a model request.
+    /// Character allowance for one compacted tool result. Derived from the
+    /// per-tool token maximum so the cleanup tier scales with the same policy
+    /// as the rest of the pipeline instead of owning a private literal.
     #[must_use]
-    pub fn compact_threshold(&self, percent: u8) -> usize {
-        self.history_budget()
-            .saturating_mul(usize::from(percent.min(100)))
-            / 100
+    pub fn compacted_tool_result_chars(&self) -> usize {
+        self.tool_result_chars().div_ceil(8)
     }
 
     #[must_use]
     pub fn pressure_target(&self) -> usize {
-        self.compact_threshold(Self::SAFE_WATERMARK_PERCENT)
+        self.usable().saturating_sub(self.pool.next_request_reserve)
     }
 
     #[must_use]
     pub fn hard_pressure_threshold(&self) -> usize {
-        self.compact_threshold(Self::HARD_PRESSURE_PERCENT)
+        self.usable()
     }
 
     #[must_use]
     pub fn recent_raw_budget(&self) -> usize {
-        self.compact_threshold(Self::RECENT_RAW_PERCENT)
+        self.usable().min(self.pool.recent_raw_maximum)
     }
 
-    /// Total budget for restoring persisted conversation history when a
-    /// session is (re)opened, after also carving out room for skills and
-    /// memory. Split between [`Self::session_summary_budget`] and
-    /// [`Self::recent_messages_budget`].
+    /// Compatibility accessors are maxima against one shared pool, never partitions.
     #[must_use]
     pub const fn history_budget(&self) -> usize {
         self.usable()
-            .saturating_sub(self.skills_budget_tokens())
-            .saturating_sub(self.memory_budget_tokens())
     }
-
-    /// Budget for the persisted session summary (and other restored system
-    /// state) when a session is reopened, so a large summary cannot silently
-    /// consume the entire history budget and starve recent messages.
     #[must_use]
-    pub fn session_summary_budget(&self) -> usize {
-        self.history_budget()
-            .saturating_mul(usize::from(Self::SESSION_SUMMARY_SHARE_PERCENT))
-            / 100
+    pub const fn session_summary_budget(&self) -> usize {
+        self.usable()
     }
-
-    /// Budget for verbatim recent conversation turns restored alongside the
-    /// session summary.
     #[must_use]
     pub const fn recent_messages_budget(&self) -> usize {
-        self.history_budget()
+        self.usable()
     }
-
-    /// Token budget for lazily loaded skill instructions.
     #[must_use]
-    pub const fn skills_budget_tokens(&self) -> usize {
-        let quarter = self.usable() / 4;
-        if quarter < Self::SKILLS_RESERVE_TOKENS {
-            quarter
-        } else {
-            Self::SKILLS_RESERVE_TOKENS
-        }
+    pub fn skills_budget_tokens(&self) -> usize {
+        self.usable().min(self.pool.skill_metadata_maximum)
     }
-
-    /// Token budget for retrieved long-term memory facts.
     #[must_use]
-    pub const fn memory_budget_tokens(&self) -> usize {
-        let tenth = self.usable() / 10;
-        if tenth < Self::MEMORY_RESERVE_TOKENS {
-            tenth
-        } else {
-            Self::MEMORY_RESERVE_TOKENS
+    pub fn memory_budget_tokens(&self) -> usize {
+        self.usable().min(self.pool.memory_maximum)
+    }
+    /// Project the next request including expected tool results, with hard reply/schema reserves.
+    #[must_use]
+    pub const fn needs_compaction(&self, current: usize, next_request_growth: usize) -> bool {
+        current.saturating_add(next_request_growth) > self.usable()
+    }
+}
+
+/// Limits only. Demand is supplied by the caller for this request.
+#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct ContextPoolPolicy {
+    pub next_request_reserve: usize,
+    pub tool_result_maximum: usize,
+    pub recent_raw_maximum: usize,
+    pub memory_maximum: usize,
+    pub skill_metadata_maximum: usize,
+}
+impl ContextPoolPolicy {
+    pub const DEFAULT: Self = Self {
+        next_request_reserve: 1024,
+        tool_result_maximum: 4096,
+        recent_raw_maximum: 4096,
+        memory_maximum: 8192,
+        skill_metadata_maximum: 4096,
+    };
+}
+impl Default for ContextPoolPolicy {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+#[derive(Clone, Copy, Debug)]
+pub struct ContextDemand {
+    pub demand: usize,
+    pub minimum: usize,
+    pub maximum: usize,
+}
+impl ContextBudget {
+    /// Honor minima, then consume remaining space in model/caller supplied priority order.
+    /// # Errors
+    /// Returns an error when minima are invalid or exceed the shared pool.
+    pub fn allocate(&self, demands: &[ContextDemand]) -> Result<Vec<usize>, &'static str> {
+        if demands.iter().any(|d| d.minimum > d.maximum) {
+            return Err("minimum exceeds maximum");
         }
+        let mut allocations: Vec<_> = demands.iter().map(|d| d.minimum).collect();
+        let minimum = allocations
+            .iter()
+            .try_fold(0usize, |sum, n| sum.checked_add(*n))
+            .ok_or("minimum overflow")?;
+        if minimum > self.usable() {
+            return Err("minima exceed context pool");
+        }
+        let mut remaining = self.usable() - minimum;
+        for (allocation, demand) in allocations.iter_mut().zip(demands) {
+            let extra = demand
+                .demand
+                .min(demand.maximum)
+                .saturating_sub(*allocation)
+                .min(remaining);
+            *allocation += extra;
+            remaining -= extra;
+        }
+        Ok(allocations)
     }
 }
 
@@ -149,7 +174,7 @@ pub struct ExecutionBudget {
 }
 #[cfg(test)]
 mod tests {
-    use super::{ContextBudget, ExecutionBudget};
+    use super::{ContextBudget, ContextPoolPolicy, ExecutionBudget};
 
     #[test]
     fn execution_limits_are_unlimited_by_default() {
@@ -177,41 +202,92 @@ mod tests {
     }
 
     #[test]
-    fn compact_threshold_is_a_fraction_of_history_budget() {
+    fn compacted_tool_result_allowance_tracks_the_pool_policy() {
         let budget = ContextBudget::new(100_000, None, 0);
-        let threshold = budget.compact_threshold(75);
-        assert_eq!(threshold, budget.history_budget() * 75 / 100);
-        assert!(threshold < 75_000, "threshold must not use the raw window");
+        assert_eq!(
+            budget.compacted_tool_result_chars(),
+            budget.pool.tool_result_maximum.div_ceil(8) * 4
+        );
+        let smaller = ContextBudget {
+            pool: ContextPoolPolicy {
+                tool_result_maximum: 512,
+                ..ContextPoolPolicy::DEFAULT
+            },
+            ..budget
+        };
+        assert!(smaller.compacted_tool_result_chars() < budget.compacted_tool_result_chars());
     }
 
     #[test]
-    fn a_larger_tool_schema_cost_shrinks_every_derived_budget() {
+    fn tool_schema_cost_shrinks_the_pool_and_respects_tool_maximum() {
         let light = ContextBudget::new(100_000, None, 0);
         let heavy = ContextBudget::new(100_000, None, 20_000);
         assert!(heavy.usable() < light.usable());
-        assert!(heavy.compact_threshold(75) < light.compact_threshold(75));
+        assert_eq!(heavy.tool_result_chars(), light.tool_result_chars());
         assert!(heavy.history_budget() < light.history_budget());
+        let constrained = ContextBudget::new(10_000, Some(1_000), 6_000);
+        assert_eq!(constrained.tool_result_chars(), 12_000);
+        assert!(constrained.tool_result_chars() < light.tool_result_chars());
+        assert!(constrained.compacted_tool_result_chars() < light.compacted_tool_result_chars());
     }
 
     #[test]
     fn tiny_context_windows_saturate_instead_of_underflowing() {
         let budget = ContextBudget::new(1_000, None, 500);
         assert_eq!(budget.usable(), 0);
-        assert_eq!(budget.compact_threshold(75), 0);
+        assert_eq!(budget.tool_result_chars(), 0);
+        assert_eq!(budget.compacted_tool_result_chars(), 0);
         assert_eq!(budget.history_budget(), 0);
         assert_eq!(budget.session_summary_budget(), 0);
         assert_eq!(budget.recent_messages_budget(), 0);
     }
 
     #[test]
-    fn session_summary_gets_only_a_share_of_the_history_budget() {
-        let budget = ContextBudget::new(100_000, None, 0);
+    fn elastic_demands_compete_and_minima_are_hard() {
+        use super::ContextDemand;
+        let budget = ContextBudget::new(100, Some(20), 10);
         assert_eq!(
-            budget.session_summary_budget(),
-            budget.history_budget() * usize::from(ContextBudget::SESSION_SUMMARY_SHARE_PERCENT)
-                / 100
+            budget
+                .allocate(&[
+                    ContextDemand {
+                        demand: 60,
+                        minimum: 0,
+                        maximum: 70
+                    },
+                    ContextDemand {
+                        demand: 50,
+                        minimum: 20,
+                        maximum: 70
+                    }
+                ])
+                .unwrap(),
+            vec![50, 20]
         );
-        assert!(budget.session_summary_budget() < budget.history_budget());
-        assert_eq!(budget.recent_messages_budget(), budget.history_budget());
+        assert!(
+            budget
+                .allocate(&[ContextDemand {
+                    demand: 71,
+                    minimum: 71,
+                    maximum: 100
+                }])
+                .is_err()
+        );
+        assert!(
+            budget
+                .allocate(&[ContextDemand {
+                    demand: 2,
+                    minimum: 3,
+                    maximum: 2
+                }])
+                .is_err()
+        );
+    }
+    #[test]
+    fn elastic_pool_and_projected_boundary() {
+        let budget = ContextBudget::new(100, Some(20), 10);
+        assert_eq!(budget.history_budget(), 70);
+        assert_eq!(budget.skills_budget_tokens(), 70);
+        assert!(!budget.needs_compaction(60, 10));
+        assert!(budget.needs_compaction(60, 11));
     }
 }

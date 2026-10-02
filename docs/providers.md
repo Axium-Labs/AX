@@ -213,14 +213,12 @@ Endpoints:
   LF/CRLF framing, reasoning/tool deltas, repeated `data:` prefixes and `[DONE]`.
 
 Before every model/list request AX reloads its stored credential and refreshes
-within 120 seconds of expiry. Refresh is serialized across provider instances
-and persists rotated tokens before use. HTTP 401 triggers one refresh/retry
-before asking for login; 403 reports account/model entitlement denial, and 429
-reports rate/quota exhaustion. Transport failures remain transport errors and
-preserve credentials. HTTP error bodies are not echoed from this provider.
-Login and refresh requests time out after 30 seconds, model listing after 10
-seconds, and chat transport after 180 seconds (15 second connect deadline).
-Dropping the request future closes its stream, following AX cancellation.
+it when its stored expiry requires renewal. Renewal is serialized across
+provider instances and persists rotated tokens before use. HTTP 401 is terminal
+and requires renewed authorization rather than replaying the failed request.
+403 is terminal. 429 retains Retry-After and enters the runtime retry policy;
+neither 403 nor 429 triggers credential renewal. Vendor bodies are sanitized
+so token-bearing responses never leak into error output.
 
 WorkBuddy has no invented offline model list. Successful discovery uses the
 existing AX model cache and picker; a failed refresh keeps the existing cache
@@ -243,3 +241,31 @@ existing device-code flow to the desktop. Crew runs AX's login command, displays
 the URL and device code, and only opens the system browser after a user click.
 Closing the authorization dialog cancels the login process. AX remains the
 sole owner of token exchange, credential persistence and model discovery.
+
+## Provider retry policy
+
+The runtime classifies typed errors before retrying. HTTP 400/401/403, other
+non-429 4xx except 408 and 425, invalid configuration and malformed responses
+are terminal. 408 (request timeout), 425 (too early), 429, 5xx, timeout and
+connection reset/abort are retryable. No retry occurs after visible text or
+thinking has streamed, preventing duplicate output. OAuth renewal based on
+stored expiry still happens before sending a request; a failed authenticated
+request is not replayed to renew credentials.
+
+`Retry-After` seconds and HTTP-date values take precedence, and every non-2xx
+path that can be retried preserves the header — including credential refresh and
+catalog requests, not only chat completions. Otherwise AX uses capped
+exponential backoff with full jitter. Both attempt and elapsed-time budgets
+apply, including a timeout for the remaining retry time. A server wait outside
+the budget stops retries instead of shortening its requested wait. Each
+successful request resets its retry sequence; model steps/task counts do not
+increase for transport retries.
+
+```json
+"retry": { "max_attempts":4, "time_budget_ms":30000,
+           "base_delay_ms":200, "max_delay_ms":5000 }
+```
+
+`max_attempts` includes the initial request; 0/1 disables retries. Missing
+configuration maps to these centralized defaults, replacing the old goal-only
+retry-once behavior. Ordinary turns and children use the same policy.

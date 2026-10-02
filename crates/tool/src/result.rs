@@ -9,6 +9,9 @@ pub struct ResultReader(pub Arc<RwLock<HashMap<String, String>>>);
 
 #[async_trait::async_trait]
 impl crate::Tool for ResultReader {
+    fn execution_boundary(&self) -> crate::ExecutionBoundary {
+        crate::ExecutionBoundary::RuntimeOwned
+    }
     fn name(&self) -> &'static str {
         "tool_output"
     }

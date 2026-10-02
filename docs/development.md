@@ -14,7 +14,7 @@ How to build, test and extend AX. For how the pieces fit together, start with
 ## Workspace layout
 
 ```text
-Cargo.toml               # workspace root: 9 crates, shared deps, lints, release profile
+Cargo.toml               # workspace root: 11 crates, shared deps, lints, release profile
 crates/
 ├── cli/                 # composition root: args, provider selection, TUI, sessions
 ├── core/                # runtime-core: agent loop, context, budget, compression
@@ -23,6 +23,8 @@ crates/
 ├── memory/              # SQLite + JSONL storage, scoped facts, resume
 ├── mcp/                 # MCP client, transports, gateway, proxies
 ├── model/               # provider abstraction, auth storage, catalogs
+├── sandbox/             # workspace confinement policies and OS execution backends
+├── scoped/              # shared capability registry and scope resolution
 ├── skill/               # skill metadata indexing and routing
 └── tool/                # Tool trait, built-ins, permissions, telemetry
 ```

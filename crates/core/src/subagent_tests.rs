@@ -166,7 +166,7 @@ fn fixture(
     let provider = Arc::new(Provider::default());
     let host = Arc::new(Host::default());
     let writes = Arc::new(AtomicUsize::new(0));
-    let mut tools = ToolRegistry::new();
+    let mut tools = ToolRegistry::with_mode(tool::SandboxMode::Off);
     tools.register(BoundTool("write", Arc::clone(&writes)));
     tools.register(BoundTool("other", Arc::clone(&writes)));
     let mut kernel =
@@ -402,6 +402,9 @@ async fn tools_only_narrow_and_children_cannot_spawn() {
 struct StoreApproval(PermissionStore);
 #[async_trait]
 impl ApprovalPolicy for StoreApproval {
+    fn capability_decision(&self, capability: Capability) -> Option<PermissionDecision> {
+        Some(self.0.decision(capability))
+    }
     async fn approve(&self, _: &str, _: &Value, permission: ToolPermission) -> bool {
         self.0.decision(permission.capability) == PermissionDecision::Allow
     }
@@ -461,6 +464,7 @@ async fn cancel_timeout_and_failures_propagate_and_close_receipts() {
             "hang",
             SpawnOptions {
                 timeout_secs: 1,
+                policy: crate::ChildPolicy::default(),
                 ..SpawnOptions::default()
             },
         )
@@ -576,4 +580,105 @@ async fn admission_is_finite_and_disabling_revokes_retained_handles() {
         assert_eq!(manager.wait_agent(&id).await.status, "cancelled");
     }
     assert_eq!(host.prepared.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn explicit_child_inheritance_and_custom_allow_cannot_elevate() {
+    use crate::child_policy::*;
+    let (mut kernel, provider, _, writes) = fixture(true, 1);
+    kernel.push_context(Message::user("parent context marker"));
+    let store = PermissionStore::default();
+    store.set_capability(Capability::FilesystemWrite, PermissionDecision::Deny);
+    kernel.approval = Arc::new(StoreApproval(store));
+    kernel.constrain_permissions(tool::PermissionProfile::default());
+    let _events = kernel.prepare_subagents();
+    let manager = kernel.subagent_manager().unwrap();
+    let policy = ChildPolicy {
+        context: ContextInheritance::Full,
+        tools: Selection::None,
+        ..Default::default()
+    };
+    let id = manager
+        .spawn_agent(
+            "child",
+            SpawnOptions {
+                policy,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(manager.wait_agent(&id).await.status, "completed");
+    {
+        let requests = provider.requests.lock().unwrap();
+        assert!(requests[0].tools.is_empty());
+        assert!(
+            requests[0]
+                .messages
+                .iter()
+                .any(|m| m.content.contains("parent context marker"))
+        );
+    }
+    let policy = ChildPolicy {
+        permissions: PermissionInheritance::Custom,
+        custom_permissions: tool::PermissionProfile {
+            rules: vec![tool::PermissionRule {
+                decision: PermissionDecision::Allow,
+                matcher: tool::RuleMatcher::ToolParameter {
+                    tool: "write".into(),
+                    pointer: String::new(),
+                    pattern: "*".into(),
+                },
+            }],
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let id = manager
+        .spawn_agent(
+            "attempt-denied",
+            SpawnOptions {
+                policy,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(manager.wait_agent(&id).await.status, "failed");
+    assert_eq!(writes.load(Ordering::SeqCst), 0);
+}
+#[tokio::test]
+async fn child_model_override_requires_parent_registration() {
+    use crate::child_policy::*;
+    let (mut kernel, _, _, _) = fixture(true, 1);
+    let alternate = Arc::new(Provider::default());
+    kernel.register_child_model("approved".into(), alternate.clone());
+    let _events = kernel.prepare_subagents();
+    let manager = kernel.subagent_manager().unwrap();
+    let mut policy = ChildPolicy {
+        model: ModelInheritance::Override,
+        model_override: Some("unknown".into()),
+        ..Default::default()
+    };
+    assert!(
+        manager
+            .spawn_agent(
+                "child",
+                SpawnOptions {
+                    policy: policy.clone(),
+                    ..Default::default()
+                }
+            )
+            .is_err()
+    );
+    policy.model_override = Some("approved".into());
+    let id = manager
+        .spawn_agent(
+            "child",
+            SpawnOptions {
+                policy,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(manager.wait_agent(&id).await.status, "completed");
+    assert_eq!(alternate.requests.lock().unwrap().len(), 1);
 }

@@ -6,7 +6,8 @@
 pub mod backup;
 mod scoped;
 pub use scoped::{
-    MIN_RELEVANCE, MemoryRecord, MemoryScope, extract_user_memories, retrieve, validate_fact,
+    MIN_RELEVANCE, MemoryIndexEntry, MemoryRecord, MemoryScope, MemoryType, extract_user_memories,
+    retrieve, retrieve_index, unix_now, validate_fact,
 };
 
 use std::{
@@ -277,12 +278,8 @@ impl MemoryStore {
                 )?;
             }
         }
-        connection.execute_batch("CREATE TABLE IF NOT EXISTS agent_states (
-            message_id INTEGER PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE,
-            session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
-            content TEXT NOT NULL, metadata TEXT NOT NULL, created_at INTEGER NOT NULL
-        ); CREATE INDEX IF NOT EXISTS idx_agent_states_session ON agent_states(session_id, message_id);
-        PRAGMA user_version=6;")?;
+        scoped::migrate_memory_index(&connection)?;
+        migrate_agent_states(&connection)?;
         Ok(Self {
             connection,
             events_dir,
@@ -988,6 +985,16 @@ fn map_long_term_memory(row: &rusqlite::Row<'_>) -> rusqlite::Result<LongTermMem
         created_at: row.get(4)?,
         updated_at: row.get(5)?,
     })
+}
+
+fn migrate_agent_states(connection: &Connection) -> Result<(), MemoryError> {
+    connection.execute_batch("CREATE TABLE IF NOT EXISTS agent_states (
+            message_id INTEGER PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE,
+            session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+            content TEXT NOT NULL, metadata TEXT NOT NULL, created_at INTEGER NOT NULL
+        ); CREATE INDEX IF NOT EXISTS idx_agent_states_session ON agent_states(session_id, message_id);
+        PRAGMA user_version=7;")?;
+    Ok(())
 }
 
 #[cfg(test)]

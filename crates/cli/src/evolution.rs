@@ -11,6 +11,7 @@ fn bounded(text: &str) -> String {
 pub(crate) struct Recorder {
     pub experience: Experience,
     calls: HashMap<String, usize>,
+    skill_calls: HashMap<String, String>,
     sink: Option<::evolution::RecordSink>,
     completed: bool,
     instruction_paths: Vec<(String, String)>,
@@ -39,6 +40,7 @@ impl Recorder {
                 at: ::evolution::now(),
             },
             calls: HashMap::new(),
+            skill_calls: HashMap::new(),
             sink: state.evolution.as_ref().and_then(::evolution::Handle::sink),
             completed: false,
             instruction_paths: state
@@ -61,8 +63,17 @@ impl Recorder {
     pub fn observe(&mut self, event: &AgentEvent) {
         match event {
             AgentEvent::ToolStarted {
-                id, name, detail, ..
+                id,
+                name,
+                detail,
+                input,
+                ..
             } => {
+                if name == "invoke_skill"
+                    && let Some(skill) = input["name"].as_str()
+                {
+                    self.skill_calls.insert(id.clone(), skill.to_owned());
+                }
                 if !self.experience.tools_used.contains(name) {
                     self.experience.tools_used.push(name.clone());
                 }
@@ -89,6 +100,12 @@ impl Recorder {
                 diagnostics,
                 ..
             } => {
+                if let Some(skill) = self.skill_calls.remove(id)
+                    && *success
+                    && !self.experience.skills_used.contains(&skill)
+                {
+                    self.experience.skills_used.push(skill);
+                }
                 if let Some(index) = self.calls.remove(id) {
                     self.experience.steps[index].success = Some(*success);
                     let detail = &self.experience.steps[index].detail;
@@ -155,16 +172,7 @@ pub(crate) async fn checkpointed_turn<F>(
 where
     F: FnMut(AgentEvent) + Send,
 {
-    let available = state.skill_tool_names();
-    let skills_used = state
-        .skill_catalog
-        .as_ref()
-        .expect("skill context prepared")
-        .auto_route_candidates(prompt, available.iter().map(String::as_str))
-        .into_iter()
-        .filter(|s| state.active_skills.contains(&s.name))
-        .map(|s| s.name)
-        .collect();
+    let skills_used = Vec::new();
     let mut recorder = Recorder::new(state, prompt, skills_used);
     let mut saved = 0;
     let intent = std::mem::take(&mut state.next_goal_turn);
@@ -377,7 +385,13 @@ mod tests {
                 .is_none()
         );
         let messages = state.route_skills("sample-evolved", 1000).unwrap();
-        assert_eq!(messages.len(), 1);
+        assert!(messages.is_empty());
+        let loaded = state.skills().unwrap().load("sample-evolved").unwrap();
+        let messages = vec![crate::Message::system(format!(
+            "[ax-skill:sample-evolved]\nSkill root: {}\n{}",
+            loaded.directory.display(),
+            loaded.instructions
+        ))];
         state.persist_messages(&messages).unwrap();
         let session = state.current_session_id().unwrap().to_owned();
         let archived = state.evolution_root().join("archived");

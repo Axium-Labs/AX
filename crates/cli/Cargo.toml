@@ -10,6 +10,7 @@ name = "ax"
 path = "src/main.rs"
 
 [dependencies]
+sandbox = { path = "../sandbox" }
 scoped = { path = "../scoped" }
 ignore = "0.4"
 fs2 = "0.4"
@@ -50,3 +51,7 @@ vt100 = "0.15"
 
 [lints]
 workspace = true
+
+[[test]]
+name = "linux_child_sandbox"
+harness = false

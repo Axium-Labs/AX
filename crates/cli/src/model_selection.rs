@@ -660,6 +660,11 @@ mod tests {
         let root = std::env::temp_dir().join(format!("ax-config-{}", std::process::id()));
         let path = root.join("config.json");
         let config = AxConfig {
+            child_models: std::collections::BTreeMap::default(),
+            context_pool: runtime_core::ContextPoolPolicy::default(),
+            permissions: tool::PermissionProfile::default(),
+            retry: model::RetryPolicy::default(),
+            sandbox: sandbox::SandboxMode::default(),
             subagent: runtime_core::SubagentConfig::default(),
             execution: crate::config::ExecutionConfig::default(),
             model: Some(ModelConfig {

@@ -42,6 +42,7 @@ pub struct SpawnOptions {
     pub context: Option<String>,
     pub tools: Option<Vec<String>>,
     pub timeout_secs: u64,
+    pub policy: crate::ChildPolicy,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -75,6 +76,7 @@ struct Pending {
 pub struct SubagentManager {
     controller: AgentKernel,
     templates: Vec<AgentTemplate>,
+    parent_messages: Vec<model::Message>,
     host: Arc<dyn ChildHost>,
     slots: Semaphore,
     next: AtomicU64,
@@ -110,6 +112,32 @@ impl SubagentManager {
                     return Err(ToolError::PermissionDenied(name.clone()).into());
                 }
             }
+        }
+        options
+            .policy
+            .inherited_context(&self.parent_messages)
+            .map_err(|e| ToolError::InvalidInput(e.into()))?;
+        for name in options
+            .policy
+            .selected_tools
+            .iter()
+            .chain(&options.policy.selected_mcp)
+        {
+            if name == "subagent" || name == "spawn_agent" || !self.controller.has_tool(name) {
+                return Err(ToolError::PermissionDenied(name.clone()).into());
+            }
+        }
+        if options.policy.model == crate::child_policy::ModelInheritance::Override
+            && !options
+                .policy
+                .model_override
+                .as_ref()
+                .is_some_and(|name| self.controller.child_models.contains_key(name))
+        {
+            return Err(ToolError::InvalidInput(
+                "model override must be registered by the parent".into(),
+            )
+            .into());
         }
         let id = format!("subagent-{}", self.next.fetch_add(1, Ordering::Relaxed));
         let input = options.context.as_ref().map_or_else(
@@ -205,6 +233,8 @@ impl SubagentManager {
         }
     }
 
+    // Admission, binding and durable receipt form one child lifecycle.
+    #[allow(clippy::too_many_lines)]
     async fn execute_child(
         &self,
         id: &str,
@@ -215,30 +245,182 @@ impl SubagentManager {
             .acquire()
             .await
             .map_err(|e| AgentError::WorkerJoin(e.to_string()))?;
+        // The timeout bounds child execution only. Waiting behind the
+        // concurrency limit is queueing, and must not consume the child's own
+        // execution time or report a timeout for work that never started.
+        if pending.options.timeout_secs == 0 {
+            return self.run_child(id, pending).await;
+        }
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(pending.options.timeout_secs),
+            self.run_child(id, pending),
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(_) => Ok(SubagentResult::failed("failed", "subagent timed out")),
+        }
+    }
+
+    #[allow(clippy::too_many_lines)]
+    async fn run_child(&self, id: &str, pending: &Pending) -> Result<SubagentResult, AgentError> {
         let child = self
             .host
-            .prepare(&self.controller, &pending.input, None)
+            .prepare_with_policy(&self.controller, &pending.input, &pending.options.policy)
             .await?;
         let mut guard = ChildGuard {
             child,
             finished: false,
         };
         let child = &mut guard.child;
+        let policy = &pending.options.policy;
         child.kernel.approval = Arc::clone(&self.controller.approval);
-        child.kernel.provider = Arc::clone(&self.controller.provider);
-        child.kernel.tools.remove("subagent");
-        child.kernel.tools.remove("spawn_agent");
-        if let Some(names) = &pending.options.tools {
-            let existing = child
+        child
+            .kernel
+            .permission_profiles
+            .clone_from(&self.controller.permission_profiles);
+        if child.kernel.permission_profiles.is_empty() {
+            child
+                .kernel
+                .permission_profiles
+                .push(tool::PermissionProfile::default());
+        }
+        if policy.permissions == crate::child_policy::PermissionInheritance::Custom {
+            child
+                .kernel
+                .constrain_permissions(policy.custom_permissions.clone());
+        }
+        child.kernel.provider = policy
+            .model_override
+            .as_ref()
+            .filter(|_| policy.model == crate::child_policy::ModelInheritance::Override)
+            .and_then(|name| self.controller.child_models.get(name))
+            .cloned()
+            .unwrap_or_else(|| Arc::clone(&self.controller.provider));
+        let inherited = policy
+            .inherited_context(&self.parent_messages)
+            .map_err(|e| ToolError::InvalidInput(e.into()))?;
+        // Parent history is context, never part of the child's durable raw-turn log.
+        if !inherited.is_empty() {
+            child.kernel.messages.insert(
+                0,
+                model::Message::system(format!(
+                    "[ax-parent-context]\nReadonly context from parent:\n{}",
+                    serde_json::to_string(&inherited)
+                        .map_err(|e| ToolError::InvalidInput(e.to_string()))?
+                )),
+            );
+        }
+        let existing = child
+            .kernel
+            .tools
+            .names()
+            .into_iter()
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        for name in existing {
+            let class = child
                 .kernel
                 .tools
-                .names()
-                .into_iter()
-                .map(str::to_owned)
-                .collect::<Vec<_>>();
-            for name in existing {
-                if !names.contains(&name) {
-                    child.kernel.tools.remove(&name);
+                .get(&name)
+                .map_or(tool::InheritanceClass::Tools, |t| t.inheritance_class());
+            let keep = match class {
+                tool::InheritanceClass::Memory => {
+                    policy.memory != crate::child_policy::MemoryInheritance::None
+                }
+                tool::InheritanceClass::Skills => {
+                    policy.skills != crate::child_policy::Selection::None
+                }
+                tool::InheritanceClass::Mcp => match policy.mcp {
+                    crate::child_policy::Selection::None => false,
+                    crate::child_policy::Selection::Selected => policy.selected_mcp.contains(&name),
+                    crate::child_policy::Selection::Inherit => true,
+                },
+                tool::InheritanceClass::Tools => match policy.tools {
+                    crate::child_policy::Selection::None => false,
+                    crate::child_policy::Selection::Selected => {
+                        policy.selected_tools.contains(&name)
+                    }
+                    crate::child_policy::Selection::Inherit => true,
+                },
+            };
+            if !self.controller.has_tool(&name)
+                || !keep
+                || pending
+                    .options
+                    .tools
+                    .as_ref()
+                    .is_some_and(|names| !names.contains(&name))
+                || name == "subagent"
+                || name == "spawn_agent"
+            {
+                child.kernel.tools.remove(&name);
+            }
+        }
+        // Sharing state is opt-in and mediated by a tool's typed binding hook.
+        for parent_tool in self.controller.tools.iter() {
+            if pending
+                .options
+                .tools
+                .as_ref()
+                .is_some_and(|names| !names.iter().any(|n| n == parent_tool.name()))
+            {
+                continue;
+            }
+            if parent_tool.inheritance_class() == tool::InheritanceClass::Skills
+                && policy.skills != crate::child_policy::Selection::None
+            {
+                let selected = (policy.skills == crate::child_policy::Selection::Selected)
+                    .then_some(policy.selected_skills.as_slice());
+                if let Some(tool) = parent_tool.fork_skills(selected) {
+                    child.kernel.tools.register_arc(tool);
+                } else {
+                    return Err(ToolError::InvalidInput(
+                        "skill tool cannot support inheritance".into(),
+                    )
+                    .into());
+                }
+            }
+            if parent_tool.inheritance_class() == tool::InheritanceClass::Memory {
+                let shared = match policy.memory {
+                    crate::child_policy::MemoryInheritance::ParentReadonly => {
+                        parent_tool.fork_memory(&pending.input, true)
+                    }
+                    crate::child_policy::MemoryInheritance::SharedProject => {
+                        parent_tool.fork_memory(&pending.input, false)
+                    }
+                    _ => None,
+                };
+                if let Some(tool) = shared {
+                    child.kernel.tools.register_arc(tool);
+                } else if matches!(
+                    policy.memory,
+                    crate::child_policy::MemoryInheritance::ParentReadonly
+                        | crate::child_policy::MemoryInheritance::SharedProject
+                ) {
+                    return Err(ToolError::InvalidInput(
+                        "memory tool cannot support requested inheritance".into(),
+                    )
+                    .into());
+                }
+            }
+            if parent_tool.inheritance_class() == tool::InheritanceClass::Mcp {
+                let selected = match policy.mcp {
+                    crate::child_policy::Selection::None => false,
+                    crate::child_policy::Selection::Selected => {
+                        policy.selected_mcp.contains(&parent_tool.name().to_owned())
+                    }
+                    crate::child_policy::Selection::Inherit => true,
+                };
+                // Parent-scoped remote resources are explicit shared state.
+                if selected {
+                    if policy.workspace != crate::child_policy::WorkspaceInheritance::Shared {
+                        return Err(ToolError::InvalidInput(
+                            "parent MCP inheritance requires shared workspace".into(),
+                        )
+                        .into());
+                    }
+                    child.kernel.tools.register_arc(parent_tool.clone());
                 }
             }
         }
@@ -320,10 +502,6 @@ impl SubagentManager {
         let result = tokio::select! {
             biased;
             () = cancelled => SubagentResult::failed("cancelled", "cancelled"),
-            () = async {
-                if pending.options.timeout_secs == 0 { std::future::pending::<()>().await; }
-                else { tokio::time::sleep(std::time::Duration::from_secs(pending.options.timeout_secs)).await; }
-            } => SubagentResult::failed("failed", "subagent timed out"),
             result = std::panic::AssertUnwindSafe(execution).catch_unwind() => match result {
                 Ok(result) => result.unwrap_or_else(|error| SubagentResult::failed("failed", error.to_string())),
                 Err(_) => SubagentResult::failed("failed", "subagent worker panicked"),
@@ -372,6 +550,9 @@ impl Drop for CancelOnDrop {
 struct SubagentTool(Arc<SubagentManager>);
 #[async_trait]
 impl Tool for SubagentTool {
+    fn execution_boundary(&self) -> tool::ExecutionBoundary {
+        tool::ExecutionBoundary::RuntimeOwned
+    }
     fn name(&self) -> &'static str {
         "subagent"
     }
@@ -379,7 +560,8 @@ impl Tool for SubagentTool {
         "Delegate an independent task with only necessary context. Returns its final result. Child tools may only be narrowed; children cannot delegate."
     }
     fn input_schema(&self) -> Value {
-        let mut schema = json!({"type":"object","properties":{"task":{"type":"string"},"context":{"type":"string"},"tools":{"type":"array","items":{"type":"string"}}},"required":["task"],"additionalProperties":false});
+        let mut schema = json!({"type":"object","properties":{"task":{"type":"string"},"context":{"type":"string"},"tools":{"type":"array","items":{"type":"string"}},"policy":{"type":"object","description":"ChildPolicy inheritance contract. Default: no parent context, isolated memory/workspace, no skills/MCP. Parent permission ceiling always applies."}},"required":["task"],"additionalProperties":false});
+        schema["properties"]["policy"] = crate::ChildPolicy::schema();
         if !self.0.templates.is_empty() {
             schema["properties"]["agent"] = json!({"type":"string","enum":self.0.templates.iter().map(|a| &a.name).collect::<Vec<_>>(),"description":self.0.templates.iter().map(|a| format!("{}: {}", a.name, a.description)).collect::<Vec<_>>().join("; ")});
         }
@@ -391,8 +573,19 @@ impl Tool for SubagentTool {
     fn capability(&self, _: &Value) -> Capability {
         Capability::Process
     }
-    fn resources(&self, _: &Value) -> Vec<ResourceAccess> {
-        vec![]
+    fn resources(&self, input: &Value) -> Vec<ResourceAccess> {
+        // A child that shares the parent workspace writes into the same tree as
+        // sibling tools, so it must be serialized against them instead of being
+        // declared side-effect free. An isolated or snapshot child owns a
+        // disposable workspace and conflicts with nothing here.
+        let shares_parent_workspace = input["policy"]["workspace"]
+            .as_str()
+            .is_some_and(|value| value == "shared");
+        if shares_parent_workspace {
+            vec![ResourceAccess::exclusive()]
+        } else {
+            vec![]
+        }
     }
     async fn execute(&self, input: Value) -> Result<String, ToolError> {
         #[derive(Deserialize)]
@@ -402,6 +595,8 @@ impl Tool for SubagentTool {
             agent: Option<String>,
             context: Option<String>,
             tools: Option<Vec<String>>,
+            #[serde(default)]
+            policy: crate::ChildPolicy,
         }
         let mut input: Input =
             serde_json::from_value(input).map_err(|e| ToolError::InvalidInput(e.to_string()))?;
@@ -441,6 +636,7 @@ impl Tool for SubagentTool {
             SpawnOptions {
                 context: input.context,
                 tools: input.tools,
+                policy: input.policy,
                 timeout_secs: self.0.controller.child_execution_budget().turn_timeout_secs,
             },
         ) {
@@ -520,6 +716,7 @@ impl AgentKernel {
         let manager = Arc::new(SubagentManager {
             controller,
             templates: self.agent_templates.clone(),
+            parent_messages: self.messages.clone(),
             host,
             slots: Semaphore::new(self.subagent_config.max_concurrent.clamp(1, 64)),
             next: AtomicU64::new(1),

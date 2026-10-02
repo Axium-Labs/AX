@@ -16,15 +16,7 @@ pub fn select_context(
     total_budget: usize,
     system_budget: usize,
 ) -> Vec<Message> {
-    let mut system = Vec::new();
     let mut used = 0;
-    for message in messages.iter().filter(|m| m.role == Role::System) {
-        let cost = estimate_tokens(std::slice::from_ref(message));
-        if used + cost <= system_budget {
-            system.push(message.clone());
-            used += cost;
-        }
-    }
     let conversation = messages
         .iter()
         .filter(|m| m.role != Role::System)
@@ -44,8 +36,18 @@ pub fn select_context(
         used += cost;
         start = index;
     }
-    system.extend_from_slice(&conversation[start..]);
-    system
+    let mut selected = Vec::new();
+    let mut system_used = 0;
+    for message in messages.iter().filter(|m| m.role == Role::System) {
+        let cost = estimate_tokens(std::slice::from_ref(message));
+        if used + cost <= total_budget && system_used + cost <= system_budget {
+            selected.push(message.clone());
+            used += cost;
+            system_used += cost;
+        }
+    }
+    selected.extend_from_slice(&conversation[start..]);
+    selected
 }
 
 #[cfg(test)]

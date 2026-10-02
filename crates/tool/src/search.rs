@@ -20,6 +20,9 @@ const fn default_limit() -> usize {
 pub struct SearchTool;
 #[async_trait]
 impl Tool for SearchTool {
+    fn execution_boundary(&self) -> crate::ExecutionBoundary {
+        crate::ExecutionBoundary::WorkspaceWorker
+    }
     fn fork_for_run(&self, context: &crate::RunContext) -> Option<std::sync::Arc<dyn Tool>> {
         Some(std::sync::Arc::new(crate::WorkspaceTool::new(
             std::sync::Arc::new(SearchTool),

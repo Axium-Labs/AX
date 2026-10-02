@@ -236,9 +236,11 @@ fn resolve(input: &Value, jobs: &[Job], outputs: &[Option<Message>]) -> Result<V
     }
 }
 
+#[allow(clippy::too_many_arguments)] // The scheduler accepts runtime boundaries explicitly.
 pub(super) async fn run<F, H>(
     jobs: Vec<Job>,
     approval: Arc<dyn ApprovalPolicy>,
+    profiles: Vec<tool::PermissionProfile>,
     concurrency: usize,
     timeout_secs: u64,
     emit: &Mutex<F>,
@@ -281,6 +283,7 @@ where
             } else {
                 resolve(&job.input, &jobs, &outputs)
             };
+            let profiles = profiles.clone();
             let approval = Arc::clone(&approval);
             let approval_gate = Arc::clone(&approval_gate);
             let execution = execution.clone();
@@ -294,7 +297,16 @@ where
                     }
                 });
                 let actual_input = input.as_ref().unwrap_or(&proposed_input).clone();
-                let result = execute(job, input, approval, approval_gate, timeout_secs, emit).await;
+                let result = execute(
+                    job,
+                    input,
+                    approval,
+                    profiles,
+                    approval_gate,
+                    timeout_secs,
+                    emit,
+                )
+                .await;
                 let success = result.is_ok();
                 let envelope = envelope(&result);
                 (emit.lock().unwrap())(AgentEvent::ToolFinished {
@@ -321,6 +333,7 @@ async fn execute<F: FnMut(AgentEvent) + Send>(
     job: &Job,
     input: Result<Value, ToolError>,
     approval: Arc<dyn ApprovalPolicy>,
+    profiles: Vec<tool::PermissionProfile>,
     approval_gate: Arc<tokio::sync::Mutex<()>>,
     timeout_secs: u64,
     emit: &Mutex<F>,
@@ -340,13 +353,34 @@ async fn execute<F: FnMut(AgentEvent) + Send>(
         .tool
         .as_ref()
         .ok_or_else(|| ToolError::Unknown(job.name.clone()))?;
+    let permission = tool.permission(&input);
+    let decisions: Vec<_> = profiles
+        .iter()
+        .map(|p| {
+            p.decision(
+                &job.name,
+                &input,
+                permission.capability,
+                &tool.resources(&input),
+            )
+        })
+        .collect();
+    let outcome = tool::resolve_profiles(&decisions);
+    if outcome == tool::ProfileDecision::Deny
+        || approval.capability_decision(permission.capability)
+            == Some(tool::PermissionDecision::Deny)
+    {
+        return Err(ToolError::PermissionDenied(job.name.clone()));
+    }
     let approved = {
-        // Interactive permission dialogs have one active surface. Serialize
-        // approval decisions only; approved operations still run concurrently.
         let _guard = approval_gate.lock().await;
-        approval
-            .approve(&job.name, &input, tool.permission(&input))
-            .await
+        match outcome {
+            tool::ProfileDecision::Ask => approval.ask(&job.name, &input, permission).await,
+            tool::ProfileDecision::Allowed => true,
+            tool::ProfileDecision::Deny | tool::ProfileDecision::Unspecified => {
+                approval.approve(&job.name, &input, permission).await
+            }
+        }
     };
     if !approved {
         return Err(ToolError::PermissionDenied(job.name.clone()));
@@ -354,11 +388,11 @@ async fn execute<F: FnMut(AgentEvent) + Send>(
     let _lease = locks().acquire(tool.resources(&input)).await;
     let _timer = tool::telemetry::Timer::new(format!("tool.{}", tool.name()));
     if timeout_secs == 0 {
-        tool.execute_output(input).await
+        tool.execute_output_constrained(input, &profiles).await
     } else {
         tokio::time::timeout(
             std::time::Duration::from_secs(timeout_secs),
-            tool.execute_output(input),
+            tool.execute_output_constrained(input, &profiles),
         )
         .await
         .unwrap_or_else(|_| Err(ToolError::Execution("tool timeout".into())))
@@ -560,7 +594,7 @@ mod tests {
     }
     fn fixture() -> (ToolRegistry, Arc<State>) {
         let state = Arc::new(State::default());
-        let mut tools = ToolRegistry::new();
+        let mut tools = ToolRegistry::with_mode(tool::SandboxMode::Off);
         tools.register(Probe(Arc::clone(&state)));
         (tools, state)
     }
@@ -572,6 +606,7 @@ mod tests {
         run(
             prepare(calls, tools).unwrap(),
             Arc::new(super::super::AllowAll),
+            vec![],
             concurrency,
             0,
             &Mutex::new(|_| {}),
@@ -580,6 +615,83 @@ mod tests {
         )
         .await
         .unwrap()
+    }
+
+    #[tokio::test]
+    async fn runtime_rules_stop_side_effects_even_with_allow_all_and_resolved_arguments() {
+        let (tools, state) = fixture();
+        for decision in [
+            tool::PermissionDecision::Deny,
+            tool::PermissionDecision::Ask,
+        ] {
+            let profile = tool::PermissionProfile {
+                rules: vec![tool::PermissionRule {
+                    decision,
+                    matcher: tool::RuleMatcher::ToolParameter {
+                        tool: "probe".into(),
+                        pointer: "/label".into(),
+                        pattern: "blocked".into(),
+                    },
+                }],
+                ..Default::default()
+            };
+            let calls = vec![call(
+                "blocked",
+                json!({"label":"blocked","resource":"r","write":true}),
+            )];
+            let results = run(
+                prepare(&calls, &tools).unwrap(),
+                Arc::new(super::super::AllowAll),
+                vec![profile],
+                1,
+                0,
+                &Mutex::new(|_| {}),
+                None,
+                |_, _, _| Ok(()),
+            )
+            .await
+            .unwrap();
+            assert!(results[0].content.contains("permission denied"));
+            assert!(state.trace.lock().unwrap().is_empty());
+        }
+        let profile = tool::PermissionProfile {
+            rules: vec![tool::PermissionRule {
+                decision: tool::PermissionDecision::Deny,
+                matcher: tool::RuleMatcher::ToolParameter {
+                    tool: "probe".into(),
+                    pointer: "/label".into(),
+                    pattern: "secret".into(),
+                },
+            }],
+            ..Default::default()
+        };
+        let calls = vec![
+            call(
+                "source",
+                json!({"label":"source","resource":"a","value":"secret"}),
+            ),
+            call(
+                "dependent",
+                json!({"label":{"$tool_result":"source","pointer":"/value"},"resource":"b"}),
+            ),
+        ];
+        // A dependent label is resolved only after the first tool result; policy checks the resolved input.
+        run(
+            prepare(&calls, &tools).unwrap(),
+            Arc::new(super::super::AllowAll),
+            vec![profile],
+            2,
+            0,
+            &Mutex::new(|_| {}),
+            None,
+            |_, _, _| Ok(()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            *state.trace.lock().unwrap(),
+            vec!["start:source", "end:source"]
+        );
     }
 
     #[tokio::test]
@@ -635,7 +747,7 @@ mod tests {
     #[tokio::test]
     async fn permissions_do_not_grant_concurrency_to_undeclared_effects() {
         let state = Arc::new(State::default());
-        let mut tools = ToolRegistry::new();
+        let mut tools = ToolRegistry::with_mode(tool::SandboxMode::Off);
         tools.register(Undeclared(Probe(state.clone())));
         let mut calls = [
             call("a", json!({"label":"a","resource":"one"})),

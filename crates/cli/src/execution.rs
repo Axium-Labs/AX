@@ -91,6 +91,13 @@ fn linux_path(path: &std::ffi::OsStr) -> Result<String> {
         .to_owned())
 }
 
+#[cfg_attr(
+    not(windows),
+    allow(
+        clippy::unnecessary_wraps,
+        reason = "The Windows launcher performs fallible WSL setup"
+    )
+)]
 pub(crate) fn launch(cli: &crate::Cli) -> Result<Option<i32>> {
     #[cfg(windows)]
     {

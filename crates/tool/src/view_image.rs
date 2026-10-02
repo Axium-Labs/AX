@@ -17,13 +17,7 @@ impl ViewImageTool {
         Self { workspace }
     }
     async fn load(&self, path: &Path) -> Result<ToolOutput, ToolError> {
-        let root = tokio::fs::canonicalize(&self.workspace).await?;
-        let path = tokio::fs::canonicalize(path).await?;
-        if !path.starts_with(root) {
-            return Err(ToolError::InvalidInput(
-                "image path is outside workspace".into(),
-            ));
-        }
+        let path = tokio::fs::canonicalize(self.workspace.join(path)).await?;
         let metadata = tokio::fs::metadata(&path).await?;
         if !metadata.is_file() || metadata.len() > MAX_IMAGE_BYTES {
             return Err(ToolError::InvalidInput(
@@ -58,6 +52,9 @@ struct Input {
 
 #[async_trait]
 impl Tool for ViewImageTool {
+    fn execution_boundary(&self) -> crate::ExecutionBoundary {
+        crate::ExecutionBoundary::WorkspaceWorker
+    }
     fn fork_for_run(&self, context: &crate::RunContext) -> Option<std::sync::Arc<dyn Tool>> {
         Some(std::sync::Arc::new(crate::WorkspaceTool::new(
             std::sync::Arc::new(Self::new(context.cwd.clone())),

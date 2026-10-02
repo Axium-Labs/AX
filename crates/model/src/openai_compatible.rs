@@ -93,13 +93,13 @@ impl OpenAiCompatibleProvider {
         })
     }
 
-    async fn stream_inner(
-        &self,
-        request: ModelRequest,
-        on_delta: &mut (dyn FnMut(String) + Send),
-        on_thinking: &mut (dyn FnMut(String) + Send),
-        started: Instant,
-    ) -> Result<ModelResponse, ModelError> {
+    /// Opens a streaming request, adapting the request shape when a provider
+    /// rejects the optional `stream_options` field.
+    ///
+    /// This is a one-shot request-shape downgrade, not an error retry: it changes
+    /// only an optional field and never repeats a request that already streamed.
+    /// Retry classification stays in `model::retry` and is unaffected.
+    async fn open_stream(&self, request: &ModelRequest) -> Result<reqwest::Response, ModelError> {
         let send = |include_usage: bool| {
             self.client
                 .post(&self.config.endpoint)
@@ -114,16 +114,45 @@ impl OpenAiCompatibleProvider {
                 })
                 .send()
         };
-        let response = match ensure_success(send(true).await?).await {
+        match ensure_success(send(true).await?).await {
             // Some compatible providers reject this optional OpenAI field.
-            Err(ModelError::HttpStatus {
+            Err(ModelError::HttpResponse {
+                retry_after,
                 status: 400 | 422,
                 message,
             }) if message.contains("stream_options") || message.contains("include_usage") => {
-                ensure_success(send(false).await?).await?
+                ensure_success(send(false).await?).await
             }
-            other => other?,
-        };
+            other => other,
+        }
+    }
+
+    /// Records time-to-first-delta once, for text or tool output alike.
+    fn note_first_delta(
+        &self,
+        first_delta: &AtomicBool,
+        content: &str,
+        tool_calls: &BTreeMap<usize, PartialToolCall>,
+        started: Instant,
+    ) {
+        if !first_delta.load(Ordering::SeqCst) && (!content.is_empty() || !tool_calls.is_empty()) {
+            first_delta.store(true, Ordering::SeqCst);
+            stats::record_ttft(
+                &self.config.provider_id,
+                &self.config.model,
+                started.elapsed(),
+            );
+        }
+    }
+
+    async fn stream_inner(
+        &self,
+        request: ModelRequest,
+        on_delta: &mut (dyn FnMut(String) + Send),
+        on_thinking: &mut (dyn FnMut(String) + Send),
+        started: Instant,
+    ) -> Result<ModelResponse, ModelError> {
+        let response = self.open_stream(&request).await?;
         // TTFT = time to the first valid delta of any kind: reasoning, text
         // or tool call. Reasoning flows through the callback; text and tool
         // deltas are checked after each event.
@@ -162,16 +191,7 @@ impl OpenAiCompatibleProvider {
                     buffer.clear();
                     break 'events;
                 }
-                if !first_delta.load(Ordering::SeqCst)
-                    && (!content.is_empty() || !tool_calls.is_empty())
-                {
-                    first_delta.store(true, Ordering::SeqCst);
-                    stats::record_ttft(
-                        &self.config.provider_id,
-                        &self.config.model,
-                        started.elapsed(),
-                    );
-                }
+                self.note_first_delta(&first_delta, &content, &tool_calls, started);
             }
         }
         if !buffer.is_empty() {
@@ -184,16 +204,7 @@ impl OpenAiCompatibleProvider {
                 on_delta,
                 &mut on_thinking,
             )?;
-            if !first_delta.load(Ordering::SeqCst)
-                && (!content.is_empty() || !tool_calls.is_empty())
-            {
-                first_delta.store(true, Ordering::SeqCst);
-                stats::record_ttft(
-                    &self.config.provider_id,
-                    &self.config.model,
-                    started.elapsed(),
-                );
-            }
+            self.note_first_delta(&first_delta, &content, &tool_calls, started);
         }
         Ok(ModelResponse {
             usage,
@@ -452,8 +463,10 @@ async fn ensure_success(response: reqwest::Response) -> Result<reqwest::Response
         return Ok(response);
     }
     let status = response.status();
+    let retry_after = crate::retry::retry_after_header(response.headers());
     let body = response.text().await.unwrap_or_default();
-    Err(ModelError::HttpStatus {
+    Err(ModelError::HttpResponse {
+        retry_after,
         status: status.as_u16(),
         message: summarize_error_body(&body),
     })

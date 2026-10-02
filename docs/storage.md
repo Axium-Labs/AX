@@ -50,7 +50,7 @@ Explicit `AX_HOME` skips old user-home migration; explicit `--data-dir` is retai
 
 ## SQLite schema
 
-The database (`memory.sqlite3`, WAL mode, `PRAGMA user_version = 6`) contains:
+The database (`memory.sqlite3`, WAL mode, `PRAGMA user_version = 7`) contains:
 
 | Table | Purpose | Key columns |
 |---|---|---|
@@ -59,7 +59,8 @@ The database (`memory.sqlite3`, WAL mode, `PRAGMA user_version = 6`) contains:
 | `agent_states` | Persistent system instructions/skills, preserved across compression | `message_id` (PK, FK), `session_id`, `content`, `metadata`, `created_at` |
 | `session_summaries` | One row per session: cumulative summary + compression watermark | `session_id` (PK), `content`, `compressed_message_count`, `updated_at`, `through_message_id` |
 | `long_term_memory` | Legacy flat memory records | `id` (PK), `key` (unique), `value`, `category`, `created_at`, `updated_at` |
-| `scoped_memories` | Global / Project / Session facts | `scope`, `owner`, `key` (composite PK), `value`, `source`, `updated_at`, `always_include` |
+| `scoped_memories` | Global / Project / Session facts | `scope`, `owner`, `key` (composite PK), `value`, `source`, `updated_at`, `always_include`, `memory_type`, `usage_count`, `confidence`, `last_used_at`, `superseded`, `expired`, `tags`, `paths` |
+| `memory_index` | Lazy lexical index and short summaries | `scope`, `owner`, `key` (composite PK), `summary`, `features`, `valid` |
 | `memory_migrations` | Migration markers for scoped facts | `category` (PK), `migrated_at` |
 | `project_memory_migrations` | Path-owner → UUID migration markers | `owner` (PK), `project_id` |
 
@@ -72,7 +73,15 @@ Notes:
 - Indexes exist on `sessions(updated_at DESC)`, `messages(session_id, id
   DESC)`, `long_term_memory(category, updated_at DESC)` and
   `agent_states(session_id, message_id)`.
-- The schema evolves by additive migrations guarded by `PRAGMA user_version`.
+- The schema evolves by additive migrations guarded by column/table existence;
+  `PRAGMA user_version` reports the latest version. Memory v7 upgrades run in a
+  transaction, retain old rows and use safe defaults for new metadata.
+- Memory index triggers invalidate cached features on insert or content/label
+  edit and remove index rows on delete. Features for legacy/imported memories
+  are computed lazily only for the queried owner, with full validation before
+  summaries become visible. Normal writes precompute their index features.
+- `usage_count` is bounded to `u32`; confidence is an integer `0..=100`. Reads
+  update use counters independently of the content timestamp.
 
 ## JSONL event streams
 

@@ -47,3 +47,9 @@ What becomes easier, what becomes harder, and what we accepted.
 ```
 
 - [0011: Scoped capabilities](0011-scoped-capabilities.md) — one shared Global/Project registry for Skill, MCP and Agent management.
+
+- [0012 — Layered local memory retrieval](0012-layered-memory-retrieval.md)
+
+- [0011: Model-directed policies](0011-model-directed-policies.md) — semantic selection with deterministic runtime ceilings.
+
+- [0013: Workspace runtime sandbox](0013-workspace-runtime-sandbox.md) — centralized OS confinement independent of Permission.

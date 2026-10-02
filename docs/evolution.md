@@ -25,7 +25,7 @@ details are bounded; steps and errors are limited to 64 per Experience.
 Retries mean a repeated tool/detail after an observed failure, not an inferred
 claim that an external side effect was replayed. `success` means the runtime
 completed the turn; it is not proof that the user accepted the result. Errorful
-turns lower the evidence score even when execution eventually completes.
+turns remain in usage/error telemetry for the analyzer to interpret.
 Cancellation drops the recorder and records an interrupted failure.
 
 The normal request path hands data to a bounded, nonblocking worker queue.
@@ -64,27 +64,29 @@ creator/analysis instructions. Older raw observations remain on disk.
 
 ## Actions and lifecycle
 
-- **CREATE** requires a composite evidence score. Recurrence combines distinct
-  sessions and observations using saturating curves; success, age, correction
-  frequency, project scope and analyzer confidence also contribute. A lone
-  observation cannot pass the default creation threshold even with maximum
-  confidence. Creation rejects redundant descriptions/instructions.
-- **REFINE** revises only an owned package, records substantiated corrections,
-  and resets active instructions to trial. Lifetime counters remain intact;
-  baseline counters require fresh trial use and successful outcomes before
-  the revised workflow can become active.
-- **MERGE** requires multiple distinct, similar, owned sources and an output
-  smaller than their combined content. It creates one general candidate and
-  archives the originals. Merge/refine actions run before creation, including
-  when the live growth limit has been reached.
-- **RETIRE** uses decayed composite utility, not elapsed days alone. Archive
-  precedes deletion and a later analysis must still find low value. Deletion
-  removes only the original single-file package; added user resources protect
-  it. Usage, successful outcomes, confidence and corrections influence utility.
+The model proposes **CREATE / MERGE / REFINE / IGNORE / RETIRE** semantic
+changes and **MEMORY** facts. **PROMOTE** explicitly requests candidate-to-trial
+or trial-to-active. Runtime maintenance never promotes, archives or deletes
+content because of a composite score or age.
+
+Deterministic gates remain: at least `minimum_evidence` observations from
+`independent_sessions` distinct nonempty sessions (defaults: 2 and 2), valid
+project provenance, secret filtering, package validation, ownership/digest
+protection, growth limits, and usage telemetry. Trial-to-active requires a
+real successful use after the trial baseline. Analyzer `confidence` is
+validated telemetry, not a lifecycle threshold. Failed observations can
+support corrective lessons; success/failure semantics belong to the model.
+
+REFINE preserves lifetime telemetry and resets changed active instructions
+to trial. MERGE requires distinct owned sources and a smaller output, but
+lexical similarity cannot veto the model's semantic merge. RETIRE archives
+first; deletion requires a later explicit proposal and removes only the
+original single-file package. Manual edits and added resources protect user
+content. User-authored Skills and Memory are never automatically overwritten.
 
 Candidates are stored outside discovery. A later analysis can move a credible,
 still relevant candidate to trial. Trial and active Skills share a discoverable
-directory and use ordinary lexical routing, context budgets, enable/disable
+directory and use model-directed skill selection, elastic context budgets, enable/disable
 settings and tool permission checks. Archival immediately removes the package
 from discovery. Evolved instructions are refreshed after analysis and stripped
 from resumed snapshots so old archived instructions cannot be restored.
@@ -143,6 +145,8 @@ Thresholds live centrally in `evolution::Config`. For example:
   "max_skill_bytes": 12000,
   "max_actions": 4,
   "similarity": 0.86,
+  "minimum_evidence": 2,
+  "independent_sessions": 2,
   "create_score": 0.90,
   "trial_score": 0.65,
   "active_score": 0.78,
@@ -170,3 +174,9 @@ The unit/integration suite covers ownership guards, standard format, routing
 states, trial promotion, correction/retrial counters, merge compression,
 archive/delete ordering, memory provenance, cooldown, disabled operation,
 credential screening, context fitting, model-call frequency and failed analysis.
+
+Legacy `similarity`, `create_score`, `trial_score`, `active_score`,
+`retire_score`, `half_life_secs`, and `weights` remain accepted for existing
+config files. They do not decide semantic creation, promotion or retirement.
+Existing ownership ledgers and usage counters are retained; no database
+migration or vector database is required.

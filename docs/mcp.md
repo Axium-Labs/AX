@@ -158,3 +158,11 @@ existing configuration stays unchanged. The result is written atomically with
 private file permissions. Import does not start or connect any server. Start
 a new session to load the new configuration. Crew uses this same AX command
 from Settings → AX capabilities.
+
+## Local execution boundary
+
+Local stdio servers execute through SandboxManager and retain the manager for the
+transport lifetime. Configured cwd cannot expand its bound workspace. Skill-triggered
+MCP calls use this same transport. Remote MCP services have their own execution
+boundary; their remote side effects are outside the local OS sandbox. See
+[security.md](security.md).

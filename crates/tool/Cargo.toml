@@ -6,6 +6,7 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+sandbox = { path = "../sandbox" }
 async-trait.workspace = true
 serde.workspace = true
 serde_json.workspace = true

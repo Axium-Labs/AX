@@ -44,6 +44,21 @@ pub struct PreparedChild {
 /// The composition root owns workspace/session/memory provisioning.
 #[async_trait]
 pub trait ChildHost: Send + Sync {
+    async fn prepare_with_policy(
+        &self,
+        controller: &AgentKernel,
+        input: &str,
+        policy: &crate::ChildPolicy,
+    ) -> Result<PreparedChild, AgentError> {
+        if policy.workspace != crate::child_policy::WorkspaceInheritance::Isolated {
+            return Err(tool::ToolError::InvalidInput(
+                "host does not support requested workspace policy".into(),
+            )
+            .into());
+        }
+        self.prepare(controller, input, None).await
+    }
+
     async fn prepare(
         &self,
         controller: &AgentKernel,

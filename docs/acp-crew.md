@@ -13,3 +13,11 @@ Crew supplies optional `_ax` session metadata. `skills` is an allowlist of local
 `ax crew pair <code> --gateway <https-url>` generates or loads a device Ed25519 private key under AX home, sends only the public key to Crew, and records the device ID after a successful one-time redemption. `ax crew connect <https-url>` initiates an outbound WSS connection, signs the gateway's fresh challenge, sends heartbeats, reconnects with backoff, and runs routed work through child `ax acp` processes. HTTP/WS is accepted only for loopback development. TLS termination for WSS is deployed in front of Crew; the AX binary verifies the gateway certificate.
 
 The corresponding Crew backend and its API are in the sibling `ax_crew` project. Crew stores orchestration metadata and final task outputs, while AX keeps message history, context snapshots, memory, tool results, and provider credentials. Live Crew WebSocket events can include message deltas and permission requests; its SQLite event index stores only redacted event metadata.
+
+## Workspace identity and confinement
+
+Device run requests must carry workspace_id. AX resolves that ID through its local
+registered-project list and canonicalizes the result. Supplied cwd is rejected;
+older gateways must migrate to this contract. Device ACP children use strict sandbox
+mode and cannot switch away from their bound root through ACP requests. See
+[security.md](security.md).

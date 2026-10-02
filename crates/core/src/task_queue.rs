@@ -65,6 +65,8 @@ pub enum TaskStatus {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct QueuedTask {
     pub title: String,
+    #[serde(default)]
+    pub depends_on: Vec<usize>,
     pub status: TaskStatus,
     pub failure_reason: Option<String>,
     pub outcome: Option<String>,
@@ -86,6 +88,8 @@ pub struct TaskQueue {
     pub final_response: Option<String>,
     pub overall_goal: String,
     pub tasks: Vec<QueuedTask>,
+    #[serde(default)]
+    pub delegate: bool,
     pub summarized: bool,
     pub stop_reason: Option<String>,
 }
@@ -102,6 +106,7 @@ impl TaskQueue {
                 .into_iter()
                 .map(|title| QueuedTask {
                     title,
+                    depends_on: vec![],
                     status: TaskStatus::Pending,
                     failure_reason: None,
                     outcome: None,
@@ -109,6 +114,7 @@ impl TaskQueue {
                     child: None,
                 })
                 .collect(),
+            delegate: false,
             summarized: false,
             stop_reason: None,
         };
@@ -116,9 +122,12 @@ impl TaskQueue {
         queue
     }
 
-    /// Recognize explicit top-level numbered task lists without another model call.
-    pub(crate) fn from_input(input: &str) -> Option<Self> {
-        let mut goal = Vec::new();
+    /// Formatting hints from a user message, used by tests that need a model to
+    /// "read" a list. No runtime path consults this: a queue exists only after an
+    /// explicit `task_queue` call, so list formatting never creates tasks,
+    /// workers or approval.
+    #[must_use]
+    pub fn list_hints(input: &str) -> Vec<String> {
         let mut titles: Vec<String> = Vec::new();
         let mut fenced = false;
         for line in input.lines() {
@@ -140,7 +149,7 @@ impl TaskQueue {
                 let offset = if bullet {
                     2
                 } else {
-                    number_len + marker.unwrap().len_utf8()
+                    number_len + marker.map_or(0, char::len_utf8)
                 };
                 let title = trimmed[offset..].trim();
                 if !title.is_empty() {
@@ -149,20 +158,9 @@ impl TaskQueue {
             } else if let Some(title) = titles.last_mut() {
                 title.push('\n');
                 title.push_str(line);
-            } else {
-                goal.push(line);
             }
         }
-        (titles.len() > 1).then(|| {
-            Self::new(
-                if goal.join("\n").trim().is_empty() {
-                    "Complete all requested tasks".into()
-                } else {
-                    goal.join("\n").trim().to_owned()
-                },
-                titles,
-            )
-        })
+        titles
     }
 
     pub(crate) fn active(&self) -> bool {
@@ -180,16 +178,30 @@ impl TaskQueue {
         if self.state != QueueState::Active {
             return;
         }
-        if !self
-            .tasks
-            .iter()
-            .any(|task| task.status == TaskStatus::Running)
-            && let Some(task) = self
-                .tasks
-                .iter_mut()
-                .find(|task| task.status == TaskStatus::Pending)
-        {
-            task.status = TaskStatus::Running;
+        for index in 0..self.tasks.len() {
+            if self.tasks[index].status == TaskStatus::Pending
+                && self.tasks[index].depends_on.iter().any(|&dep| {
+                    self.tasks.get(dep).is_none_or(|task| {
+                        matches!(task.status, TaskStatus::Failed | TaskStatus::Skipped)
+                    })
+                })
+            {
+                self.tasks[index].status = TaskStatus::Skipped;
+                self.tasks[index].failure_reason = Some("dependency failed or unavailable".into());
+            }
+        }
+        if !self.tasks.iter().any(|t| t.status == TaskStatus::Running) {
+            let ready = self.tasks.iter().position(|t| {
+                t.status == TaskStatus::Pending
+                    && t.depends_on.iter().all(|&dep| {
+                        self.tasks
+                            .get(dep)
+                            .is_some_and(|d| d.status == TaskStatus::Completed)
+                    })
+            });
+            if let Some(index) = ready {
+                self.tasks[index].status = TaskStatus::Running;
+            }
         }
         if !self.tasks.is_empty()
             && !self
@@ -213,6 +225,10 @@ impl TaskQueue {
     }
 
     pub fn normalize_legacy(&mut self) {
+        // Saved child receipts prove a previous explicit delegation; resume it.
+        if self.tasks.iter().any(|t| t.child.is_some()) {
+            self.delegate = true;
+        }
         if self.goal_id.is_empty() {
             use std::hash::{Hash, Hasher};
             let mut hash = std::collections::hash_map::DefaultHasher::new();
@@ -316,9 +332,10 @@ impl TaskQueue {
 pub(crate) fn spec() -> ToolSpec {
     ToolSpec { kind: "function", function: FunctionSpec {
         name: TOOL_NAME.into(),
-        description: "The runtime can execute queued tasks automatically in isolated child runs. Each task must contain its complete explicit input. For requests containing multiple explicit subtasks, initialize the internal queue before executing any work unless a queue already exists. Use this tool alone in a round. Finish the current task with completed/failed/skipped and a concise outcome. Before declaring failure, repair the failed step within its declared directories and runtime; do not scan unrelated workspace projects and attempt recovery. Independent tasks continue after failure. Execute current_task only; use finish for task-local completion/failure and block for a global blocker. A text-only response terminates the goal, never advances a task. Only summarize once current_task is null. For numbered requests the queue is automatic.".into(),
+        description: "Create structured tasks only when you explicitly decide decomposition is useful. Lists are formatting hints, never authorization to split. Use alone in a round. execution=controller keeps work in this model; execution=children explicitly delegates complete task inputs to isolated children. dependencies are zero-based prior task indices. Finish the current task with completed/failed/skipped and an outcome. Attempt bounded recovery before failure. block/cancel stop the goal. Text-only responses never advance tasks.".into(),
         parameters: json!({"type":"object","properties":{
             "action":{"type":"string","enum":["start","finish","block","cancel"]},
+            "execution":{"type":"string","enum":["controller","children"]},"dependencies":{"type":"array","items":{"type":"array","items":{"type":"integer","minimum":0}}},
             "overall_goal":{"type":"string"},"tasks":{"type":"array","minItems":2,"items":{"type":"string"}},
             "status":{"type":"string","enum":["completed","failed","skipped"]},"reason":{"type":"string"}
         },"required":["action"]}),
@@ -358,6 +375,27 @@ pub(crate) fn apply(
                 return Err("at least two tasks required".into());
             }
             let mut plan = TaskQueue::new(goal.into(), titles);
+            if let Some(mode) = input.get("execution") {
+                if !matches!(mode.as_str(), Some("controller" | "children")) {
+                    return Err("invalid execution mode".into());
+                }
+                plan.delegate = mode == "children";
+            }
+            if let Some(dependencies) = input.get("dependencies") {
+                let dependencies: Vec<Vec<usize>> = serde_json::from_value(dependencies.clone())
+                    .map_err(|_| "invalid dependencies")?;
+                if dependencies.len() != plan.tasks.len()
+                    || dependencies
+                        .iter()
+                        .enumerate()
+                        .any(|(i, deps)| deps.iter().any(|&d| d >= i))
+                {
+                    return Err("dependencies must refer to prior tasks".into());
+                }
+                for (task, deps) in plan.tasks.iter_mut().zip(dependencies) {
+                    task.depends_on = deps;
+                }
+            }
             goal_id.clone_into(&mut plan.goal_id);
             plan.parent_goal_id = parent_goal_id.map(str::to_owned);
             *queue = Some(plan);
@@ -366,11 +404,14 @@ pub(crate) fn apply(
         Some("finish") => {
             let status =
                 serde_json::from_value(input["status"].clone()).map_err(|_| "invalid status")?;
-            queue
+            let queue = queue
                 .as_mut()
-                .filter(|q| q.active())
-                .ok_or("no active queue")?
-                .finish(status, input["reason"].as_str().unwrap_or("").into())
+                .filter(|q| q.goal_id == goal_id && q.active())
+                .ok_or("no active goal")?;
+            if queue.state == QueueState::Summarizing {
+                return Err("goal is summarizing; no task finish is required".into());
+            }
+            queue.finish(status, input["reason"].as_str().unwrap_or("").into())
         }
         Some("block" | "cancel") => {
             let reason = input["reason"]

@@ -64,34 +64,56 @@ shared custom database require explicit migration.
 
 ## Retrieval and context budget
 
-Same-key scope precedence is Session, then Project, then Global. Facts are
-first reduced to lexical candidates by relevance, then ordered by a composite
-score rather than by relevance alone:
+Retrieval has four stages, all local with no embeddings, vector database, or
+additional model call:
 
-```text
-score = 0.60 · relevance        # shared lexical similarity, 0.0..=1.0
-      + 0.15 · scope priority   # Session 1.0, Project 0.7, Global 0.4
-      + 0.15 · recency          # halves every 14 days behind the newest candidate
-      + 0.10 · importance       # 1.0 pinned, 0.6 user-stated, 0.4 migrated/other
-```
+1. Filter ownership to the current Session, current Project UUID, and Global.
+   Other projects and sessions never enter recall. Superseded/expired records
+   stay available through existing management APIs but are excluded here.
+   Active same-key precedence remains Session > Project > Global.
+2. Recall at most 32 candidates using the existing language-independent
+   lexical features (NFKC, case fold, words and Unicode n-grams), exact key
+   matches, tags and paths. Only explicitly pinned Global records bypass the
+   relevance floor; a preference key alone does not pin a record.
+3. Lightly rerank recalled candidates using relevance plus small bounded usage,
+   confidence and type-aware freshness bonuses. Scope and source never contribute
+   to score. Usage is logarithmic and saturates at 32 uses; confidence is an
+   explicit integer from 0 to 100 (legacy default: 50).
+4. Inject at most six index summaries, each a prefix of up to 160 Unicode
+   characters. Full values are fetched by the session-bound `memory` tool with
+   `action="read"`, `scope`, and `key`; `action="index"` browses summaries.
+   Existing `list`, `set`, `delete` and scoped storage APIs remain supported.
 
-Relevance comes from the shared `lexical` crate: the query and every fact are
-NFKC-normalized, case-folded and compared as word tokens plus Unicode
-character n-grams, so Chinese, Japanese, English and mixed queries are ranked
-by one code path with no per-language rules. Fact features are computed when a
-fact is written (and on first use for facts stored earlier) and cached in a
-bounded in-process map; the query is measured once per turn. Recency is
-relative to the newest candidate rather than wall-clock, so a given fact set
-always ranks the same way.
+Memory types define wall-clock decay since the content's `updated_at`:
 
-The lexical score only selects candidates: `MIN_RELEVANCE` drops facts whose
-sole overlap is an incidental n-gram, the composite score orders whatever
-survives, and the injected block tells the model to use a fact only when it is
-relevant — the semantic decision stays with the model. Only explicitly marked
-`always_include` Global preferences bypass relevance and rank first; a
-`preference.*` key alone does not grant that behavior.
+| Type | Freshness half-life |
+|---|---|
+| `preference` | No decay; explicitly replace or expire it |
+| `fact`, `decision`, `reference` | 180 days |
+| `experience` | 30 days |
+| `task` | 3 days |
 
-Up to 32 relevant candidates are considered for a compact injected message.
+`usage_count` and `last_used_at` track summaries actually injected and details
+read; use never changes the content timestamp. `source` records provenance,
+not importance. A new `set` can specify `memory_type`, `confidence`, `tags`,
+`paths`, `superseded` and `expired`; updates from older clients preserve omitted
+metadata. Structured declarations default to `fact`. Learned memories use
+`experience`.
+
+The SQLite `memory_index` stores summaries and serialized lexical features,
+not full bodies. Writes precompute features; imports and legacy records build
+features lazily on first retrieval of that owner. Triggers invalidate entries
+on edits and delete them when a record is removed, including older SQL paths.
+After indexing, routine retrieval reads summaries/features, and full bodies
+remain on demand. The existing bounded lexical cache is retained.
+
+Old databases upgrade additively and transactionally. Existing keys, values,
+scopes, owners, provenance and timestamps are preserved. Legacy pinned records
+and `preference.*` keys migrate as `preference`; other records default to `fact`,
+zero uses, confidence 50, no last use, and active status. Old serialized backup
+records receive the same safe metadata defaults; new backup imports preserve
+all metadata and rebuild their index lazily.
+
 Its total size, including the wrapper, must fit
 `ContextBudget::memory_budget_tokens()` (at most 512 estimated tokens, reduced
 for small contexts). Oversized candidates are skipped so smaller relevant
