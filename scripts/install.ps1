@@ -87,7 +87,25 @@ try {
 
     # --- extract and install -------------------------------------------------------
     Expand-Archive -Path $zipPath -DestinationPath $tmpDir -Force
-    Copy-Item -Path (Join-Path $tmpDir "ax.exe") -Destination $axPath -Force
+    # Running AX/Crew processes can keep ax.exe open. Rename the old image rather
+    # than overwrite it; existing processes finish using that image, and a failed
+    # copy restores the original path. Keep a locked backup until it can be removed.
+    $backupPath = "$axPath.install-backup-$([guid]::NewGuid().ToString('N'))"
+    $hadExisting = Test-Path -LiteralPath $axPath
+    if ($hadExisting) { Move-Item -LiteralPath $axPath -Destination $backupPath }
+    try {
+        Copy-Item -LiteralPath (Join-Path $tmpDir "ax.exe") -Destination $axPath
+    } catch {
+        if (Test-Path -LiteralPath $axPath) { Remove-Item -LiteralPath $axPath -Force }
+        if ($hadExisting) { Move-Item -LiteralPath $backupPath -Destination $axPath }
+        throw
+    }
+    if ($hadExisting) {
+        Remove-Item -LiteralPath $backupPath -Force -ErrorAction SilentlyContinue
+        if (Test-Path -LiteralPath $backupPath) {
+            Write-Host "AX: old executable remains at $backupPath until running tasks exit."
+        }
+    }
     Write-Host "AX: installed to $axPath"
 
     # --- bundled skills and MCP template --------------------------------------------

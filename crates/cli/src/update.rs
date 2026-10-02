@@ -15,6 +15,8 @@ use sha2::{Digest, Sha256};
 use crate::config;
 
 const RELEASE_API: &str = "https://api.github.com/repos/Axium-Labs/AX/releases/latest";
+const RELEASE_PAGE: &str = "https://github.com/Axium-Labs/AX/releases/latest";
+const RELEASE_DOWNLOAD: &str = "https://github.com/Axium-Labs/AX/releases/download/";
 
 #[derive(Deserialize)]
 struct Release {
@@ -42,18 +44,12 @@ pub async fn run() -> Result<()> {
     let asset_name = release_asset_name()?;
     let client = reqwest::Client::builder()
         .user_agent(concat!("AX/", env!("CARGO_PKG_VERSION")))
+        .connect_timeout(Duration::from_secs(15))
         .timeout(Duration::from_secs(120))
         .build()?;
 
     println!("AX: checking for updates...");
-    let release: Release = client
-        .get(RELEASE_API)
-        .send()
-        .await?
-        .error_for_status()?
-        .json()
-        .await
-        .context("could not read the latest GitHub Release")?;
+    let release = latest_release(&client, RELEASE_API, RELEASE_PAGE, &asset_name).await?;
     let binary_outdated = release.tag_name.trim_start_matches('v') != env!("CARGO_PKG_VERSION");
 
     // Always pull the latest archive so the bundled payload (skills plus the
@@ -123,15 +119,108 @@ pub async fn run() -> Result<()> {
     }
 }
 
+fn fallback_release(url: &reqwest::Url, asset_name: &str) -> Result<Release> {
+    let tag = url
+        .path()
+        .strip_prefix("/Axium-Labs/AX/releases/tag/")
+        .filter(|tag| {
+            !tag.is_empty()
+                && tag
+                    .bytes()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'.' | b'-' | b'+'))
+        })
+        .ok_or_else(|| anyhow!("official Release page did not return a valid release tag"))?;
+    if url.scheme() != "https" || url.host_str() != Some("github.com") {
+        bail!("release tag must come from the official GitHub repository");
+    }
+    Ok(Release {
+        tag_name: tag.to_owned(),
+        assets: [asset_name, "SHA256SUMS"]
+            .into_iter()
+            .map(|name| ReleaseAsset {
+                name: name.to_owned(),
+                browser_download_url: format!("{RELEASE_DOWNLOAD}{tag}/{name}"),
+            })
+            .collect(),
+    })
+}
+
+async fn latest_release(
+    client: &reqwest::Client,
+    api: &str,
+    page: &str,
+    asset_name: &str,
+) -> Result<Release> {
+    let api_result = async {
+        let release: Release = client
+            .get(api)
+            .timeout(Duration::from_secs(30))
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+        // Incomplete metadata is also unusable; official download URLs can still work.
+        release.asset(asset_name)?;
+        release.asset("SHA256SUMS")?;
+        Ok::<_, anyhow::Error>(release)
+    }
+    .await;
+    match api_result {
+        Ok(release) => Ok(release),
+        Err(api_error) => {
+            println!("AX: GitHub API unavailable; checking the official Release page...");
+            let fallback = async {
+                let response = client
+                    .get(page)
+                    .timeout(Duration::from_secs(30))
+                    .send()
+                    .await?
+                    .error_for_status()?;
+                fallback_release(response.url(), asset_name)
+            }
+            .await;
+            fallback.with_context(|| {
+                format!("GitHub API failed: {api_error:#}; official Release page also failed")
+            })
+        }
+    }
+}
+
+fn retryable(error: &reqwest::Error) -> bool {
+    error.is_connect()
+        || error.is_timeout()
+        || error.is_body()
+        || error
+            .status()
+            .is_some_and(|status| status.is_server_error() || status.as_u16() == 429)
+}
+
 async fn download(client: &reqwest::Client, url: &str) -> Result<Vec<u8>> {
-    Ok(client
-        .get(url)
-        .send()
-        .await?
-        .error_for_status()?
-        .bytes()
-        .await?
-        .to_vec())
+    for attempt in 0..3 {
+        let result = async {
+            client
+                .get(url)
+                .send()
+                .await?
+                .error_for_status()?
+                .bytes()
+                .await
+        }
+        .await;
+        match result {
+            Ok(bytes) => return Ok(bytes.to_vec()),
+            Err(error) if attempt < 2 && retryable(&error) => {
+                tokio::time::sleep(Duration::from_secs(1 << attempt)).await;
+            }
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!("could not download {url}; check your network or proxy settings")
+                });
+            }
+        }
+    }
+    unreachable!("every final download attempt returns")
 }
 
 fn release_asset_name() -> Result<String> {
@@ -411,6 +500,97 @@ try {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fallback_pins_archive_and_checksum_to_the_official_tag() {
+        let url =
+            reqwest::Url::parse("https://github.com/Axium-Labs/AX/releases/tag/v0.2.10").unwrap();
+        let release = fallback_release(&url, "ax-x86_64-pc-windows-msvc.zip").unwrap();
+        assert_eq!(release.tag_name, "v0.2.10");
+        assert_eq!(
+            release.asset("SHA256SUMS").unwrap().browser_download_url,
+            "https://github.com/Axium-Labs/AX/releases/download/v0.2.10/SHA256SUMS"
+        );
+        assert_eq!(
+            release
+                .asset("ax-x86_64-pc-windows-msvc.zip")
+                .unwrap()
+                .browser_download_url,
+            "https://github.com/Axium-Labs/AX/releases/download/v0.2.10/ax-x86_64-pc-windows-msvc.zip"
+        );
+        for url in [
+            "https://example.com/Axium-Labs/AX/releases/tag/v0.2.10",
+            "https://github.com/other/AX/releases/tag/v0.2.10",
+            "http://github.com/Axium-Labs/AX/releases/tag/v0.2.10",
+            "https://github.com/Axium-Labs/AX/releases/latest",
+            "https://github.com/Axium-Labs/AX/releases/tag/v0.2.10/evil",
+        ] {
+            assert!(
+                fallback_release(&reqwest::Url::parse(url).unwrap(), "ax.zip").is_err(),
+                "{url}"
+            );
+        }
+    }
+
+    fn mock_http(responses: Vec<(u16, &'static str)>) -> (String, std::thread::JoinHandle<()>) {
+        use std::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            use std::io::Read;
+            for (status, body) in responses {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                let mut request = [0; 4096];
+                let size = stream.read(&mut request).unwrap();
+                assert!(size > 0);
+                write!(stream, "HTTP/1.1 {status} Mock\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+            }
+        });
+        (url, server)
+    }
+
+    #[tokio::test]
+    async fn transient_download_failure_retries_but_missing_asset_does_not() {
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .timeout(Duration::from_secs(5))
+            .build()
+            .unwrap();
+        let (url, server) = mock_http(vec![(503, ""), (200, "archive")]);
+        assert_eq!(download(&client, &url).await.unwrap(), b"archive");
+        server.join().unwrap();
+        let (url, server) = mock_http(vec![(404, "")]);
+        let error = download(&client, &url).await.unwrap_err();
+        assert!(format!("{error:#}").contains("404"));
+        assert!(error.to_string().contains(&url));
+        server.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn unavailable_api_tries_the_page_and_keeps_both_errors() {
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .timeout(Duration::from_secs(5))
+            .build()
+            .unwrap();
+        let (url, server) = mock_http(vec![(429, ""), (503, "")]);
+        let error = latest_release(
+            &client,
+            &format!("{url}/api"),
+            &format!("{url}/latest"),
+            "ax.zip",
+        )
+        .await
+        .err()
+        .unwrap();
+        let error = format!("{error:#}");
+        assert!(error.contains("429"));
+        assert!(error.contains("503"));
+        server.join().unwrap();
+    }
 
     #[test]
     fn checksum_entry_must_be_unique_and_valid() {

@@ -143,3 +143,13 @@ on Windows a detached helper waits for AX to exit before replacing the verified
 binary. Update code lives in
 `crates/cli/src/update.rs` and does no work on ordinary startup. User and
 project data directories are otherwise untouched.
+
+If the GitHub Releases API is unavailable or rate limited, `ax --update`
+resolves the tag from the official GitHub Release page and downloads the
+archive and `SHA256SUMS` from that exact tag. Transient download failures get
+up to two retries; failures identify the download URL and network/proxy settings
+to check. Windows uses the system proxy as well as proxy environment variables.
+AX Crew can fall back to the official installer when an older AX updater has a
+network error. The Windows installer renames an existing executable before
+copying the verified replacement and restores it if copying fails. A backup
+still in use by a running task is retained until it can be removed.
