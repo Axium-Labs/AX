@@ -1,0 +1,34 @@
+name: Mirror source to GitCode
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*", "!v*-*"]
+
+permissions:
+  contents: read
+
+jobs:
+  mirror:
+    if: ${{ vars.GITCODE_AX_REPOSITORY != '' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Push main and tags to GitCode
+        env:
+          GITCODE_REPOSITORY: ${{ vars.GITCODE_AX_REPOSITORY }}
+          GITCODE_TOKEN: ${{ secrets.GITCODE_TOKEN }}
+          GITCODE_USERNAME: ${{ vars.GITCODE_USERNAME }}
+        run: |
+          set -euo pipefail
+          test -n "$GITCODE_REPOSITORY" || { echo 'GITCODE_AX_REPOSITORY is not configured'; exit 1; }
+          [[ "$GITCODE_REPOSITORY" =~ ^[A-Za-z0-9_-]+/[A-Za-z0-9_.-]+$ ]] || { echo 'GITCODE_AX_REPOSITORY must be owner/repository'; exit 1; }
+          test -n "$GITCODE_TOKEN" || { echo 'GITCODE_TOKEN secret is not configured'; exit 1; }
+          printf '%s\n' '#!/bin/sh' 'case "$1" in *Username*) printf "%s\n" "$GITCODE_USERNAME" ;; *) printf "%s\n" "$GITCODE_TOKEN" ;; esac' > "$RUNNER_TEMP/gitcode-askpass"
+          chmod 700 "$RUNNER_TEMP/gitcode-askpass"
+          gitcode_url="https://gitcode.com/${GITCODE_REPOSITORY}.git"
+          GIT_ASKPASS="$RUNNER_TEMP/gitcode-askpass" GIT_TERMINAL_PROMPT=0 git push "$gitcode_url" refs/remotes/origin/main:refs/heads/main
+          GIT_ASKPASS="$RUNNER_TEMP/gitcode-askpass" GIT_TERMINAL_PROMPT=0 git push "$gitcode_url" --tags
+          rm -f "$RUNNER_TEMP/gitcode-askpass"

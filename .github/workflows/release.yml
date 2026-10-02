@@ -30,6 +30,8 @@ jobs:
           targets: ${{ matrix.target }}
 
       - name: Build
+        env:
+          GITCODE_AX_REPOSITORY: ${{ vars.GITCODE_AX_REPOSITORY }}
         run: cargo build --release --target "${{ matrix.target }}"
 
       - name: Package asset (Windows)

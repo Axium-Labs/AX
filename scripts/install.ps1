@@ -17,7 +17,9 @@
 $ErrorActionPreference = "Stop"
 
 $repo = "Axium-Labs/AX"
-$baseUrl = "https://github.com/$repo/releases"
+$githubApi = "https://api.github.com/repos/$repo/releases"
+$gitcodeRepo = $env:AX_GITCODE_REPOSITORY
+if ($gitcodeRepo -and $gitcodeRepo -notmatch '^[A-Za-z0-9_-]+/[A-Za-z0-9_-]+$') { throw "AX: AX_GITCODE_REPOSITORY must be owner/repository" }
 
 # --- detect architecture ------------------------------------------------------
 $arch = switch ([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture) {
@@ -27,19 +29,19 @@ $arch = switch ([System.Runtime.InteropServices.RuntimeInformation]::OSArchitect
 }
 
 # --- resolve version ------------------------------------------------------------
-$version = if ($env:AX_VERSION) { $env:AX_VERSION } else { "latest" }
-if ($version -ne "latest" -and -not $version.StartsWith("v")) {
-    $version = "v$version"
+$requestedVersion = if ($env:AX_VERSION) { $env:AX_VERSION } else { "latest" }
+$version = $requestedVersion
+if ($version -ne "latest" -and -not $version.StartsWith("v")) { $version = "v$version" }
+if ($version -eq "latest") {
+    try { $version = (Invoke-RestMethod -Uri "$githubApi/latest" -TimeoutSec 12 -Headers @{ "User-Agent" = "AX-installer" }).tag_name }
+    catch {
+        if (-not $gitcodeRepo) { throw "AX: GitHub could not resolve latest version and AX_GITCODE_REPOSITORY is unset" }
+        $version = (Invoke-RestMethod -Uri "https://api.gitcode.com/api/v5/repos/$gitcodeRepo/releases/latest" -TimeoutSec 12).tag_name
+    }
 }
-$downloadBase = if ($version -eq "latest") {
-    "$baseUrl/latest/download"
-} else {
-    "$baseUrl/download/$version"
-}
+if (-not $version -or $version -notmatch '^v?[0-9]+(\.[0-9]+)+(?:[-+][A-Za-z0-9.-]+)?$') { throw "AX: invalid release version: $version" }
 
 $asset = "ax-$arch-pc-windows-msvc.zip"
-$assetUrl = "$downloadBase/$asset"
-$sumsUrl = "$downloadBase/SHA256SUMS"
 
 # --- install location ------------------------------------------------------------
 $installDir = if ($env:AX_INSTALL_DIR) {
@@ -57,33 +59,34 @@ New-Item -ItemType Directory -Force -Path $tmpDir | Out-Null
 try {
     $zipPath = Join-Path $tmpDir "ax.zip"
 
-    Write-Host "AX: downloading $assetUrl"
-    Invoke-WebRequest -Uri $assetUrl -OutFile $zipPath -UseBasicParsing
-
-    # Download SHA256SUMS to disk and read it as text. In Windows PowerShell 5.1,
-    # (Invoke-WebRequest ...).Content is a byte[] for non-text content types,
-    # which makes line splitting fail; Get-Content -Raw always yields a string.
     $sumsPath = Join-Path $tmpDir "SHA256SUMS"
-    Write-Host "AX: downloading $sumsUrl"
-    Invoke-WebRequest -Uri $sumsUrl -OutFile $sumsPath -UseBasicParsing
-    $sumsText = Get-Content -Path $sumsPath -Raw
-
-    $expected = @($sumsText -split "`r?`n" |
-        Where-Object { $_ -match "[ \t]+$([regex]::Escape($asset))[ \t]*$" } |
-        ForEach-Object { ($_ -split "[ \t]+")[0] } |
-        Select-Object -First 1)
-
-    if (-not $expected) {
-        $known = @($sumsText -split "`r?`n" |
-            Where-Object { $_ -match "[ \t]+[^ \t]+[ \t]*$" } |
-            ForEach-Object { ($_ -split "[ \t]+")[-1].Trim("`r") }) -join ", "
-        throw "AX: $asset is missing from SHA256SUMS (SHA256SUMS contains: $known)"
+    $providers = @(@{ Name = "GitHub"; Api = "$githubApi/tags/$version" })
+    if ($gitcodeRepo) { $providers += @{ Name = "GitCode"; Api = "https://api.gitcode.com/api/v5/repos/$gitcodeRepo/releases/tags/$version" } }
+    $verified = $false
+    $failures = @()
+    foreach ($provider in $providers) {
+        try {
+            $release = Invoke-RestMethod -Uri $provider.Api -TimeoutSec 12 -Headers @{ "User-Agent" = "AX-installer" }
+            if ($release.tag_name -ne $version) { throw "release tag mismatch" }
+            $assetUrl = ($release.assets | Where-Object name -eq $asset | Select-Object -First 1).browser_download_url
+            $sumsUrl = ($release.assets | Where-Object name -eq "SHA256SUMS" | Select-Object -First 1).browser_download_url
+            if (-not $assetUrl -or -not $sumsUrl) { throw "release is missing installer assets" }
+            Write-Host "AX: downloading verified assets from $($provider.Name)"
+            Invoke-WebRequest -Uri $assetUrl -OutFile $zipPath -UseBasicParsing -TimeoutSec 180
+            Invoke-WebRequest -Uri $sumsUrl -OutFile $sumsPath -UseBasicParsing -TimeoutSec 30
+            $sumsText = Get-Content -Path $sumsPath -Raw
+            $expected = @($sumsText -split "`r?`n" | Where-Object { $_ -match "^\s*[a-fA-F0-9]{64}\s+\*?$([regex]::Escape($asset))\s*$" } | ForEach-Object { ($_ -split "[ \t]+")[0] })
+            if ($expected.Count -ne 1) { throw "SHA256SUMS has a missing, malformed, or duplicate entry for $asset" }
+            $actual = (Get-FileHash -Path $zipPath -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($actual -ne $expected[0].ToLowerInvariant()) { throw "SHA256 mismatch" }
+            $verified = $true
+            break
+        } catch {
+            $failures += "$($provider.Name): $($_.Exception.Message)"
+            Remove-Item -LiteralPath $zipPath, $sumsPath -Force -ErrorAction SilentlyContinue
+        }
     }
-
-    $actual = (Get-FileHash -Path $zipPath -Algorithm SHA256).Hash.ToLowerInvariant()
-    if ($actual -ne $expected.ToLowerInvariant()) {
-        throw "AX: checksum mismatch`n  expected: $expected`n  actual:   $actual"
-    }
+    if (-not $verified) { throw "AX: all release sources failed: $($failures -join '; ')" }
 
     # --- extract and install -------------------------------------------------------
     Expand-Archive -Path $zipPath -DestinationPath $tmpDir -Force

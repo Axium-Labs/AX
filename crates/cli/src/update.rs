@@ -5,7 +5,7 @@ use std::{
     fs::{self, File, OpenOptions},
     io::{self, Write},
     path::{Path, PathBuf},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -14,9 +14,131 @@ use sha2::{Digest, Sha256};
 
 use crate::config;
 
-const RELEASE_API: &str = "https://api.github.com/repos/Axium-Labs/AX/releases/latest";
-const RELEASE_PAGE: &str = "https://github.com/Axium-Labs/AX/releases/latest";
-const RELEASE_DOWNLOAD: &str = "https://github.com/Axium-Labs/AX/releases/download/";
+const SOURCE_TIMEOUT: Duration = Duration::from_secs(12);
+
+#[derive(Clone)]
+struct UpdateSource {
+    name: &'static str,
+    api: String,
+    github: bool,
+}
+
+/// Release discovery is deliberately provider-based: GitHub defines versions;
+/// configured mirrors only supply assets for that exact tag.
+struct ReleaseProvider {
+    sources: Vec<UpdateSource>,
+}
+
+impl ReleaseProvider {
+    fn configured() -> Self {
+        let mut sources = vec![UpdateSource {
+            name: "GitHub",
+            api: "https://api.github.com/repos/Axium-Labs/AX/releases/latest".into(),
+            github: true,
+        }];
+        if let Some(repo) = option_env!("GITCODE_AX_REPOSITORY").filter(|value| valid_repo(value)) {
+            sources.push(UpdateSource {
+                name: "GitCode",
+                api: format!("https://api.gitcode.com/api/v5/repos/{repo}/releases/latest"),
+                github: false,
+            });
+        }
+        Self { sources }
+    }
+
+    async fn latest(
+        &self,
+        client: &reqwest::Client,
+        asset_name: &str,
+    ) -> Result<Vec<(UpdateSource, Release)>> {
+        let probes = self.sources.iter().map(|source| async move {
+            let started = Instant::now();
+            let result = tokio::time::timeout(SOURCE_TIMEOUT, async {
+                let release: Release = client
+                    .get(&source.api)
+                    .send()
+                    .await?
+                    .error_for_status()?
+                    .json()
+                    .await?;
+                release.asset(asset_name)?;
+                release.asset("SHA256SUMS")?;
+                if !valid_tag(&release.tag_name) {
+                    bail!("invalid release tag from {}", source.name);
+                }
+                Ok::<_, anyhow::Error>(release)
+            })
+            .await
+            .unwrap_or_else(|_| Err(anyhow!("{} release probe timed out", source.name)));
+            (source.clone(), result, started.elapsed())
+        });
+        let responses = futures_util::future::join_all(probes).await;
+        let github_tag = responses.iter().find_map(|(source, result, _)| {
+            source
+                .github
+                .then(|| result.as_ref().ok().map(|release| release.tag_name.clone()))
+                .flatten()
+        });
+        let canonical = github_tag.or_else(|| {
+            responses.iter().find_map(|(_, result, _)| {
+                result.as_ref().ok().map(|release| release.tag_name.clone())
+            })
+        });
+        let Some(canonical) = canonical else {
+            let details = responses
+                .into_iter()
+                .map(|(source, result, _)| {
+                    format!(
+                        "{}: {}",
+                        source.name,
+                        result.err().map_or_else(
+                            || "no valid release".to_owned(),
+                            |error| format!("{error:#}")
+                        )
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("; ");
+            bail!("all release providers failed: {details}");
+        };
+        let mut candidates: Vec<_> = responses
+            .into_iter()
+            .filter_map(|(source, result, elapsed)| {
+                result
+                    .ok()
+                    .filter(|r| r.tag_name == canonical)
+                    .map(|r| (source, r, elapsed))
+            })
+            .collect();
+        candidates.sort_by_key(|(_, _, elapsed)| *elapsed);
+        if candidates.is_empty() {
+            bail!("no provider has canonical GitHub version {canonical}");
+        }
+        Ok(candidates
+            .into_iter()
+            .map(|(source, release, _)| (source, release))
+            .collect())
+    }
+}
+
+fn valid_tag(tag: &str) -> bool {
+    let version = tag
+        .trim_start_matches('v')
+        .split(['-', '+'])
+        .next()
+        .unwrap_or_default();
+    !version.is_empty()
+        && version
+            .split('.')
+            .all(|part| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()))
+}
+
+fn valid_repo(repo: &str) -> bool {
+    let mut parts = repo.split('/');
+    matches!((parts.next(), parts.next(), parts.next()), (Some(owner), Some(name), None)
+        if !owner.is_empty() && !name.is_empty() && owner.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'))
+            && name.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_')))
+}
 
 #[derive(Deserialize)]
 struct Release {
@@ -49,7 +171,10 @@ pub async fn run() -> Result<()> {
         .build()?;
 
     println!("AX: checking for updates...");
-    let release = latest_release(&client, RELEASE_API, RELEASE_PAGE, &asset_name).await?;
+    let candidates = ReleaseProvider::configured()
+        .latest(&client, &asset_name)
+        .await?;
+    let release = &candidates[0].1;
     let binary_outdated = release.tag_name.trim_start_matches('v') != env!("CARGO_PKG_VERSION");
 
     // Always pull the latest archive so the bundled payload (skills plus the
@@ -57,13 +182,7 @@ pub async fn run() -> Result<()> {
     // current. Archives from before those were packaged simply have nothing to
     // install.
     println!("AX: downloading {}...", release.tag_name);
-    let archive = download(&client, &release.asset(&asset_name)?.browser_download_url).await?;
-    let sums = download(&client, &release.asset("SHA256SUMS")?.browser_download_url).await?;
-    let expected = checksum_for(&sums, &asset_name)?;
-    let actual = format!("{:x}", Sha256::digest(&archive));
-    if !actual.eq_ignore_ascii_case(expected) {
-        bail!("checksum mismatch for {asset_name}; the existing AX executable was not changed");
-    }
+    let archive = verified_archive(&client, &candidates, &asset_name).await?;
 
     let home = config::ax_home();
     match install_bundled_assets(&archive, &asset_name, &home) {
@@ -119,72 +238,38 @@ pub async fn run() -> Result<()> {
     }
 }
 
-fn fallback_release(url: &reqwest::Url, asset_name: &str) -> Result<Release> {
-    let tag = url
-        .path()
-        .strip_prefix("/Axium-Labs/AX/releases/tag/")
-        .filter(|tag| {
-            !tag.is_empty()
-                && tag
-                    .bytes()
-                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'.' | b'-' | b'+'))
-        })
-        .ok_or_else(|| anyhow!("official Release page did not return a valid release tag"))?;
-    if url.scheme() != "https" || url.host_str() != Some("github.com") {
-        bail!("release tag must come from the official GitHub repository");
-    }
-    Ok(Release {
-        tag_name: tag.to_owned(),
-        assets: [asset_name, "SHA256SUMS"]
-            .into_iter()
-            .map(|name| ReleaseAsset {
-                name: name.to_owned(),
-                browser_download_url: format!("{RELEASE_DOWNLOAD}{tag}/{name}"),
-            })
-            .collect(),
-    })
-}
-
-async fn latest_release(
+async fn verified_archive(
     client: &reqwest::Client,
-    api: &str,
-    page: &str,
+    candidates: &[(UpdateSource, Release)],
     asset_name: &str,
-) -> Result<Release> {
-    let api_result = async {
-        let release: Release = client
-            .get(api)
-            .timeout(Duration::from_secs(30))
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?;
-        // Incomplete metadata is also unusable; official download URLs can still work.
-        release.asset(asset_name)?;
-        release.asset("SHA256SUMS")?;
-        Ok::<_, anyhow::Error>(release)
-    }
-    .await;
-    match api_result {
-        Ok(release) => Ok(release),
-        Err(api_error) => {
-            println!("AX: GitHub API unavailable; checking the official Release page...");
-            let fallback = async {
-                let response = client
-                    .get(page)
-                    .timeout(Duration::from_secs(30))
-                    .send()
-                    .await?
-                    .error_for_status()?;
-                fallback_release(response.url(), asset_name)
+) -> Result<Vec<u8>> {
+    let mut failures = Vec::new();
+    for (source, candidate) in candidates {
+        let result = async {
+            let archive =
+                download(client, &candidate.asset(asset_name)?.browser_download_url).await?;
+            let sums =
+                download(client, &candidate.asset("SHA256SUMS")?.browser_download_url).await?;
+            let expected = checksum_for(&sums, asset_name)?;
+            let actual = format!("{:x}", Sha256::digest(&archive));
+            if !actual.eq_ignore_ascii_case(expected) {
+                bail!("checksum mismatch for {asset_name}");
             }
-            .await;
-            fallback.with_context(|| {
-                format!("GitHub API failed: {api_error:#}; official Release page also failed")
-            })
+            Ok::<_, anyhow::Error>(archive)
+        }
+        .await;
+        match result {
+            Ok(archive) => {
+                println!("AX: verified download from {}", source.name);
+                return Ok(archive);
+            }
+            Err(error) => failures.push(format!("{}: {error:#}", source.name)),
         }
     }
+    bail!(
+        "all release downloads failed: {}. The existing AX executable was not changed",
+        failures.join("; ")
+    )
 }
 
 fn retryable(error: &reqwest::Error) -> bool {
@@ -501,37 +586,6 @@ try {
 mod tests {
     use super::*;
 
-    #[test]
-    fn fallback_pins_archive_and_checksum_to_the_official_tag() {
-        let url =
-            reqwest::Url::parse("https://github.com/Axium-Labs/AX/releases/tag/v0.2.10").unwrap();
-        let release = fallback_release(&url, "ax-x86_64-pc-windows-msvc.zip").unwrap();
-        assert_eq!(release.tag_name, "v0.2.10");
-        assert_eq!(
-            release.asset("SHA256SUMS").unwrap().browser_download_url,
-            "https://github.com/Axium-Labs/AX/releases/download/v0.2.10/SHA256SUMS"
-        );
-        assert_eq!(
-            release
-                .asset("ax-x86_64-pc-windows-msvc.zip")
-                .unwrap()
-                .browser_download_url,
-            "https://github.com/Axium-Labs/AX/releases/download/v0.2.10/ax-x86_64-pc-windows-msvc.zip"
-        );
-        for url in [
-            "https://example.com/Axium-Labs/AX/releases/tag/v0.2.10",
-            "https://github.com/other/AX/releases/tag/v0.2.10",
-            "http://github.com/Axium-Labs/AX/releases/tag/v0.2.10",
-            "https://github.com/Axium-Labs/AX/releases/latest",
-            "https://github.com/Axium-Labs/AX/releases/tag/v0.2.10/evil",
-        ] {
-            assert!(
-                fallback_release(&reqwest::Url::parse(url).unwrap(), "ax.zip").is_err(),
-                "{url}"
-            );
-        }
-    }
-
     fn mock_http(responses: Vec<(u16, &'static str)>) -> (String, std::thread::JoinHandle<()>) {
         use std::net::TcpListener;
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -570,26 +624,53 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unavailable_api_tries_the_page_and_keeps_both_errors() {
+    async fn checksum_failure_falls_back_to_the_next_provider() {
         let client = reqwest::Client::builder()
             .no_proxy()
             .timeout(Duration::from_secs(5))
             .build()
             .unwrap();
-        let (url, server) = mock_http(vec![(429, ""), (503, "")]);
-        let error = latest_release(
-            &client,
-            &format!("{url}/api"),
-            &format!("{url}/latest"),
-            "ax.zip",
-        )
-        .await
-        .err()
-        .unwrap();
-        let error = format!("{error:#}");
-        assert!(error.contains("429"));
-        assert!(error.contains("503"));
-        server.join().unwrap();
+        let expected = format!("{:x}  ax.zip\n", Sha256::digest(b"verified archive"));
+        let bad_sums: &'static str = Box::leak(expected.clone().into_boxed_str());
+        let (bad_url, bad_server) = mock_http(vec![(200, "tampered archive"), (200, bad_sums)]);
+        let good_sums: &'static str = Box::leak(expected.into_boxed_str());
+        let (good_url, good_server) = mock_http(vec![(200, "verified archive"), (200, good_sums)]);
+        let candidate = |tag: &str, base: &str| Release {
+            tag_name: tag.into(),
+            assets: ["ax.zip", "SHA256SUMS"]
+                .into_iter()
+                .map(|name| ReleaseAsset {
+                    name: name.into(),
+                    browser_download_url: format!("{base}/{name}"),
+                })
+                .collect(),
+        };
+        let candidates = vec![
+            (
+                UpdateSource {
+                    name: "GitHub",
+                    api: String::new(),
+                    github: true,
+                },
+                candidate("v0.3.0", &bad_url),
+            ),
+            (
+                UpdateSource {
+                    name: "GitCode",
+                    api: String::new(),
+                    github: false,
+                },
+                candidate("v0.3.0", &good_url),
+            ),
+        ];
+        assert_eq!(
+            verified_archive(&client, &candidates, "ax.zip")
+                .await
+                .unwrap(),
+            b"verified archive"
+        );
+        bad_server.join().unwrap();
+        good_server.join().unwrap();
     }
 
     #[test]

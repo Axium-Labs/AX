@@ -1,0 +1,33 @@
+name: Sync GitHub Release to GitCode
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Resolve release tag commit
+        run: echo "RELEASE_TARGET=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+      - name: Download GitHub assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPOSITORY: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: gh release download "$RELEASE_TAG" --repo "$GH_REPOSITORY" --dir "$RUNNER_TEMP/release"
+      - name: Best-effort GitCode release mirror
+        continue-on-error: true
+        env:
+          GITCODE_REPOSITORY: ${{ vars.GITCODE_AX_REPOSITORY }}
+          GITCODE_TOKEN: ${{ secrets.GITCODE_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
+          GH_REPOSITORY: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          RELEASE_NAME: ${{ github.event.release.name }}
+          RELEASE_BODY: ${{ github.event.release.body }}
+        run: python .github/scripts/sync_gitcode_release.py
