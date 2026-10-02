@@ -24,7 +24,7 @@ cli ───────────────┬──> runtime-core ──>
 | Crate | Responsibility |
 |---|---|
 | `model` | Provider-neutral `ModelProvider`, text/image message parts, capabilities, tool calls, response types. One streaming entry point (`complete_stream`) with a non-streaming fallback. |
-| `tool` | `Tool`, `ToolRegistry`, JSON Schema, `SafetyLevel`, plus built-ins: `shell`, `filesystem`, `patch`, `search`, `web`, `view_image`. Owns the `PermissionStore`. |
+| `tool` | `Tool`, `ToolRegistry`, JSON Schema, `SafetyLevel`, plus built-ins: `shell`, `filesystem`, `find_files`/`glob`, `patch`, `search`, `web`, `view_image`. Owns the `PermissionStore`. |
 | `runtime-core` | The model → tool → model agent loop, `AgentEvent` stream, context selection, `ContextBudget`, compaction, and `AgentSupervisor` for bounded-concurrency tasks. |
 | `mcp` | MCP client for stdio / Streamable HTTP / WebSocket, lazy connection, capability catalog, `McpToolProxy` and `McpGateway`. |
 | `skill` | `SKILL.md` frontmatter indexing, precomputed Unicode routing features, and language-independent similarity routing; Markdown body is loaded only when a route hits. Legacy packages remain supported. |
@@ -71,9 +71,12 @@ credential saving itself never depends on the tool succeeding).
 ### `tool`
 
 Defines `Tool`, `ToolRegistry`, JSON Schema and `SafetyLevel`, and provides
-`shell`, `filesystem`, structured `patch` (multi-hunk edits; any failing hunk
-aborts the whole write) and `search` (line-scoped text search) to reduce shell
-abuse.
+`shell`, `filesystem`, `find_files`/`glob` (name/path/extension discovery),
+structured `patch` (multi-hunk edits; any failing hunk aborts the whole write)
+and `search` (line-scoped content, symbol and regex search) to reduce shell
+abuse. Discovery tools share one traversal and glob policy
+(`crates/tool/src/discovery.rs`) so a filename scan and a content scan of the
+same root can never disagree.
 
 Every tool declares its own permissions through `permission()` — a
 `ToolPermission { capability, safety }` — and neither the kernel nor the UI
@@ -329,12 +332,62 @@ composition boundary. `child_runtime::configure_controller` uses one
 exclusions, controller budget and independent child execution budget on every
 prompt, including restored/preinitialized kernels. ACP's early command dispatch
 still reaches this boundary through `run_session_prompt`; it adds no Agent Loop.
-Once the model explicitly sets `execution="children"`, the controller
-consumes that queue's running/pending entries, calls `AgentSupervisor::run_child`
-and collects each outcome. Children use the existing kernel loop; they do not
-receive the controller queue or siblings' messages. The controller makes a single
-text-only summary request after all children are terminal. Plain single-task
-turns keep their existing loop. Embedders can opt in via `with_child_host`.
+Children use the existing kernel loop and the same `ToolRegistry`, rebound to the
+child's run context; they do not receive the controller queue or siblings'
+messages. Plain single-task turns keep their existing loop. Embedders can opt in
+via `with_child_host`.
+
+Once the model explicitly sets `execution="children"`, the runtime stops
+promoting one task per model round and dispatches the whole **ready frontier**
+instead. `pending` becomes ready when every dependency is `Completed`; every
+ready task whose declared `resources` do not overlap in-flight work is
+provisioned and started in the same batch, bounded by the supervisor's
+concurrency (`with_child_concurrency`, default 4). As children settle, newly
+ready tasks are admitted immediately, so the controller never waits for one child
+before starting the next. A failed or timed-out child records its receipt and the
+frontier moves on. Cancelling or dropping the turn drops every child with it,
+because children are futures owned by the turn rather than detached tasks.
+
+Conflict is decided by the existing resource model: a task may declare
+`resources` (path or name, with `write: true` when it modifies them) and two
+tasks whose declared accesses overlap are never concurrent. Tool-level conflicts
+are still serialized by the process-wide resource leases; nothing new was added.
+
+Each child returns a structured `ChildResult` (status, summary, findings, changed
+files, diff statistics, diagnostics, validation, artifacts, failure reason,
+continuation hint, metrics). The controller model only receives the compact
+`model_summary()` projection; the full record is durable and is read back with
+the `child_result` control tool, so recovering detail never means re-running a
+child. The controller makes a single text-only summary request after all children
+are terminal. A receipt recovered from an earlier process short-circuits
+provisioning, so a resumed session never re-runs a completed child. See
+[ADR 0016](adr/0016-parallel-children-and-instructions.md).
+
+### Project instructions, and asking the user
+
+`instructions::InstructionResolver` resolves the instruction set for a turn
+deterministically: the global file, `AGENTS.md` at the repository root,
+`AGENTS.md` at every directory from the root down to the cwd
+(`AGENTS.override.md` replaces the same level), then `.ax/rules/*.md` whose
+`path`/glob scope matches a file the task names. Segments carry `source_path`,
+scope, priority and provenance, the most specific level wins, and the result is
+bounded by `ContextBudget::instructions_budget_tokens()` while keeping the
+always-on chain. Nothing consults memory, embeddings or a semantic index.
+
+Project instructions are their own context slot (`[ax-project-instructions]`),
+separate from retrieved memory, skill instructions and system context; none of
+the four stands in for another. They are re-resolved every turn, so they can
+never go stale in a resumed session. See
+[context.md](context.md#project-instructions).
+
+`request_user_input` is a first-class structured control tool for questions that
+materially change the result and cannot be answered from the repository. It is
+never an authorization gate: permissions remain in the permission system. Asking
+checkpoints the goal, queue, session and question, parks the queue in
+`waiting_for_user` (never failed, never dropped) and suspends the run. The answer
+is written back to the same tool call id and `GoalTurn::Answer` resumes the run
+from that position without opening a new user turn.
+
 
 `LocalChildHost` separates `child-runs/<id>/state` (session database, JSONL,
 terminal receipt and lifecycle manifest) from the disposable `workspace` directory.

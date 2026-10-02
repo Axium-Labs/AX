@@ -40,15 +40,15 @@ impl Tool for FilesystemTool {
     }
 
     fn description(&self) -> &str {
-        "Read a small 1-based start_line/end_line range after exact search. Batch independent reads in one round. Whole-file reads and directory listing only when necessary. Use patch for existing file edits; writes require approval."
+        "Read or list a path you already know. `read` returns a small 1-based start_line/end_line range (omit the range only when you need the whole file); `list` shows exactly one directory level. This is not a discovery tool: when you do not know where a file is use find_files/glob, and when you are looking for text or a symbol use search. Once search returns candidate paths, read them directly instead of searching the same scope again. Batch independent reads in one round. Use patch for existing file edits; writes require approval."
     }
 
     fn input_schema(&self) -> Value {
         json!({
             "type": "object",
             "properties": {
-                "operation": { "type": "string", "enum": ["read", "list", "write"] },
-                "path": { "type": "string" },
+                "operation": { "type": "string", "enum": ["read", "list", "write"], "description": "`read` a file (optionally a 1-based line range), `list` one directory level, or `write` a new file (requires approval)." },
+                "path": { "type": "string", "description": "Path relative to the workspace root." },
                 "content": { "type": "string" },
                 "start_line": { "type":"integer", "minimum":1 },
                 "end_line": { "type":"integer", "minimum":1 }

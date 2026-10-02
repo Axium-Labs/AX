@@ -22,12 +22,18 @@ impl WorkspaceTool {
     pub fn new(tool: Arc<dyn Tool>, cwd: PathBuf) -> Self {
         Self { tool, cwd }
     }
-    /// Binds a relative `path` argument to this workspace. Path binding only;
+    /// Binds relative scope arguments to this workspace. Path binding only;
     /// object confinement belongs to Sandbox Manager.
+    ///
+    /// `path` is the canonical scope argument; `root` is the accepted alias the
+    /// discovery tools also expose. Joining an already-absolute argument is a
+    /// no-op, so a resolved call is never re-rooted.
     fn resolve(&self, mut input: Value) -> Value {
-        if let Some(path) = input["path"].as_str() {
-            let path = self.cwd.join(path);
-            input["path"] = Value::String(path.to_string_lossy().into_owned());
+        for field in ["path", "root"] {
+            if let Some(path) = input[field].as_str() {
+                let path = self.cwd.join(path);
+                input[field] = Value::String(path.to_string_lossy().into_owned());
+            }
         }
         input
     }
@@ -36,6 +42,14 @@ impl WorkspaceTool {
 impl Tool for WorkspaceTool {
     fn execution_boundary(&self) -> crate::ExecutionBoundary {
         self.tool.execution_boundary()
+    }
+    /// Rebind to the child workspace instead of keeping the parent's root. This
+    /// is what makes one shared registry serve both the main agent and children.
+    fn fork_for_run(&self, context: &RunContext) -> Option<Arc<dyn Tool>> {
+        Some(Arc::new(Self::new(
+            Arc::clone(&self.tool),
+            context.cwd.clone(),
+        )))
     }
     fn runtime_owned_resources(&self) -> bool {
         self.tool.runtime_owned_resources()

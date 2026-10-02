@@ -888,8 +888,10 @@ impl ModelProvider for PendingProvider {
     fn model_id(&self) -> &'static str {
         "pending"
     }
+    /// Large enough that the request is not rejected for context pressure: the
+    /// stall, not a budget error, is what the assertion is about.
     fn context_window(&self) -> usize {
-        1000
+        100_000
     }
     async fn complete(&self, _request: ModelRequest) -> Result<ModelResponse, ModelError> {
         std::future::pending().await
@@ -908,7 +910,7 @@ async fn turn_timeout_is_enforced_while_model_is_waiting() {
     });
     assert!(matches!(
         kernel.run_turn("wait", |_| {}).await,
-        Err(AgentError::Budget(_))
+        Err(AgentError::Timeout(_))
     ));
     assert_eq!(kernel.messages()[0].content, "wait");
 }

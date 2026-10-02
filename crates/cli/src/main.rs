@@ -11,10 +11,14 @@ mod auth_login;
 mod bootstrap;
 mod capabilities;
 mod capability_import;
+#[cfg(test)]
+mod child_benchmark_tests;
 mod child_runtime;
 mod commands;
 mod config;
 mod crew_device;
+#[cfg(test)]
+mod e2e_tests;
 mod evolution;
 mod execution;
 mod file_reference;
@@ -22,6 +26,7 @@ mod memory_context;
 mod memory_tool;
 mod model_selection;
 mod project_identity;
+mod project_instructions;
 mod providers;
 mod repl;
 mod runtime;

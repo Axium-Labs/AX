@@ -883,7 +883,8 @@ fn open_session(
         state.switch_project(&project)?;
     }
     app.directory = state.project_root.display().to_string();
-    let budget = crate::runtime::context_budget(selection, &state.mcp_tools);
+    state.prepare_runtime(selection)?;
+    let budget = state.context_budget(selection);
     if state.open_session(id, &budget)? {
         let history = state
             .store()?

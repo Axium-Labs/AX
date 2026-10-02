@@ -102,7 +102,14 @@ impl AgentKernel {
         let request = ModelRequest {
             messages: request_messages,
             tools: if child_summary {
-                vec![]
+                // Every child is terminal, so no work tool may run. Asking the
+                // user a planning question is not work and is the one thing a
+                // summary step can still need.
+                tool_specs
+                    .iter()
+                    .filter(|spec| spec.function.name == crate::user_input::TOOL_NAME)
+                    .cloned()
+                    .collect()
             } else {
                 tool_specs.to_vec()
             },
@@ -170,7 +177,12 @@ impl AgentKernel {
         drop(model_timer);
         let content = response.content;
         let tool_calls = response.tool_calls;
-        if child_summary && !tool_calls.is_empty() {
+        if child_summary
+            && !tool_calls.is_empty()
+            && !tool_calls
+                .iter()
+                .all(|call| call.function.name == crate::user_input::TOOL_NAME)
+        {
             return Err(AgentError::GlobalBlocked(
                 "all children are terminal; controller summary cannot execute more tools".into(),
             ));

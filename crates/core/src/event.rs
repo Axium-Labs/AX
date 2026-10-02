@@ -53,6 +53,11 @@ pub enum AgentEvent {
         result: tool::ToolResult,
     },
     TurnFinished,
+    /// The run suspended on `request_user_input`; the frontend shows the
+    /// question and turns the next submission into its answer.
+    UserQuestion {
+        question: Box<crate::UserQuestion>,
+    },
     ContextCompressed {
         removed_messages: usize,
         estimated_tokens_before: usize,
@@ -90,7 +95,22 @@ pub(crate) fn fetch_diagnostics(
 pub fn tool_activity(name: &str, input: &Value) -> String {
     let field = |key: &str| input.get(key).and_then(Value::as_str).unwrap_or("");
     let detail = match name {
-        "search" => format!("searching '{}' in {}", field("query"), field("path")),
+        "search" => {
+            let scope = if field("path").is_empty() {
+                field("root")
+            } else {
+                field("path")
+            };
+            format!("searching '{}' in {}", field("query"), scope)
+        }
+        "find_files" | "glob" => {
+            let scope = if field("path").is_empty() {
+                field("root")
+            } else {
+                field("path")
+            };
+            format!("finding {} in {}", field("pattern"), scope)
+        }
         "filesystem" => format!("{} {}", field("operation"), field("path")),
         "patch" => format!("editing {}", field("path")),
         "shell" => format!("running {}", field("command").lines().next().unwrap_or("")),

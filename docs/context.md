@@ -171,8 +171,53 @@ remains compact; the summary includes child workspace/session/state references a
 concise results, without full child tool histories.
 
 `--child-timeout-secs` limits each isolated child independently; it defaults to
-unlimited and never implicitly ends the controller. `--turn-timeout-secs` remains
-the global turn deadline. These options also apply to ACP child dispatch.
+unlimited and never implicitly ends the controller. `--turn-timeout-secs` is an
+*idle* deadline: a turn that delegates spans the whole child batch and each child
+has its own budget, so the controller is cancelled only when nothing has
+progressed — no model round, tool round, child dispatch or child receipt — for
+the whole window. These options also apply to ACP child dispatch.
+
+Each child's receipt is a structured `ChildResult`. The controller's model
+context receives only the compact projection (status, root cause, relevant files,
+validation, suggested next step); findings, diagnostics, changed files, diff
+statistics and metrics stay durable and are read on demand with the `child_result`
+control tool. The durable index is written once per dispatch rather than once per
+child, so n children cost one snapshot instead of n growing ones.
+
+## Project instructions
+
+Project instructions are resolved once per turn and injected as their own
+replacable `[ax-project-instructions]` system message. Resolution order, least
+specific first: the global instruction file, `AGENTS.md` at the repository root,
+`AGENTS.md` at every directory from the repository root down to the cwd
+(`AGENTS.override.md` replaces `AGENTS.md` at the same level), then
+`.ax/rules/*.md` whose `path`/glob scope matches a file the task names — `@`
+references and path-like tokens that exist in the repository.
+
+Every segment carries its `source_path`, scope, priority and provenance, the most
+specific level wins, and the order is total (priority, then source path), so the
+same tree and prompt always produce the same instruction set. The resolution
+never consults memory, embeddings or a semantic index, and the token allowance
+comes from `ContextBudget::instructions_budget_tokens()` (`ContextPoolPolicy::
+instructions_maximum`, default 4096). The always-on chain is never dropped; when
+the budget runs out, the least specific path-scoped rules are omitted and the
+omission is reported.
+
+Instructions are re-resolved on every turn rather than persisted, so they cannot
+go stale in a resumed session, and they are never stored in raw history. They are
+a separate concept from memory, skills and system context: none of the four
+substitutes for another.
+
+## Asking the user mid-run
+
+`request_user_input` suspends the run instead of ending it. The kernel checkpoints
+the goal, the task queue, the session and the question, parks the queue in
+`waiting_for_user`, and leaves the pending tool call unanswered on purpose. The
+frontends show the question; the answer is written back as the tool result of that
+same call id and `GoalTurn::Answer` resumes the run from that position without
+opening a new user turn. A reconnect still finds the goal waiting, and suspension
+is never reported as failure. Authorization never travels this path: dangerous
+operations are decided by the permission system.
 
 
 ## Execution state and truthful tool history

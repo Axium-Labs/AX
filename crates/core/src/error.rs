@@ -26,8 +26,29 @@ pub enum AgentError {
     StepLimit(usize),
     #[error("execution budget exhausted: {0}")]
     Budget(String),
+    #[error("turn exceeded its time budget: {0}")]
+    Timeout(String),
+    #[error("waiting for the user to answer: {0}")]
+    WaitingForUser(Box<crate::UserQuestion>),
     #[error("history persistence failed: {0}")]
     Persistence(String),
     #[error("agent worker failed: {0}")]
     WorkerJoin(String),
+}
+
+impl AgentError {
+    /// Suspension is not failure: budget, step limits and user questions leave
+    /// the goal resumable, so the queue may not be marked `blocked`.
+    #[must_use]
+    pub const fn resumable(&self) -> bool {
+        matches!(
+            self,
+            Self::Budget(_) | Self::StepLimit(_) | Self::Timeout(_) | Self::WaitingForUser(_)
+        )
+    }
+
+    #[must_use]
+    pub const fn is_timeout(&self) -> bool {
+        matches!(self, Self::Timeout(_))
+    }
 }

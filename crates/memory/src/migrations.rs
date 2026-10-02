@@ -8,38 +8,56 @@ use rusqlite::{Connection, OptionalExtension};
 use crate::{MemoryError, MemoryStore, schema, scoped};
 
 /// Applies every migration in the order they were introduced.
+///
+/// All of it runs in one transaction: a fresh database pays one commit, not one
+/// per batch. This is what keeps child session creation off the critical path.
 pub(crate) fn apply(connection: &Connection) -> Result<(), MemoryError> {
-    connection.execute_batch(schema::BASE)?;
+    let mut journal_mode: String =
+        connection.query_row("PRAGMA journal_mode", [], |row| row.get(0))?;
+    if journal_mode != "memory" && journal_mode != "wal" {
+        journal_mode = connection.query_row("PRAGMA journal_mode = WAL", [], |row| row.get(0))?;
+    }
+    if journal_mode != "memory" && journal_mode != "wal" {
+        return Err(MemoryError::Database(
+            rusqlite::Error::ToSqlConversionFailure(
+                format!("SQLite journal_mode is {journal_mode}, expected wal").into(),
+            ),
+        ));
+    }
+    connection.pragma_update(None, "foreign_keys", "ON")?;
+    let tx = connection.unchecked_transaction()?;
+    tx.execute_batch(schema::BASE)?;
     ensure_column(
-        connection,
+        &tx,
         "session_summaries",
         "through_message_id",
         "ALTER TABLE session_summaries ADD COLUMN through_message_id INTEGER NOT NULL DEFAULT 0",
     )?;
     ensure_column(
-        connection,
+        &tx,
         "session_summaries",
         "effective_context",
         "ALTER TABLE session_summaries ADD COLUMN effective_context TEXT",
     )?;
-    connection.execute_batch(schema::SCOPED_MEMORIES)?;
+    tx.execute_batch(schema::SCOPED_MEMORIES)?;
     ensure_column(
-        connection,
+        &tx,
         "scoped_memories",
         "always_include",
         "ALTER TABLE scoped_memories ADD COLUMN always_include INTEGER NOT NULL DEFAULT 0",
     )?;
-    connection.execute_batch(schema::PROJECT_MEMORY_MIGRATIONS)?;
+    tx.execute_batch(schema::PROJECT_MEMORY_MIGRATIONS)?;
     for column in ["event_offset", "event_length"] {
         ensure_column(
-            connection,
+            &tx,
             "messages",
             column,
             &format!("ALTER TABLE messages ADD COLUMN {column} INTEGER"),
         )?;
     }
+    migrate_agent_states(&tx)?;
+    tx.commit()?;
     scoped::migrate_memory_index(connection)?;
-    migrate_agent_states(connection)?;
     Ok(())
 }
 

@@ -99,11 +99,159 @@ struct ChildShell {
     context: crate::RunContext,
 }
 
+/// Declared effects of a shell command.
+///
+/// Unknown effects keep the safe default — `exclusive()`, serialized against
+/// everything. A command whose effect we can prove is a read is declared as a
+/// precise read instead, so independent validation and read-only probes can run
+/// in parallel instead of being serialized by an opaque `Resource::All`.
+///
+/// Only commands that are provably read-only are classified: a single simple
+/// invocation of a known read-only program, with no pipe, redirection or output
+/// switch. Anything else stays `exclusive`.
+pub(crate) fn shell_resources(
+    command: &str,
+    cwd: Option<&std::path::Path>,
+) -> Vec<crate::ResourceAccess> {
+    classify_command(command, cwd).unwrap_or_else(|| vec![crate::ResourceAccess::exclusive()])
+}
+
+/// Split a command into tokens, honoring quotes. `None` means the invocation is
+/// not simple enough to reason about (pipe, redirection, unclosed quote).
+fn shell_tokens(command: &str) -> Option<Vec<String>> {
+    let mut tokens = Vec::new();
+    let mut current = String::new();
+    let mut quote: Option<char> = None;
+    for ch in command.chars() {
+        if let Some(active) = quote {
+            if ch == active {
+                quote = None;
+            } else {
+                current.push(ch);
+            }
+            continue;
+        }
+        match ch {
+            '\'' | '"' => quote = Some(ch),
+            '|' | '>' | '<' | '&' | ';' => return None,
+            c if c.is_whitespace() => {
+                if !current.is_empty() {
+                    tokens.push(std::mem::take(&mut current));
+                }
+            }
+            c => current.push(c),
+        }
+    }
+    if quote.is_some() {
+        return None;
+    }
+    if !current.is_empty() {
+        tokens.push(current);
+    }
+    Some(tokens)
+}
+
+fn program_name(token: &str) -> String {
+    let base = token.rsplit(['/', '\\']).next().unwrap_or(token);
+    let lower = base.to_ascii_lowercase();
+    lower
+        .strip_suffix(".exe")
+        .or_else(|| lower.strip_suffix(".ps1"))
+        .unwrap_or(&lower)
+        .to_owned()
+}
+
+fn looks_like_path(token: &str) -> bool {
+    token.contains(['/', '\\']) || token.contains('.')
+}
+
+fn read_resource(
+    token: Option<&String>,
+    cwd: Option<&std::path::Path>,
+    named: &str,
+) -> Vec<crate::ResourceAccess> {
+    if let Some(token) = token
+        && looks_like_path(token)
+    {
+        let path = match cwd {
+            Some(cwd) => cwd.join(token),
+            None => std::path::PathBuf::from(token),
+        };
+        return vec![crate::ResourceAccess::read(crate::Resource::path(path))];
+    }
+    vec![crate::ResourceAccess::read(crate::Resource::Named(
+        named.to_owned(),
+    ))]
+}
+
+fn classify_command(
+    command: &str,
+    cwd: Option<&std::path::Path>,
+) -> Option<Vec<crate::ResourceAccess>> {
+    let tokens = shell_tokens(command)?;
+    let (program, args) = tokens.split_first()?;
+    let program = program_name(program);
+    let sub = args.first().map(|s| s.to_ascii_lowercase());
+    // An output switch means the command writes somewhere we cannot see.
+    let writes_output = args
+        .iter()
+        .any(|arg| matches!(arg.to_ascii_lowercase().as_str(), "-outfile" | "-o" | "-of"));
+    if writes_output {
+        return None;
+    }
+    match program.as_str() {
+        "git" => {
+            let read_only = matches!(
+                sub.as_deref(),
+                Some(
+                    "status"
+                        | "log"
+                        | "diff"
+                        | "show"
+                        | "branch"
+                        | "rev-parse"
+                        | "describe"
+                        | "tag"
+                        | "blame"
+                        | "grep"
+                        | "ls-files"
+                        | "ls-tree"
+                        | "cat-file"
+                        | "remote"
+                )
+            );
+            read_only.then(|| read_resource(args.get(1), cwd, "shell:git"))
+        }
+        "cat" | "type" | "head" | "tail" | "wc" | "file" | "get-content" | "get-item"
+        | "test-path" | "resolve-path" => Some(read_resource(
+            args.first(),
+            cwd,
+            &format!("shell:{program}"),
+        )),
+        "pwd" | "get-location" | "echo" | "write-output" | "whoami" | "hostname" | "date"
+        | "env" | "printenv" | "get-command" | "get-help" => {
+            Some(vec![crate::ResourceAccess::read(crate::Resource::Named(
+                format!("shell:{program}"),
+            ))])
+        }
+        "get-childitem" => Some(read_resource(args.first(), cwd, "shell:get-childitem")),
+        "cargo" | "rustc" | "node" | "npm" | "npx" | "python" | "python3" | "pip" | "go"
+        | "java" | "javac" | "dotnet" | "gcc" | "clang" | "cmake" => {
+            matches!(sub.as_deref(), Some("--version" | "version")).then(|| {
+                vec![crate::ResourceAccess::read(crate::Resource::Named(
+                    format!("shell:{program}"),
+                ))]
+            })
+        }
+        _ => None,
+    }
+}
+
 fn shell_description() -> &'static str {
     if cfg!(windows) {
-        "Run commands using Windows PowerShell 5.1 (powershell.exe), platform=windows. Use PowerShell syntax: no bash heredocs (python - <<'PY'), && or ||. Use a PowerShell here-string piped to python, or python -c; run dependent commands separately. Shell execution requires approval."
+        "Run commands using Windows PowerShell 5.1 (powershell.exe), platform=windows. Fallback only: use find_files/glob for filename discovery, search for text or symbols, and filesystem read/list for known paths. Do not use recursive scans (Get-ChildItem -Recurse, find, rg --files) when a discovery tool can express the request. Use PowerShell syntax: no bash heredocs (python - <<'PY'), && or ||. Use a PowerShell here-string piped to python, or python -c; run dependent commands separately. Shell execution requires approval."
     } else {
-        "Run commands using POSIX sh, platform=unix. Shell execution requires approval."
+        "Run commands using POSIX sh, platform=unix. Fallback only: use find_files/glob for filename discovery, search for text or symbols, and filesystem read/list for known paths. Do not use recursive scans (find, rg --files) when a discovery tool can express the request. Shell execution requires approval."
     }
 }
 
@@ -158,6 +306,10 @@ impl Tool for ChildShell {
     fn safety(&self, input: &Value) -> SafetyLevel {
         ShellTool.safety(input)
     }
+    fn resources(&self, input: &Value) -> Vec<crate::ResourceAccess> {
+        let command = input["command"].as_str().unwrap_or_default();
+        shell_resources(command, Some(&self.context.cwd))
+    }
     async fn execute(&self, input: Value) -> Result<String, ToolError> {
         execute_shell(input, Some(&self.context)).await
     }
@@ -204,6 +356,11 @@ impl Tool for ShellTool {
 
     fn safety(&self, _input: &Value) -> SafetyLevel {
         SafetyLevel::RequiresApproval
+    }
+
+    fn resources(&self, input: &Value) -> Vec<crate::ResourceAccess> {
+        let command = input["command"].as_str().unwrap_or_default();
+        shell_resources(command, None)
     }
 
     async fn execute(&self, input: Value) -> Result<String, ToolError> {

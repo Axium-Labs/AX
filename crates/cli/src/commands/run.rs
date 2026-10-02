@@ -6,7 +6,7 @@
 
 use std::{fs, io::Write, sync::Arc};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use model::AuthStorage;
 use runtime_core::{AgentEvent, ApprovalPolicy};
 
@@ -15,7 +15,6 @@ use crate::{
     child_runtime, config, evolution, memory_tool,
     model_selection::{ModelSelection, ProviderKind},
     repl::ReplState,
-    runtime::kernel,
 };
 
 fn render_event(event: AgentEvent) {
@@ -55,6 +54,9 @@ fn render_event(event: AgentEvent) {
             "[memory] compressed {removed_messages} messages ({estimated_tokens_before} -> {estimated_tokens_after} estimated tokens)"
         ),
         AgentEvent::TurnFinished => println!(),
+        AgentEvent::UserQuestion { question } => {
+            eprintln!("[ax] waiting for your answer:\n{question}");
+        }
         AgentEvent::SubagentStarted { id } => eprintln!("[{id}] started"),
         AgentEvent::SubagentCompleted { id } => eprintln!("[{id}] completed"),
         AgentEvent::SubagentFailed { id, error } => eprintln!("[{id}] failed: {error}"),
@@ -84,13 +86,15 @@ where
 {
     if state.runtime.is_none() {
         refresh_codex_credential_if_needed(selection).await?;
-        let runtime = kernel(
-            selection,
-            approval,
-            state.loaded_messages.clone(),
-            &state.mcp_tools,
-            &ax_auth_path(),
-        )?;
+        // One provider and one final tool registry per run. The prepared parts
+        // are the same objects the kernel receives, so the budget measured for
+        // this run describes exactly the tools that will be sent.
+        state.prepare_runtime(selection)?;
+        let prepared = state
+            .take_prepared()
+            .expect("runtime prepared for this run");
+        let runtime =
+            prepared.into_kernel(approval, state.loaded_messages.clone(), &ax_auth_path())?;
         state.ensure_session(prompt)?;
         state.runtime = Some(
             runtime
@@ -101,7 +105,13 @@ where
         state.ensure_session(prompt)?;
     }
     child_runtime::configure_controller(state)?;
-    prepare_turn_context(state, selection, prompt)?;
+    if let Some((goal_id, answer)) = answer_intent(state, prompt)? {
+        // The submission is the answer to the parked question: resume the same
+        // goal from the exact tool call that asked, instead of planning again.
+        state.next_goal_turn = runtime_core::GoalTurn::Answer { goal_id, answer };
+    } else {
+        prepare_turn_context(state, selection, prompt)?;
+    }
     let mut runtime = state.runtime.take().expect("runtime initialized");
     let result = evolution::checkpointed_turn(&mut runtime, state, prompt, emit).await;
     let snapshot = if runtime.take_compression_dirty() {
@@ -119,6 +129,14 @@ where
         None
     };
     state.runtime = Some(runtime);
+    state.sync_pending_question();
+    // Suspending on a question is not a failed turn: report the question as
+    // this turn's output so the caller shows it, and let the next submission
+    // answer it. The goal stays `waiting_for_user`.
+    let result = match result {
+        Err(runtime_core::AgentError::WaitingForUser(question)) => Ok(question.to_string()),
+        other => other,
+    };
     if let Some((summary, effective)) = snapshot {
         // Never advance the watermark past messages that failed to persist.
         if !matches!(result, Err(runtime_core::AgentError::Persistence(_))) {
@@ -129,6 +147,39 @@ where
         }
     }
     result.map_err(Into::into)
+}
+/// Interpret the submission as the answer to a parked `request_user_input`
+/// question. Returns `None` for an ordinary prompt.
+///
+/// The structured answer is written back to the original tool call by the
+/// kernel, so no new user turn is opened and the run resumes in place.
+fn answer_intent(
+    state: &ReplState,
+    prompt: &str,
+) -> Result<Option<(String, runtime_core::UserAnswer)>> {
+    let Some(question) = state.pending_question() else {
+        return Ok(None);
+    };
+    let goal_id = state
+        .runtime
+        .as_ref()
+        .and_then(runtime_core::AgentKernel::goal_id)
+        .map(str::to_owned)
+        .ok_or_else(|| anyhow::anyhow!("the parked question has no goal to resume"))?;
+    // An unusable answer is a mistake, not a failure: ask again while the goal
+    // stays waiting for the user.
+    let answer = runtime_core::UserAnswer::parse(question, prompt).ok_or_else(|| {
+        anyhow::anyhow!(
+            "answer with one of: {}",
+            question
+                .options
+                .iter()
+                .map(|option| option.id.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    })?;
+    Ok(Some((goal_id, answer)))
 }
 /// Binds memory access to the current session and request, then fills the
 /// retrieved-memory, file and skill context for this turn, all measured against
@@ -152,15 +203,28 @@ fn prepare_turn_context(
     let budget = runtime.context_budget();
     runtime.set_context("[retrieved-memory]", None);
     let _timer = tool::telemetry::Timer::new("context.prepare");
-    let memory_context = state.memory_context(prompt, budget.memory_budget_tokens())?;
+    let memory_context = state
+        .memory_context(prompt, budget.memory_budget_tokens())
+        .context("retrieving scoped memory")?;
     state
         .runtime
         .as_mut()
         .expect("runtime initialized")
         .set_context("[retrieved-memory]", memory_context);
-    let remaining = state.prepare_file_context(prompt, budget.skills_budget_tokens())?;
+    // Project instructions come from the repository, never from memory or the
+    // skill catalog, and occupy their own context slot.
+    let segments =
+        crate::project_instructions::install(state, prompt, budget.instructions_budget_tokens());
+    if segments > 0 {
+        tool::telemetry::increment("instructions.installed");
+    }
+    let remaining = state
+        .prepare_file_context(prompt, budget.skills_budget_tokens())
+        .context("preparing referenced files")?;
     state.evolution_prepare(selection);
-    state.prepare_skill_context(prompt, remaining)
+    state
+        .prepare_skill_context(prompt, remaining)
+        .context("preparing skill context")
 }
 async fn refresh_codex_credential_if_needed(selection: &ModelSelection) -> Result<()> {
     if !matches!(selection.provider, ProviderKind::Codex) || selection.codex_auth.is_some() {

@@ -115,16 +115,113 @@ pub(super) fn cleanup(state: &Path) -> io::Result<()> {
             std::fs::remove_dir_all(&manifest.cwd)?;
         }
     }
+    if let Some(root) = state.parent().and_then(Path::parent) {
+        invalidate_usage_cache(root);
+    }
     Ok(())
 }
+/// Admission guard for one child root: provisioning, quota accounting and
+/// cleanup run one at a time, so a workspace tree is never scanned while
+/// another child is being deleted. On Windows a delete-pending directory reads
+/// as `access denied`, which used to fail an unrelated child's provisioning.
+///
+/// The in-process lock is authoritative. Every child of a controller runs in
+/// that controller's process, and Windows refuses a second exclusive file lock
+/// taken from the same process instead of blocking on it. The file lock is
+/// still taken, best effort, so a second AX process sharing the same data
+/// directory serializes with us; if it stays busy, the child proceeds under the
+/// process lock rather than failing.
+pub(super) struct Admission {
+    _local: std::sync::MutexGuard<'static, ()>,
+    _file: Option<std::fs::File>,
+}
+
+pub(super) fn admission(root: &Path) -> Admission {
+    let local = local_lock(root)
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(root.join("admission.lock"))
+        .ok()
+        .filter(cross_process_lock);
+    Admission {
+        _local: local,
+        _file: file,
+    }
+}
+
+/// One lock per child root, kept for the process lifetime. The set is bounded
+/// by the number of project data directories this process serves.
+fn local_lock(root: &Path) -> &'static std::sync::Mutex<()> {
+    static REGISTRY: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<PathBuf, &'static std::sync::Mutex<()>>>,
+    > = std::sync::OnceLock::new();
+    let registry = REGISTRY.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+    let mut locks = registry
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    locks
+        .entry(root.to_path_buf())
+        .or_insert_with(|| Box::leak(Box::new(std::sync::Mutex::new(()))))
+}
+
+fn cross_process_lock(file: &std::fs::File) -> bool {
+    use fs2::FileExt;
+    for _ in 0..200 {
+        match file.try_lock_exclusive() {
+            Ok(()) => return true,
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            Err(_) => return false,
+        }
+    }
+    false
+}
+
+pub(super) fn schedule_background_gc(root: &Path, policy: Policy) {
+    static SCHEDULED: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<PathBuf>>> =
+        std::sync::OnceLock::new();
+    let scheduled =
+        SCHEDULED.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()));
+    let mut guard = scheduled
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if !guard.insert(root.to_path_buf()) {
+        return;
+    }
+    drop(guard);
+    let gc_root = root.to_path_buf();
+    std::thread::spawn(move || {
+        let _admission = admission(&gc_root);
+        if let Err(error) = gc(&gc_root, policy) {
+            eprintln!("child workspace GC deferred: {error}");
+        }
+    });
+}
+
 pub(super) fn gc(root: &Path, policy: Policy) -> io::Result<()> {
     for entry in std::fs::read_dir(root)? {
-        let entry = entry?;
-        if !entry.file_type()?.is_dir() || entry.file_type()?.is_symlink() {
+        let Ok(entry) = entry else {
+            // A concurrent cleanup can retire an entry between read and use.
+            continue;
+        };
+        let Ok(kind) = entry.file_type() else {
+            continue;
+        };
+        if !kind.is_dir() || kind.is_symlink() {
             continue;
         }
         let state = entry.path().join("state");
-        if !state.is_dir() || state.symlink_metadata()?.file_type().is_symlink() {
+        let state_is_dir = state.is_dir()
+            && state
+                .symlink_metadata()
+                .is_ok_and(|meta| !meta.file_type().is_symlink());
+        if !state_is_dir {
             continue;
         }
         let Ok(_lease) = lease(&state) else {
@@ -157,30 +254,49 @@ pub(super) fn gc(root: &Path, policy: Policy) -> io::Result<()> {
     }
     Ok(())
 }
+
+/// Disposable bytes under one directory. A directory that disappears mid-scan
+/// reports what was measured so far: quota accounting is an estimate, never a
+/// reason for an unrelated child to fail.
 pub(super) fn size(path: &Path) -> io::Result<u64> {
-    if !path.exists() {
+    let Ok(entries) = std::fs::read_dir(path) else {
         return Ok(0);
-    }
+    };
     let mut bytes = 0_u64;
-    for entry in std::fs::read_dir(path)? {
-        let entry = entry?;
-        let kind = entry.file_type()?;
+    for entry in entries.flatten() {
+        let Ok(kind) = entry.file_type() else {
+            continue;
+        };
         if kind.is_symlink() {
             continue;
         }
         bytes = bytes.saturating_add(if kind.is_dir() {
             size(&entry.path())?
         } else {
-            entry.metadata()?.len()
+            entry.metadata().map_or(0, |meta| meta.len())
         });
     }
     Ok(bytes)
 }
 pub(super) fn check_quota(root: &Path, cwd: &Path, policy: Policy) -> io::Result<()> {
+    check_quota_inner(root, cwd, policy, true)
+}
+
+pub(super) fn check_cached_quota(root: &Path, cwd: &Path, policy: Policy) -> io::Result<()> {
+    check_quota_inner(root, cwd, policy, false)
+}
+
+fn check_quota_inner(root: &Path, cwd: &Path, policy: Policy, exact_total: bool) -> io::Result<()> {
+    let _timer = tool::telemetry::Timer::new("child.quota_scan");
     if size(cwd)? > policy.workspace_bytes {
         return Err(io::Error::other("child workspace disk quota exceeded"));
     }
-    if usage(root)? > policy.total_bytes {
+    let total = if exact_total {
+        usage(root)?
+    } else {
+        cached_total_usage(root)?
+    };
+    if total > policy.total_bytes {
         return Err(io::Error::other(
             "total child workspace disk quota exceeded",
         ));
@@ -191,11 +307,60 @@ pub(super) fn check_quota(root: &Path, cwd: &Path, policy: Policy) -> io::Result
 /// directory is deliberately excluded: it holds retained history that outlives
 /// the workspace, and `SQLite`'s minimum page size alone would dwarf a small
 /// configured workspace quota.
+/// Whole-tree usage, refreshed at most every two seconds per root. The
+/// current child's own workspace is always measured exactly (`check_quota`
+/// walks it directly); the *siblings'* totals are the part that used to be
+/// re-scanned on every checkpoint, and a two-second-old estimate of those is
+/// accurate enough for a safety bound.
+pub(super) fn cached_total_usage(root: &Path) -> io::Result<u64> {
+    const TTL: std::time::Duration = std::time::Duration::from_secs(2);
+    static CACHE: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<PathBuf, (std::time::Instant, u64)>>,
+    > = std::sync::OnceLock::new();
+    let cache = CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+    {
+        let guard = cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some((at, bytes)) = guard.get(root)
+            && at.elapsed() < TTL
+        {
+            return Ok(*bytes);
+        }
+    }
+    let bytes = usage(root)?;
+    let mut guard = cache
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if guard.len() >= 64 {
+        guard.retain(|_, (at, _)| at.elapsed() < TTL);
+    }
+    guard.insert(root.to_path_buf(), (std::time::Instant::now(), bytes));
+    Ok(bytes)
+}
+
+pub(super) fn invalidate_usage_cache(root: &Path) {
+    static CACHE: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<PathBuf, (std::time::Instant, u64)>>,
+    > = std::sync::OnceLock::new();
+    if let Some(cache) = CACHE.get() {
+        cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(root);
+    }
+}
+
 pub(super) fn usage(root: &Path) -> io::Result<u64> {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return Ok(0);
+    };
     let mut bytes = 0_u64;
-    for entry in std::fs::read_dir(root)? {
-        let entry = entry?;
-        if entry.file_type()?.is_dir() && !entry.file_type()?.is_symlink() {
+    for entry in entries.flatten() {
+        let Ok(kind) = entry.file_type() else {
+            continue;
+        };
+        if kind.is_dir() && !kind.is_symlink() {
             bytes = bytes.saturating_add(size(&entry.path().join("workspace"))?);
         }
     }
@@ -278,6 +443,7 @@ pub(super) fn provision(
     state: &Path,
     policy: Policy,
 ) -> io::Result<()> {
+    let _timer = tool::telemetry::Timer::new("child.workspace_create");
     let head = git(
         source,
         &[
@@ -321,10 +487,15 @@ pub(super) fn provision(
         manifest.repository = if confined { None } else { Some(repository) };
         write_manifest(state, &manifest)?;
         let result = if confined {
+            // Shallow clone: a disposable child needs HEAD's content, not the
+            // entire object history, and the source stays read-only.
             git(
                 source,
                 &[
                     OsStr::new("clone"),
+                    OsStr::new("--depth"),
+                    OsStr::new("1"),
+                    OsStr::new("--no-tags"),
                     OsStr::new("--no-hardlinks"),
                     OsStr::new("--no-checkout"),
                     source.as_os_str(),

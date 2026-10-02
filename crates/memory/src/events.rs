@@ -171,3 +171,32 @@ pub(crate) fn append_event(
         .map_err(|_| MemoryError::InvalidValue("event too large".into()))?;
     Ok((offset, length))
 }
+
+/// Current size of a session's event log (0 when it does not exist yet).
+pub(crate) fn events_size(events_dir: &Path, session_id: &str) -> Result<i64, MemoryError> {
+    let path = event_path(events_dir, session_id)?;
+    match fs::metadata(&path) {
+        Ok(meta) => Ok(i64::try_from(meta.len())
+            .map_err(|_| MemoryError::InvalidValue("event log too large".into()))?),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(0),
+        Err(error) => Err(error.into()),
+    }
+}
+
+/// Append an already-serialized run of events with one open, one write and one
+/// sync. The JSONL stays authoritative; the caller commits the DB after this.
+pub(crate) fn append_event_buffer(
+    events_dir: &Path,
+    session_id: &str,
+    buffer: &[u8],
+) -> Result<(), MemoryError> {
+    if buffer.is_empty() {
+        return Ok(());
+    }
+    fs::create_dir_all(events_dir)?;
+    let path = event_path(events_dir, session_id)?;
+    let mut file = OpenOptions::new().create(true).append(true).open(path)?;
+    file.write_all(buffer)?;
+    file.sync_data()?;
+    Ok(())
+}

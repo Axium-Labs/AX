@@ -29,11 +29,15 @@ use crate::{
 pub(crate) fn tools(mcp_tools: &[McpToolProxy]) -> ToolRegistry {
     let mut registry = ToolRegistry::new();
     let root = tool_workspace();
+    // Every local tool is bound to the same workspace root, so the main agent
+    // and a forked child differ only by that binding, never by implementation.
     for local in [
         Arc::new(ShellTool) as Arc<dyn tool::Tool>,
         Arc::new(FilesystemTool),
         Arc::new(tool::PatchTool),
-        Arc::new(tool::SearchTool),
+        Arc::new(tool::FindFilesTool::new(root.clone())),
+        Arc::new(tool::FindFilesTool::glob(root.clone())),
+        Arc::new(tool::SearchTool::new(root.clone())),
         Arc::new(tool::ViewImageTool::new(root.clone())),
     ] {
         registry.register(tool::SandboxedTool::new(local, root.clone()));
@@ -48,31 +52,121 @@ pub(crate) fn tool_workspace() -> PathBuf {
     let cwd = std::env::current_dir().unwrap_or_default();
     discover_project_root(&cwd)
 }
-/// Single source of the context budget available for one turn: reserves room
-/// for the reply and the tool schemas that will actually be sent, so history
-/// restore, skill instructions, and retrieved memory all share one real
-/// accounting of what fits instead of each guessing its own fixed limit.
-pub(crate) fn context_budget(
-    selection: &ModelSelection,
-    mcp_tools: &[McpToolProxy],
-) -> runtime_core::ContextBudget {
-    let tool_schema_tokens = runtime_core::estimate_tool_schema_tokens(&tools(mcp_tools));
-    runtime_core::ContextBudget::new(
-        selection.context_capacity(),
-        selection.max_output_tokens,
-        tool_schema_tokens,
-    )
+/// One run's provider, final tool registry, and the context budget measured
+/// against exactly that registry.
+///
+/// Building is the expensive part: a provider performs auth/catalog work and a
+/// registry constructs and binds every tool. Both happen once per run, and the
+/// same registry instance is handed to the kernel, so the schema estimate can
+/// never describe a different tool set than the one that is sent.
+pub(crate) struct Runtime {
+    provider: Arc<dyn ModelProvider>,
+    tools: ToolRegistry,
+    budget: runtime_core::ContextBudget,
+    /// Controller auth override, needed to build configured child models.
+    codex_auth: Option<PathBuf>,
 }
+
+impl Runtime {
+    /// Build a run's provider and final tool registry exactly once each.
+    pub(crate) fn build(
+        selection: &ModelSelection,
+        mcp_tools: &[McpToolProxy],
+        auth_path: &Path,
+    ) -> Result<Self> {
+        let provider = hedged_provider(selection, auth_path)?;
+        let tools = if selection.supports_tools {
+            tools(mcp_tools)
+        } else {
+            ToolRegistry::new()
+        };
+        Ok(Self::with_tools(provider, tools, selection))
+    }
+
+    /// Assemble from already-built parts. The budget is derived from the
+    /// registry passed in, which is the registry the kernel will receive.
+    pub(crate) fn with_tools(
+        provider: Arc<dyn ModelProvider>,
+        mut tools: ToolRegistry,
+        selection: &ModelSelection,
+    ) -> Self {
+        // The kernel applies this same baseline in its constructor, so the
+        // estimate is measured from the registry the kernel will receive.
+        tool::kernel_baseline(&mut tools, provider.capabilities().vision);
+        let budget = runtime_core::ContextBudget::new(
+            selection.context_capacity(),
+            selection.max_output_tokens,
+            runtime_core::estimate_tool_schema_tokens(&tools),
+        );
+        Self {
+            provider,
+            tools,
+            budget,
+            codex_auth: selection.codex_auth.clone(),
+        }
+    }
+
+    /// Schema cost of the exact registry this run will send.
+    #[must_use]
+    pub(crate) fn tool_schema_tokens(&self) -> usize {
+        self.budget.tool_schema_tokens
+    }
+
+    #[must_use]
+    pub(crate) fn tool_names(&self) -> Vec<String> {
+        self.tools.names().into_iter().map(str::to_owned).collect()
+    }
+
+    /// Consume the run's parts into the kernel. Child models are additional
+    /// configured providers, so each is still built at most once per run.
+    pub(crate) fn into_kernel(
+        self,
+        approval: Arc<dyn ApprovalPolicy>,
+        mut messages: Vec<Message>,
+        auth_path: &Path,
+    ) -> Result<AgentKernel> {
+        let policy = include_str!("tool_policy.md");
+        if !messages.iter().any(|message| message.content == policy) {
+            messages.insert(0, Message::system(policy));
+        }
+        let config = AxConfig::load()?;
+        let mut kernel =
+            AgentKernel::new(self.provider, self.tools, approval).with_messages(messages);
+        for (name, child) in config.child_models {
+            let child_selection = model_selection::selection_for_provider_id(
+                &child.provider,
+                Some(child.model),
+                child
+                    .reasoning_effort
+                    .as_deref()
+                    .and_then(model::ReasoningEffort::parse),
+                self.codex_auth.clone(),
+            )?;
+            kernel.register_child_model(name, build_provider(&child_selection, auth_path)?);
+        }
+        kernel.configure_retry(config.retry);
+        kernel.configure_context_pool(config.context_pool);
+        kernel.constrain_permissions(config.permissions);
+        Ok(kernel)
+    }
+}
+
+/// Single-run kernel assembly: `Runtime::build` once, then `into_kernel`.
 pub(crate) fn kernel(
     selection: &ModelSelection,
     approval: Arc<dyn ApprovalPolicy>,
-    mut messages: Vec<Message>,
+    messages: Vec<Message>,
     mcp_tools: &[McpToolProxy],
     auth_path: &Path,
 ) -> Result<AgentKernel> {
+    Runtime::build(selection, mcp_tools, auth_path)?.into_kernel(approval, messages, auth_path)
+}
+
+/// The primary provider plus, in Fast mode, the hedge alternates around it.
+fn hedged_provider(selection: &ModelSelection, auth_path: &Path) -> Result<Arc<dyn ModelProvider>> {
     let primary = build_provider(selection, auth_path)?;
     let inference = AxConfig::load().ok().and_then(|config| config.inference);
-    let provider: Arc<dyn ModelProvider> = match inference {
+    Ok(match inference {
         Some(config) if config.mode == InferenceMode::Fast => {
             let fast = config.fast.unwrap_or_default();
             let alternates = hedge_alternates(selection, auth_path);
@@ -86,34 +180,7 @@ pub(crate) fn kernel(
             ))
         }
         _ => primary,
-    };
-    let tool_registry = if selection.supports_tools {
-        tools(mcp_tools)
-    } else {
-        ToolRegistry::new()
-    };
-    let policy = include_str!("tool_policy.md");
-    if !messages.iter().any(|message| message.content == policy) {
-        messages.insert(0, Message::system(policy));
-    }
-    let config = AxConfig::load()?;
-    let mut kernel = AgentKernel::new(provider, tool_registry, approval).with_messages(messages);
-    for (name, child) in config.child_models {
-        let child_selection = model_selection::selection_for_provider_id(
-            &child.provider,
-            Some(child.model),
-            child
-                .reasoning_effort
-                .as_deref()
-                .and_then(model::ReasoningEffort::parse),
-            selection.codex_auth.clone(),
-        )?;
-        kernel.register_child_model(name, build_provider(&child_selection, auth_path)?);
-    }
-    kernel.configure_retry(config.retry);
-    kernel.configure_context_pool(config.context_pool);
-    kernel.constrain_permissions(config.permissions);
-    Ok(kernel)
+    })
 }
 /// Other configured providers that serve the same model. The hedge secondary
 /// picks the best-ranked one at trigger time; an empty list means the hedge
@@ -257,5 +324,79 @@ pub(crate) fn execution_budget(cli: &Cli) -> runtime_core::ExecutionBudget {
         max_tool_calls: cli.max_tool_calls,
         turn_timeout_secs: cli.turn_timeout_secs,
         tool_timeout_secs: cli.tool_timeout_secs,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use runtime_core::AllowAll;
+
+    struct Noop;
+
+    #[async_trait::async_trait]
+    impl ModelProvider for Noop {
+        fn name(&self) -> &'static str {
+            "noop"
+        }
+        fn model_id(&self) -> &'static str {
+            "noop"
+        }
+        fn context_window(&self) -> usize {
+            100_000
+        }
+        async fn complete(
+            &self,
+            _: model::ModelRequest,
+        ) -> Result<model::ModelResponse, model::ModelError> {
+            Ok(model::ModelResponse::default())
+        }
+    }
+
+    fn selection() -> ModelSelection {
+        ModelSelection {
+            provider: ProviderKind::Compatible,
+            provider_id: "builder-test".into(),
+            endpoint: None,
+            model: "noop".into(),
+            codex_auth: None,
+            context_window: Some(100_000),
+            max_output_tokens: Some(1_000),
+            reasoning_effort: None,
+            supports_tools: true,
+        }
+    }
+
+    #[test]
+    fn the_budget_is_measured_from_the_registry_the_kernel_receives() {
+        let mut registry = ToolRegistry::new();
+        registry.register(tool::FilesystemTool);
+        registry.register(tool::ShellTool);
+        let selection = selection();
+        let plan = Runtime::with_tools(Arc::new(Noop), registry, &selection);
+        let estimate = plan.tool_schema_tokens();
+        // into_kernel consumes the same registry; the estimate cannot describe a
+        // different tool set than the one that is sent.
+        let kernel = plan
+            .into_kernel(Arc::new(AllowAll), Vec::new(), Path::new("."))
+            .unwrap();
+        assert_eq!(kernel.tool_schema_tokens(), estimate);
+        assert!(kernel.has_tool("filesystem") && kernel.has_tool("shell"));
+        // A different registry instance has a different size: the estimate is
+        // not derived from some canonical second build.
+        assert_ne!(
+            runtime_core::estimate_tool_schema_tokens(&ToolRegistry::new()),
+            estimate
+        );
+    }
+
+    #[test]
+    fn adding_a_tool_before_build_changes_the_estimate() {
+        let selection = selection();
+        let base = Runtime::with_tools(Arc::new(Noop), ToolRegistry::new(), &selection);
+        let mut registry = ToolRegistry::new();
+        registry.register(tool::ShellTool);
+        let bigger = Runtime::with_tools(Arc::new(Noop), registry, &selection);
+        assert!(bigger.tool_schema_tokens() > base.tool_schema_tokens());
     }
 }

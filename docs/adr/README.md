@@ -47,6 +47,11 @@ What becomes easier, what becomes harder, and what we accepted.
 ```
 
 - [0011: Scoped capabilities](0011-scoped-capabilities.md) — one shared Global/Project registry for Skill, MCP and Agent management.
+- [0012 — Layered memory retrieval](0012-layered-memory-retrieval.md)
+- [0013 — Workspace runtime sandbox](0013-workspace-runtime-sandbox.md)
+- [0014 — Advisory execution policy](0014-advisory-execution-policy.md)
+- [0015 — Shared child composition](0015-shared-child-composition.md)
+- [0016 — Parallel child dispatch, structured receipts and resolvable instructions](0016-parallel-children-and-instructions.md)
 
 - [0012 — Layered local memory retrieval](0012-layered-memory-retrieval.md)
 

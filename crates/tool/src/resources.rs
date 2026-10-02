@@ -1,7 +1,8 @@
 //! Tools declare effects; the runtime owns scheduling and process-wide locks.
 use std::path::{Component, Path, PathBuf};
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Resource {
     /// Unknown effects conflict with every resource, including other tools.
     All,
@@ -61,7 +62,7 @@ impl Resource {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct ResourceAccess {
     pub resource: Resource,
     pub write: bool,

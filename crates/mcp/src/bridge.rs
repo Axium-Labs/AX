@@ -97,6 +97,19 @@ impl Tool for McpToolProxy {
         }
     }
 
+    fn resources(&self, _input: &Value) -> Vec<tool::ResourceAccess> {
+        // The server's own readOnlyHint is the declaration; a tool without one
+        // stays conservative, so its effects are serialized.
+        if self.read_only {
+            vec![tool::ResourceAccess::read(tool::Resource::Named(format!(
+                "mcp:{}:{}",
+                self.server, self.remote_name
+            )))]
+        } else {
+            vec![tool::ResourceAccess::exclusive()]
+        }
+    }
+
     async fn execute(&self, input: Value) -> Result<String, ToolError> {
         let result = self
             .manager

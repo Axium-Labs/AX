@@ -119,14 +119,14 @@ impl Tool for BoundTool {
 #[derive(Default)]
 struct Host {
     prepared: AtomicUsize,
-    receipts: Arc<Mutex<Vec<ChildOutcome>>>,
+    receipts: Arc<Mutex<Vec<crate::ChildResult>>>,
 }
-struct Checkpoint(Arc<Mutex<Vec<ChildOutcome>>>);
+struct Checkpoint(Arc<Mutex<Vec<crate::ChildResult>>>);
 impl ChildCheckpoint for Checkpoint {
     fn save(&mut self, _: &[Message]) -> Result<(), AgentError> {
         Ok(())
     }
-    fn finish(&mut self, outcome: &ChildOutcome) -> Result<(), AgentError> {
+    fn finish(&mut self, outcome: &mut crate::ChildResult) -> Result<(), AgentError> {
         self.0.lock().unwrap().push(outcome.clone());
         Ok(())
     }

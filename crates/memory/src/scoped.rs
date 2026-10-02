@@ -265,6 +265,10 @@ impl MemoryStore {
         scope: MemoryScope,
         owner: &str,
     ) -> Result<Vec<MemoryRecord>, MemoryError> {
+        let _access = self
+            .access
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut query = self.connection.prepare(&format!("SELECT {RECORD_COLUMNS} FROM scoped_memories WHERE scope=?1 AND owner=?2 ORDER BY updated_at DESC,key"))?;
         query
             .query_map(params![scope.key(), owner], |row| {

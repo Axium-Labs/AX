@@ -191,8 +191,11 @@ where
             },
         )
         .await;
-    recorder.experience.success = result.is_ok();
-    if let Err(error) = &result {
+    recorder.experience.success =
+        result.is_ok() || matches!(result, Err(runtime_core::AgentError::WaitingForUser(_)));
+    if let Err(error) = &result
+        && !matches!(error, runtime_core::AgentError::WaitingForUser(_))
+    {
         recorder.experience.errors.push(bounded(&error.to_string()));
     }
     recorder.complete();

@@ -337,13 +337,16 @@ fn search_scope_remains_enforced_but_recovery_can_replan_within_workspace() {
     state.prepare(&tool::FilesystemTool, input).unwrap();
     assert!(
         state
-            .prepare(&tool::SearchTool, json!({"path":root,"query":"parquet"}))
+            .prepare(
+                &tool::SearchTool::default(),
+                json!({"path":root,"query":"parquet"})
+            )
             .is_err()
     );
     assert!(
         state
             .prepare(
-                &tool::SearchTool,
+                &tool::SearchTool::default(),
                 json!({"path":step_dir,"query":"parquet"})
             )
             .is_ok()
@@ -357,7 +360,7 @@ fn search_scope_remains_enforced_but_recovery_can_replan_within_workspace() {
     assert!(
         state
             .prepare(
-                &tool::SearchTool,
+                &tool::SearchTool::default(),
                 json!({"path":root,"query":"parquet","_ax_execution":binding("locate alternative input", &root)})
             )
             .is_ok()
@@ -505,7 +508,7 @@ async fn search_no_match_allows_alternate_search_and_read() {
         call(2, json!({"operation":"read","path":file})),
         text("done"),
     ]);
-    let mut kernel = kernel(provider, &root).with_tool(tool::SearchTool);
+    let mut kernel = kernel(provider, &root).with_tool(tool::SearchTool::default());
     kernel.run_turn("locate input", |_| {}).await.unwrap();
     for n in 0..3 {
         assert_eq!(result_for(&kernel, n).status, "success");
@@ -570,7 +573,10 @@ fn nonfatal_failures_and_stalls_always_leave_retry_and_diagnostic_tools_availabl
                 )
                 .unwrap();
             state
-                .prepare(&tool::SearchTool, json!({"path":root,"query":"diagnostic"}))
+                .prepare(
+                    &tool::SearchTool::default(),
+                    json!({"path":root,"query":"diagnostic"}),
+                )
                 .unwrap();
             state
                 .prepare(&tool::ShellTool, json!({"command":"echo diagnostic"}))
@@ -581,6 +587,45 @@ fn nonfatal_failures_and_stalls_always_leave_retry_and_diagnostic_tools_availabl
         }
         assert!(state.progress.no_progress);
     }
+    std::fs::remove_dir_all(root).unwrap();
+}
+#[test]
+fn discovery_tools_cannot_read_outside_the_declared_scope() {
+    let root = temp();
+    let outside = temp();
+    let find = tool::FindFilesTool::default();
+    let mut state = state(&root);
+    // Both discovery tools declare the resolved path as a read resource, so the
+    // runtime rejects a call that points outside the step scope.
+    assert!(
+        state
+            .prepare(
+                &tool::SearchTool::default(),
+                json!({"query":"needle","path":outside})
+            )
+            .is_err()
+    );
+    assert!(
+        state
+            .prepare(&find, json!({"path":outside,"pattern":"**/*.rs"}))
+            .is_err()
+    );
+    assert!(
+        state
+            .prepare(
+                &tool::SearchTool::default(),
+                json!({"query":"needle","path":root})
+            )
+            .is_ok()
+    );
+    assert!(
+        state
+            .prepare(&find, json!({"path":root,"pattern":"**/*.rs"}))
+            .is_ok()
+    );
+    // The rejected calls must not have consumed the scope.
+    assert_eq!(state.allowed_scope.len(), 1);
+    std::fs::remove_dir_all(outside).unwrap();
     std::fs::remove_dir_all(root).unwrap();
 }
 #[test]

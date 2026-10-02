@@ -1,9 +1,17 @@
 //! Child lifecycle adapters; execution stays in AgentKernel/AgentSupervisor.
-use crate::{AgentError, AgentEvent, AgentKernel, AgentSupervisor};
+//!
+//! The controller never learns a second execution path. A child is the *same*
+//! kernel with a different context, cwd, memory scope, sandbox boundary and
+//! task input; the tool registry is rebound to the child's run context rather
+//! than replaced. Dispatching several children at once is
+//! [`crate::child_dispatch`]'s job.
+use crate::{AgentError, AgentKernel};
 use async_trait::async_trait;
 use model::Message;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+
+use crate::child_result::{ChildResult, ChildStatus};
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ChildRun {
@@ -18,12 +26,6 @@ pub struct ChildRun {
     pub execution_budget: Option<crate::ExecutionBudget>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct ChildOutcome {
-    pub success: bool,
-    pub output: String,
-}
-
 /// Raw history and terminal receipts live in the child's own session.
 pub trait ChildCheckpoint: Send {
     /// # Errors
@@ -31,14 +33,19 @@ pub trait ChildCheckpoint: Send {
     fn save(&mut self, messages: &[Message]) -> Result<(), AgentError>;
     /// # Errors
     /// Returns errors writing the child's terminal receipt.
-    fn finish(&mut self, outcome: &ChildOutcome) -> Result<(), AgentError>;
+    ///
+    /// The host may enrich `result` (diff statistics, authoritative changed
+    /// files) before it is written; the controller only sees what lands here.
+    fn finish(&mut self, result: &mut ChildResult) -> Result<(), AgentError>;
 }
 
 pub struct PreparedChild {
     pub run: ChildRun,
     pub kernel: AgentKernel,
     pub checkpoint: Box<dyn ChildCheckpoint>,
-    pub terminal: Option<ChildOutcome>,
+    /// A receipt recovered from durable history: the child already finished in
+    /// an earlier process, so it must never be re-run.
+    pub terminal: Option<ChildResult>,
 }
 
 /// The composition root owns workspace/session/memory provisioning.
@@ -69,7 +76,7 @@ pub trait ChildHost: Send + Sync {
 
 /// Recover a final receipt from durable history, including unresolved tool errors.
 #[must_use]
-pub fn terminal_outcome(messages: &[Message]) -> Option<ChildOutcome> {
+pub fn terminal_result(messages: &[Message]) -> Option<ChildResult> {
     let last = messages
         .iter()
         .rev()
@@ -100,18 +107,21 @@ pub fn terminal_outcome(messages: &[Message]) -> Option<ChildOutcome> {
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
-    Some(ChildOutcome {
-        success: failures.is_empty(),
-        output: if failures.is_empty() {
-            last.content.clone()
-        } else {
-            format!(
-                "{}\nUnresolved tool failures: {}",
-                last.content,
-                failures.join("\n")
-            )
-        },
-    })
+    let mut result = ChildResult::new(String::new(), String::new(), ChildStatus::Completed);
+    result.summary.clone_from(&last.content);
+    result.diagnostics.clone_from(&failures);
+    if failures.is_empty() {
+        return Some(result);
+    }
+    let reason = format!(
+        "{}\nUnresolved tool failures: {}",
+        last.content,
+        failures.join("\n")
+    );
+    let mut failed = ChildResult::failed(String::new(), String::new(), ChildStatus::Failed, reason);
+    failed.summary.clone_from(&last.content);
+    failed.diagnostics = failures;
+    Some(failed)
 }
 
 impl AgentKernel {
@@ -132,7 +142,22 @@ impl AgentKernel {
         self.child_budget.unwrap_or(self.budget)
     }
 
+    /// Bounded concurrency for independently ready children.
+    #[must_use]
+    pub fn with_child_concurrency(mut self, concurrency: usize) -> Self {
+        self.child_concurrency = concurrency.clamp(1, 64);
+        self
+    }
+
+    #[must_use]
+    pub fn child_concurrency(&self) -> usize {
+        self.child_concurrency
+    }
+
     /// Forks only explicit input/history and tools rebound to this child's scope.
+    ///
+    /// Same registry, different binding: a child never gets a second
+    /// implementation of search, filesystem, patch, shell or permissions.
     #[must_use]
     pub fn fork_child(&self, run: ChildRun, input: &str, messages: Vec<Message>) -> Self {
         let context = tool::RunContext {
@@ -160,155 +185,23 @@ impl AgentKernel {
         kernel.child_host = None;
         kernel
     }
-
-    #[allow(clippy::too_many_lines)] // Child execution and durable receipt must remain one transaction.
-    pub(crate) async fn execute_next_child<F, H>(
-        &mut self,
-        emit: &std::sync::Mutex<F>,
-        checkpoint: &mut H,
-    ) -> Result<(), AgentError>
-    where
-        F: FnMut(AgentEvent) + Send,
-        H: FnMut(&[Message]) -> Result<(), AgentError> + Send,
-    {
-        let task = self
-            .task_queue
-            .as_ref()
-            .and_then(|queue| {
-                queue
-                    .tasks
-                    .iter()
-                    .find(|task| task.status == crate::task_queue::TaskStatus::Running)
-            })
-            .expect("active child task");
-        let input = task.task_input().to_owned();
-        self.execution
-            .lock()
-            .unwrap()
-            .current_step
-            .clone_from(&input);
-        let previous = task.child.clone();
-        self.task_queue
-            .as_mut()
-            .unwrap()
-            .current_mut()
-            .unwrap()
-            .execution_started = true;
-        self.checkpoint_queue(checkpoint)?;
-        let host = self.child_host.as_ref().expect("child host").clone();
-        let outcome = match host.prepare(self, &input, previous.as_ref()).await {
-            Ok(mut child) => {
-                self.task_queue
-                    .as_mut()
-                    .unwrap()
-                    .current_mut()
-                    .unwrap()
-                    .child = Some(child.run.clone());
-                // Persist child identity BEFORE executing its first model/tool call.
-                self.checkpoint_queue(checkpoint)?;
-                let event_session = child.run.session_id.clone();
-                if let Some(outcome) = child.terminal {
-                    outcome
-                } else {
-                    let result = AgentSupervisor::run_child(
-                        &mut child.kernel,
-                        &input,
-                        Box::new(|mut event| {
-                            match &mut event {
-                                AgentEvent::ToolStarted { id, .. }
-                                | AgentEvent::ToolFinished { id, .. } => {
-                                    *id = format!("{event_session}:{id}");
-                                }
-                                _ => {}
-                            }
-                            // Child text/turn boundaries are not controller final output.
-                            if !matches!(
-                                event,
-                                AgentEvent::ContentDelta { .. }
-                                    | AgentEvent::TurnStarted
-                                    | AgentEvent::TurnFinished
-                            ) {
-                                (emit.lock().unwrap())(event);
-                            }
-                        }),
-                        Box::new(|messages| {
-                            child.checkpoint.save(messages)?;
-                            if let Some(state) = messages
-                                .iter()
-                                .rev()
-                                .filter(|m| m.role == model::Role::System)
-                                .find_map(|m| {
-                                    m.content
-                                        .strip_prefix(crate::execution::STATE_PREFIX)
-                                        .and_then(|json| {
-                                            serde_json::from_str::<crate::ExecutionState>(json).ok()
-                                        })
-                                })
-                            {
-                                let changed = self
-                                    .execution
-                                    .lock()
-                                    .unwrap()
-                                    .absorb_child(&event_session, &state);
-                                if changed {
-                                    self.raw_turn_messages
-                                        .push(self.execution_state().snapshot());
-                                    checkpoint(&self.raw_turn_messages)?;
-                                }
-                            }
-                            Ok(())
-                        }),
-                    )
-                    .await;
-                    let mut outcome = match result {
-                        Ok(output) => ChildOutcome {
-                            success: true,
-                            output,
-                        },
-                        Err(error) => ChildOutcome {
-                            success: false,
-                            output: error.to_string(),
-                        },
-                    };
-                    // A receipt closes the crash gap before the controller advances.
-                    if let Err(error) = child.checkpoint.finish(&outcome) {
-                        outcome.success = false;
-                        outcome.output =
-                            format!("{}\nChild receipt failed: {error}", outcome.output);
-                    }
-                    outcome
-                }
-            }
-            Err(error) => ChildOutcome {
-                success: false,
-                output: error.to_string(),
-            },
-        };
-        let queue = self.task_queue.as_mut().unwrap();
-        let task = queue.current_mut().unwrap();
-        task.status = if outcome.success {
-            crate::task_queue::TaskStatus::Completed
-        } else {
-            crate::task_queue::TaskStatus::Failed
-        };
-        task.failure_reason = (!outcome.success).then(|| outcome.output.clone());
-        task.outcome = Some(outcome.output);
-        queue.advance();
-        self.checkpoint_queue(checkpoint)
-    }
 }
 
 pub type ChildSaveSink<'a> = Box<dyn FnMut(&[Message]) -> Result<(), AgentError> + Send + 'a>;
 
-impl AgentSupervisor {
+impl crate::AgentSupervisor {
     /// Run one durable child through the existing model/tool loop.
     pub fn run_child<'a>(
         kernel: &'a mut AgentKernel,
         input: &'a str,
-        emit: Box<dyn FnMut(AgentEvent) + Send + 'a>,
+        emit: Box<dyn FnMut(crate::AgentEvent) + Send + 'a>,
         checkpoint: ChildSaveSink<'a>,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String, AgentError>> + Send + 'a>>
     {
         Box::pin(async move { kernel.run_turn_checkpointed(input, emit, checkpoint).await })
     }
 }
+
+#[cfg(test)]
+#[path = "child_tests.rs"]
+mod tests;

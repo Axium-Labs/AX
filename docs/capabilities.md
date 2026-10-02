@@ -122,7 +122,7 @@ name = "reviewer"
 description = "Review code for regressions"
 enabled = true
 instructions = "reviewer.md"
-tools = ["filesystem", "search"]
+tools = ["filesystem", "find_files", "search"]
 ```
 
 The optional `tools` list narrows the parent tools; it cannot grant permissions.

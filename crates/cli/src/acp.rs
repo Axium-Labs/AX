@@ -19,10 +19,7 @@ use tokio::{
 };
 use uuid::Uuid;
 
-use crate::{
-    args::Cli, commands::run::run_prompt_with, model_selection, repl::ReplState,
-    runtime::context_budget,
-};
+use crate::{args::Cli, commands::run::run_prompt_with, model_selection, repl::ReplState};
 use runtime_core::{AgentEvent, ApprovalPolicy};
 use tool::{Capability, PermissionDecision, PermissionStore, SafetyLevel, ToolPermission};
 
@@ -204,6 +201,23 @@ fn update(out: &Outbox, session_id: &str, event: AgentEvent, calls: &mut HashMap
                 update["rawOutput"]["errors"] = json!(diagnostics);
             }
             update
+        }
+        AgentEvent::UserQuestion { question } => {
+            // Planning input, not an authorization gate: the client answers
+            // with an option id or free text and the same prompt run resumes.
+            json!({
+                "sessionUpdate":"agent_question",
+                "question": {
+                    "id": question.id,
+                    "text": question.question,
+                    "allowFreeText": question.allow_free_text,
+                    "options": question.options.iter().map(|option| json!({
+                        "id": option.id,
+                        "label": option.label,
+                        "description": option.description,
+                    })).collect::<Vec<_>>(),
+                }
+            })
         }
         AgentEvent::SubagentStarted { .. }
         | AgentEvent::SubagentProgress { .. }
@@ -822,7 +836,8 @@ pub async fn run(cli: &Cli, data_dir: PathBuf, skills_dir: PathBuf) -> Result<()
                         }
                         replay(&out, session_id, &mut state)?;
                     } else if let Ok(selection) = model_selection::require_resolved(cli) {
-                        let budget = context_budget(&selection, &[]);
+                        state.prepare_runtime(&selection)?;
+                        let budget = state.context_budget(&selection);
                         if !state.open_session(session_id, &budget)? {
                             return Ok(false);
                         }
@@ -936,7 +951,8 @@ pub async fn run(cli: &Cli, data_dir: PathBuf, skills_dir: PathBuf) -> Result<()
                         state.next_goal_turn = goal_turn;
                         state.execution_budget = task_budget;
                         state.child_timeout_secs = task_child_timeout;
-                        let budget = context_budget(&selection, &[]);
+                        state.prepare_runtime(&selection)?;
+                        let budget = state.context_budget(&selection);
                         if !state.open_session(&task_session, &budget)? {
                             return Err(anyhow!("AX session not found"));
                         }

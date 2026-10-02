@@ -181,6 +181,8 @@ struct App {
     streaming: bool,
     unseen_output: bool,
     loading_session: Option<Instant>,
+    /// Question the agent parked on; the next submission answers it.
+    pending_question: Option<runtime_core::UserQuestion>,
 }
 
 impl Drop for App {
@@ -222,6 +224,7 @@ impl App {
             streaming: false,
             unseen_output: false,
             loading_session: None,
+            pending_question: None,
         }
     }
 
@@ -254,6 +257,17 @@ impl App {
             || estimate_messages(&state.loaded_messages),
             AgentKernel::estimated_context_tokens,
         );
+        // A goal parked on a question is still waiting after a reconnect: show
+        // the question again and let the next submission answer it.
+        if self.pending_question.is_none()
+            && let Some(question) = state.pending_question()
+        {
+            self.push(
+                TranscriptKind::Info,
+                format!("AX needs your input:\n{question}"),
+            );
+        }
+        self.pending_question = state.pending_question().cloned();
         self.context_window = selection.context_capacity();
         self.context_tokens = estimated;
         self.reasoning = selection.reasoning_effort.map(|effort| effort.to_string());
@@ -308,6 +322,16 @@ impl App {
             AgentEvent::SubagentProgress { .. } | AgentEvent::ThinkingDelta { delta: _ } => {}
             AgentEvent::TurnFinished => {
                 self.transcript.streaming = false;
+            }
+            // The run parked on a planning question: show it, and turn the next
+            // submission into its answer instead of a new task.
+            AgentEvent::UserQuestion { question } => {
+                self.transcript.streaming = false;
+                self.push(
+                    TranscriptKind::Info,
+                    format!("AX needs your input:\n{question}"),
+                );
+                self.pending_question = Some(*question);
             }
             AgentEvent::ContentDelta { delta } => {
                 self.streaming = true;
@@ -627,7 +651,12 @@ pub(super) async fn run_tui(
                         );
                         continue;
                     }
-                    if submitted.starts_with('/') {
+                    // An answer to a parked question is never a slash command.
+                    let answering = app.pending_question.is_some()
+                        || state
+                            .as_ref()
+                            .is_some_and(|state| state.pending_question().is_some());
+                    if submitted.starts_with('/') && !answering {
                         let keep_running = commands::execute_slash(
                             &submitted,
                             state.as_mut().expect("state available"),

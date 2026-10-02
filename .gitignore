@@ -12,3 +12,7 @@
 
 # Local clippy/test import transcripts
 /*.log
+
+# Python bytecode caches
+__pycache__/
+*.pyc

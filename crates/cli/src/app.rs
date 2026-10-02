@@ -17,9 +17,28 @@ use crate::{
     bootstrap::{Globals, Locations},
     capabilities, capability_import, commands, config, crew_device, evolution, model_selection,
     repl::ReplState,
-    runtime,
     tui::run_tui,
 };
+
+/// How many consecutive `request_user_input` questions one non-interactive run
+/// answers before it stops asking. A safeguard against a loop, not a limit the
+/// agent can reason about.
+const MAX_USER_QUESTIONS: usize = 8;
+
+/// Whether stdin is a terminal. A piped invocation cannot answer a question
+/// later, so it should be told to resume the session instead of blocking.
+fn is_interactive() -> bool {
+    std::io::IsTerminal::is_terminal(&std::io::stdin())
+}
+
+/// Read one answer from stdin. `None` means end of input.
+fn read_answer() -> Result<Option<String>> {
+    let mut line = String::new();
+    let read = std::io::stdin()
+        .read_line(&mut line)
+        .context("failed to read the answer")?;
+    Ok((read > 0).then(|| line.trim().to_owned()))
+}
 
 /// Commands that must be decided before the sandbox or the storage locations
 /// are touched: persisted settings, the environment/shell selection, and the
@@ -177,8 +196,11 @@ pub(crate) async fn dispatch(
                 ReplState::new(data_dir.clone(), skills_dir.clone(), cli.mcp_config.clone())?;
             state.execution_budget = budget;
             state.child_timeout_secs = cli.child_timeout_secs;
+            // Prepare the run before restoring history so the restore is paged
+            // against the budget of the tools this run will actually send.
+            state.prepare_runtime(&selection)?;
             if let Some(session) = session
-                && !state.open_session(session, &runtime::context_budget(&selection, &[]))?
+                && !state.open_session(session, &state.context_budget(&selection))?
             {
                 return Err(anyhow!("AX session not found"));
             }
@@ -200,6 +222,31 @@ pub(crate) async fn dispatch(
                 prompt,
             )
             .await?;
+            // A run can park on `request_user_input`. Non-interactively there is
+            // no UI to answer it later, so this is the one place the answer is
+            // read from stdin; the answer resumes the same goal in place.
+            for _ in 0..MAX_USER_QUESTIONS {
+                let Some(question) = state.pending_question().cloned() else {
+                    break;
+                };
+                if !is_interactive() {
+                    eprintln!(
+                        "[ax] the run is waiting for your answer; re-run with `--session` and reply to continue:\n{question}"
+                    );
+                    break;
+                }
+                eprintln!("[ax] the agent needs your input:\n{question}");
+                let Some(answer) = read_answer()? else {
+                    break;
+                };
+                evolution::run_once(
+                    &mut state,
+                    &selection,
+                    Arc::clone(&globals.approval),
+                    &answer,
+                )
+                .await?;
+            }
         }
         Some(Command::Agents {
             prompts,
@@ -218,7 +265,10 @@ pub(crate) async fn dispatch(
         }
         Some(Command::Tui) | None => {
             let resolution = model_selection::resolve_model_selection(cli)?;
-            run_tui(
+            // Boxed: the TUI future is the largest one in the process and is
+            // created once, so an allocation here keeps every caller's stack
+            // frame (including `main`) small.
+            Box::pin(run_tui(
                 resolution,
                 data_dir.clone(),
                 skills_dir.clone(),
@@ -226,7 +276,7 @@ pub(crate) async fn dispatch(
                 cli.allow_dangerous,
                 cli.codex_auth.clone(),
                 (budget, cli.child_timeout_secs),
-            )
+            ))
             .await?;
         }
     }

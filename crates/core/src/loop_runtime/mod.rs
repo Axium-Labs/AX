@@ -16,7 +16,10 @@ pub(crate) use tool_step::ToolStep;
 
 use model::{FunctionSpec, Message, ToolSpec};
 
-use crate::{AgentError, AgentEvent, AgentKernel, GoalTurn, QueueState, scheduler, task_queue};
+use crate::{
+    AgentError, AgentEvent, AgentKernel, GoalTurn, QueueState, child_dispatch, child_result,
+    scheduler, task_queue, user_input,
+};
 
 impl AgentKernel {
     /// Runs one user turn until the model returns a final response.
@@ -92,26 +95,44 @@ impl AgentKernel {
         H: FnMut(&[Message]) -> Result<(), AgentError> + Send,
     {
         self.raw_turn_messages.clear();
+        self.touch_progress();
+        // The turn timeout is an *idle* timeout. A turn that delegates work
+        // legitimately spans the whole child batch, and each child already has
+        // its own budget, so the controller is only cancelled when nothing has
+        // progressed for the whole window.
         let result = if self.budget.turn_timeout_secs == 0 {
             self.run_turn_inner(input, intent, &mut emit, &mut checkpoint)
                 .await
         } else {
-            tokio::time::timeout(
-                std::time::Duration::from_secs(self.budget.turn_timeout_secs),
-                self.run_turn_inner(input, intent, &mut emit, &mut checkpoint),
-            )
-            .await
-            .unwrap_or_else(|_| Err(AgentError::Budget("turn timeout".into())))
+            let window = std::time::Duration::from_secs(self.budget.turn_timeout_secs);
+            let clock = std::sync::Arc::clone(&self.progress_clock);
+            let mut inner =
+                std::pin::pin!(self.run_turn_inner(input, intent, &mut emit, &mut checkpoint));
+            loop {
+                if let Ok(result) = tokio::time::timeout(window, inner.as_mut()).await {
+                    break result;
+                }
+                let idle = clock
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .elapsed();
+                if idle < window {
+                    continue;
+                }
+                break Err(AgentError::Timeout("turn timeout".into()));
+            }
         };
         if result
             .as_ref()
             .is_err_and(|error| !matches!(error, AgentError::GoalMismatch(_)))
         {
+            // Suspension is not failure: a budget, step limit, timeout or user
+            // question leaves the goal resumable and never drops the queue.
+            let waiting = matches!(&result, Err(AgentError::WaitingForUser(_)));
             if let Some(queue) = &mut self.task_queue {
-                if matches!(
-                    &result,
-                    Err(AgentError::Budget(_) | AgentError::StepLimit(_))
-                ) {
+                if waiting {
+                    queue.await_user();
+                } else if result.as_ref().is_err_and(AgentError::resumable) {
                     queue.stop(
                         QueueState::Suspended,
                         result.as_ref().unwrap_err().to_string(),
@@ -122,26 +143,34 @@ impl AgentKernel {
                     queue.final_response.get_or_insert(reason);
                 }
             }
-            // Persist a valid tool-call transcript even if a deadline interrupts execution.
-            let answered = self
-                .messages
-                .iter()
-                .filter_map(|m| m.tool_call_id.clone())
-                .collect::<std::collections::HashSet<_>>();
-            let pending = self
-                .messages
-                .iter()
-                .flat_map(|m| &m.tool_calls)
-                .filter(|call| !answered.contains(&call.id))
-                .map(|call| call.id.clone())
-                .collect::<Vec<_>>();
-            for id in pending {
-                let interrupted = Message::tool(
-                    id,
-                    "Execution interrupted before a tool result was available.",
-                );
-                self.messages.push(interrupted.clone());
-                self.raw_turn_messages.push(interrupted);
+            if waiting {
+                // The pending call stays unanswered on purpose: the question
+                // marker is what lets a reconnected session still answer it.
+                if let Some(marker) = self.question_marker() {
+                    self.raw_turn_messages.push(marker);
+                }
+            } else {
+                // Persist a valid tool-call transcript even if a deadline interrupts execution.
+                let answered = self
+                    .messages
+                    .iter()
+                    .filter_map(|m| m.tool_call_id.clone())
+                    .collect::<std::collections::HashSet<_>>();
+                let pending = self
+                    .messages
+                    .iter()
+                    .flat_map(|m| &m.tool_calls)
+                    .filter(|call| !answered.contains(&call.id))
+                    .map(|call| call.id.clone())
+                    .collect::<Vec<_>>();
+                for id in pending {
+                    let interrupted = Message::tool(
+                        id,
+                        "Execution interrupted before a tool result was available.",
+                    );
+                    self.messages.push(interrupted.clone());
+                    self.raw_turn_messages.push(interrupted);
+                }
             }
         }
         if result
@@ -172,6 +201,10 @@ impl AgentKernel {
         let emit = std::sync::Mutex::new(emit);
         let input = input.into();
         let new_goal = matches!(&intent, GoalTurn::New | GoalTurn::Start { .. });
+        let answer = match &intent {
+            GoalTurn::Answer { answer, .. } => Some(answer.clone()),
+            _ => None,
+        };
         let replay = self.begin_goal(&input, intent, checkpoint)?;
         if self.execution.lock().unwrap().overall_goal.is_empty()
             || (new_goal && self.child_run.is_none())
@@ -194,7 +227,15 @@ impl AgentKernel {
             return Ok(cached);
         }
         (emit.lock().unwrap())(AgentEvent::TurnStarted);
-        if self.child_run.is_none() || !self.messages.iter().any(|m| m.role == model::Role::User) {
+        if let Some(answer) = &answer {
+            // Resume from the exact position the question was asked: the answer
+            // becomes the tool result the model was waiting for, and no new
+            // user turn is opened.
+            self.answer_user(answer)?;
+            checkpoint(&self.raw_turn_messages)?;
+        } else if self.child_run.is_none()
+            || !self.messages.iter().any(|m| m.role == model::Role::User)
+        {
             let user = Message::user(input);
             self.messages.push(user.clone());
             self.raw_turn_messages.push(user);
@@ -241,12 +282,19 @@ impl AgentKernel {
             .collect::<Vec<_>>();
 
         if self.child_run.is_none() {
+            // Controller-only control tools. Children share the registry but not
+            // these: they own no queue and cannot park the controller's run.
             tool_specs.push(task_queue::spec());
+            tool_specs.push(user_input::spec());
+            if !self.child_results.is_empty() {
+                tool_specs.push(child_result::spec());
+            }
         }
 
         let mut calls_used = 0;
         let mut steps_used = 0usize;
         loop {
+            self.touch_progress();
             if let Some(queue) = self.task_queue.as_ref().filter(|q| !q.active()) {
                 let content = queue
                     .final_response
@@ -261,15 +309,15 @@ impl AgentKernel {
             steps_used = steps_used.saturating_add(1);
             if self.child_host.is_some()
                 && self.task_queue.as_ref().is_some_and(|q| {
-                    q.delegate
-                        && q.state == QueueState::Active
-                        && q.tasks
-                            .iter()
-                            .any(|t| t.status == task_queue::TaskStatus::Running)
+                    q.delegate && q.state == QueueState::Active && child_dispatch::has_open_work(q)
                 })
             {
-                self.execute_next_child(&emit, checkpoint).await?;
-                continue;
+                // Dispatch the whole ready frontier at once; children that are
+                // independent run together, dependents wait for their
+                // predecessor, and one failure never stops the others.
+                if self.execute_ready_children(&emit, checkpoint).await? > 0 {
+                    continue;
+                }
             }
             let step = self
                 .model_step(&emit, &tool_specs, steps_used, checkpoint)
@@ -289,6 +337,9 @@ impl AgentKernel {
             {
                 ToolStep::Final(content) => return Ok(content),
                 ToolStep::Continue => {}
+                ToolStep::Waiting(question) => {
+                    return Err(AgentError::WaitingForUser(question));
+                }
             }
         }
     }

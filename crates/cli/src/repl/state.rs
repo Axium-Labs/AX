@@ -23,7 +23,7 @@ use tool::PermissionStore;
 use crate::{
     bootstrap::{database_path, discover_project_root, migrate_legacy_project_auth},
     capabilities, config, file_reference, project_identity,
-    runtime::tools,
+    runtime::Runtime,
     session_projects, session_restore, skill_invocation, storage_location,
 };
 
@@ -57,9 +57,17 @@ pub(crate) struct ReplState {
     pub(crate) current_session: Option<Session>,
     pub(crate) loaded_messages: Vec<Message>,
     pub(crate) runtime: Option<AgentKernel>,
+    /// Provider and final tool registry prepared for the next run, built once.
+    pub(crate) prepared: Option<Runtime>,
+    /// Schema cost measured from that same registry, so a pre-kernel budget
+    /// describes the tools the kernel will actually send.
+    pub(crate) tool_schema_tokens: Option<usize>,
     pub(crate) permissions: PermissionStore,
     pub(crate) execution_budget: runtime_core::ExecutionBudget,
     pub(crate) next_goal_turn: runtime_core::GoalTurn,
+    /// Question the current goal parked on. The next submission answers it
+    /// instead of opening a new task.
+    pub(crate) pending_question: Option<runtime_core::UserQuestion>,
     pub(crate) child_timeout_secs: u64,
     pub(crate) evolution: Option<::evolution::Handle>,
     pub(crate) evolution_revision: u64,
@@ -132,9 +140,12 @@ impl ReplState {
             current_session: None,
             loaded_messages: Vec::new(),
             runtime: None,
+            prepared: None,
+            tool_schema_tokens: None,
             permissions: PermissionStore::default(),
             execution_budget: runtime_core::ExecutionBudget::default(),
             next_goal_turn: runtime_core::GoalTurn::New,
+            pending_question: None,
             child_timeout_secs: 0,
             evolution: None,
             evolution_revision: 0,
@@ -229,6 +240,10 @@ impl ReplState {
         Ok(())
     }
 
+    // Session restore is one ordered transaction: context snapshot, history
+    // page, orchestration state and recovery must agree, so it stays in one
+    // place rather than being split for a line budget.
+    #[allow(clippy::too_many_lines)]
     pub(crate) fn open_session(
         &mut self,
         id: &str,
@@ -328,6 +343,29 @@ impl ReplState {
         });
         if let Some(state) = execution_state {
             self.loaded_messages.push(restore_message(&state));
+        }
+        // A question survives reconnect: the goal stays waiting_for_user until
+        // the answer arrives, so the run can resume from where it stopped.
+        let question_state = self
+            .store()?
+            .latest_agent_state(id, runtime_core::user_input::STATE_PREFIX)?;
+        self.loaded_messages.retain(|m| {
+            m.role != Role::System
+                || !m
+                    .content
+                    .starts_with(runtime_core::user_input::STATE_PREFIX)
+        });
+        if let Some(state) = question_state {
+            self.pending_question = serde_json::from_str(
+                state
+                    .content
+                    .strip_prefix(runtime_core::user_input::STATE_PREFIX)
+                    .unwrap_or_default(),
+            )
+            .ok();
+            self.loaded_messages.push(restore_message(&state));
+        } else {
+            self.pending_question = None;
         }
         self.active_skills = self
             .loaded_messages
@@ -434,12 +472,13 @@ impl ReplState {
             .ok_or_else(|| anyhow!("skill catalog was not initialized"))
     }
 
+    /// Tool names from the registry this run already built, never a second one.
     pub(crate) fn skill_tool_names(&self) -> Vec<String> {
-        let mut available_tools = tools(&self.mcp_tools)
-            .names()
-            .into_iter()
-            .map(str::to_owned)
-            .collect::<Vec<_>>();
+        let mut available_tools = match (&self.runtime, &self.prepared) {
+            (Some(kernel), _) => kernel.tool_names(),
+            (None, Some(prepared)) => prepared.tool_names(),
+            (None, None) => Vec::new(),
+        };
         if self
             .runtime
             .as_ref()
@@ -632,6 +671,52 @@ impl ReplState {
             .ok_or_else(|| anyhow!("MCP manager was not initialized"))
     }
 
+    /// Prepare the provider and final tool registry for this run, once.
+    ///
+    /// A run builds its provider and its tool registry exactly one time; the
+    /// context budget measured here is derived from that registry, and
+    /// `take_prepared` hands the very same registry to the kernel.
+    pub(crate) fn prepare_runtime(
+        &mut self,
+        selection: &crate::model_selection::ModelSelection,
+    ) -> Result<()> {
+        if self.runtime.is_some() || self.prepared.is_some() {
+            return Ok(());
+        }
+        let prepared = Runtime::build(
+            selection,
+            &self.mcp_tools,
+            &crate::bootstrap::ax_auth_path(),
+        )?;
+        self.tool_schema_tokens = Some(prepared.tool_schema_tokens());
+        self.prepared = Some(prepared);
+        Ok(())
+    }
+
+    /// The one context budget for this run.
+    ///
+    /// Exact once a kernel exists (it measures its own registry); before that it
+    /// is measured from the prepared registry, which is the same object the
+    /// kernel will receive. No second registry is ever built to guess a size.
+    #[must_use]
+    pub(crate) fn context_budget(
+        &self,
+        selection: &crate::model_selection::ModelSelection,
+    ) -> runtime_core::ContextBudget {
+        if let Some(kernel) = &self.runtime {
+            return kernel.context_budget();
+        }
+        runtime_core::ContextBudget::new(
+            selection.context_capacity(),
+            selection.max_output_tokens,
+            self.tool_schema_tokens.unwrap_or_default(),
+        )
+    }
+
+    pub(crate) fn take_prepared(&mut self) -> Option<Runtime> {
+        self.prepared.take()
+    }
+
     pub(crate) fn invalidate_runtime(&mut self) {
         if let Some(runtime) = self.runtime.take() {
             self.loaded_messages = runtime.messages().to_vec();
@@ -645,7 +730,21 @@ impl ReplState {
         self.current_session = None;
         self.loaded_messages.clear();
         self.active_skills.clear();
+        self.pending_question = None;
         self.runtime = None;
+    }
+
+    /// The question this goal is parked on, if any.
+    pub(crate) fn pending_question(&self) -> Option<&runtime_core::UserQuestion> {
+        self.pending_question.as_ref()
+    }
+
+    /// Re-read the parked question from the kernel after a turn.
+    pub(crate) fn sync_pending_question(&mut self) {
+        self.pending_question = self
+            .runtime
+            .as_ref()
+            .and_then(|runtime| runtime.pending_question().cloned());
     }
 }
 pub(crate) fn restore_message(stored: &StoredMessage) -> Message {

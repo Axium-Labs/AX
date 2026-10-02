@@ -20,6 +20,11 @@ markup5ever_rcdom = "0.39"
 tower = "0.5"
 base64 = "0.22"
 uuid.workspace = true
+# AX-owned discovery/search engine. `ignore` is the ripgrep traversal crate and
+# `globset` its glob engine, so AX never shells out to a user-installed `rg`.
+ignore = "0.4"
+globset = "0.4"
+regex = "1"
 
 # Opts out of the workspace lint table instead of inheriting it: decoding
 # Windows console output (`src/shell.rs::native_decode`) needs

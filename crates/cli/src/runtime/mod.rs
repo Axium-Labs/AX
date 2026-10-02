@@ -2,4 +2,4 @@
 
 mod builder;
 
-pub(crate) use builder::{build_provider, context_budget, execution_budget, kernel, tools};
+pub(crate) use builder::{Runtime, build_provider, execution_budget, kernel, tools};

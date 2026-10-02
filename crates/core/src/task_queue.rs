@@ -20,6 +20,12 @@ pub enum GoalTurn {
     Resume {
         goal_id: String,
     },
+    /// Resume a run that suspended on `request_user_input`, writing the answer
+    /// back to the tool call that asked.
+    Answer {
+        goal_id: String,
+        answer: crate::UserAnswer,
+    },
     Cancel {
         goal_id: String,
     },
@@ -32,6 +38,8 @@ pub enum QueueState {
     Active,
     Summarizing,
     Suspended,
+    /// Parked on a `request_user_input` question. Resumable, never failed.
+    WaitingForUser,
     Completed,
     Blocked,
     Cancelled,
@@ -73,6 +81,11 @@ pub struct QueuedTask {
     pub execution_started: bool,
     #[serde(default)]
     pub depends_on: Vec<usize>,
+    /// Resources this task touches. The runtime refuses to run two tasks whose
+    /// declared accesses conflict (write/write, or read against write), so an
+    /// opaque task never races a declared one on the same path.
+    #[serde(default)]
+    pub resources: Vec<tool::ResourceAccess>,
     pub status: TaskStatus,
     pub failure_reason: Option<String>,
     pub outcome: Option<String>,
@@ -126,6 +139,7 @@ impl TaskQueue {
                     execution_started: false,
                     title,
                     depends_on: vec![],
+                    resources: vec![],
                     status: TaskStatus::Pending,
                     failure_reason: None,
                     outcome: None,
@@ -246,12 +260,35 @@ impl TaskQueue {
     pub fn stop(&mut self, state: QueueState, reason: String) {
         if !matches!(
             self.state,
-            QueueState::Active | QueueState::Summarizing | QueueState::Suspended
+            QueueState::Active
+                | QueueState::Summarizing
+                | QueueState::Suspended
+                | QueueState::WaitingForUser
         ) {
             return;
         }
         self.state = state;
         self.stop_reason = Some(reason);
+    }
+
+    /// Park the goal on a `request_user_input` question. Suspension is
+    /// resumable: it is never reported as failure and never drops the queue.
+    pub(crate) fn await_user(&mut self) {
+        if matches!(self.state, QueueState::Active | QueueState::Summarizing) {
+            self.state = QueueState::WaitingForUser;
+        }
+    }
+
+    /// A goal that still has work to resume, including one waiting on a user.
+    #[must_use]
+    pub(crate) fn resumable(&self) -> bool {
+        matches!(
+            self.state,
+            QueueState::Active
+                | QueueState::Summarizing
+                | QueueState::Suspended
+                | QueueState::WaitingForUser
+        )
     }
 
     pub fn normalize_legacy(&mut self) {
@@ -359,31 +396,60 @@ impl TaskQueue {
 pub(crate) fn spec() -> ToolSpec {
     ToolSpec { kind: "function", function: FunctionSpec {
         name: TOOL_NAME.into(),
-        description: "Create structured tasks only when you explicitly decide decomposition is useful. Lists are formatting hints, never authorization to split. Use alone in a round. execution=controller keeps work in this model; execution=children explicitly delegates complete task inputs to isolated children. dependencies are zero-based prior task indices. Finish the current task with completed/failed/skipped and an outcome. Consider recovery before failure; recovery is advisory. block/cancel stop the goal. Text-only responses never advance tasks.".into(),
+        description: "Create structured tasks only when you explicitly decide decomposition is useful. Lists are formatting hints, never authorization to split. Use alone in a round. execution=children delegates complete task inputs to isolated children; the runtime dispatches EVERY independent task at once, bounded by its own concurrency limit, and keeps dependent tasks waiting for their predecessor. dependencies are zero-based prior task indices. Declare resources (path or name, optional write flag) so two tasks that write the same thing never run at the same time. Finish the current task with completed/failed/skipped and an outcome. Consider recovery before failure; recovery is advisory. block/cancel stop the goal. Text-only responses never advance tasks.".into(),
         parameters: json!({"type":"object","properties":{
             "action":{"type":"string","enum":["start","finish","block","cancel"]},
             "execution":{"type":"string","enum":["controller","children"]},"dependencies":{"type":"array","items":{"type":"array","items":{"type":"integer","minimum":0}}},
-            "overall_goal":{"type":"string"},"tasks":{"type":"array","minItems":2,"items":{"anyOf":[{"type":"string","description":"Complete independently executable task input, not a heading"},{"type":"object","properties":{"title":{"type":"string"},"input":{"type":"string","description":"Complete independently executable task input including necessary data/context"}},"required":["title","input"],"additionalProperties":false}]}},
+            "overall_goal":{"type":"string"},"tasks":{"type":"array","minItems":2,"items":{"anyOf":[{"type":"string","description":"Complete independently executable task input, not a heading"},{"type":"object","properties":{"title":{"type":"string"},"input":{"type":"string","description":"Complete independently executable task input including necessary data/context"},"resources":{"type":"array","description":"Files or named resources this task touches","items":{"anyOf":[{"type":"string","description":"Path read by this task"},{"type":"object","properties":{"path":{"type":"string"},"name":{"type":"string"},"all":{"type":"boolean"},"write":{"type":"boolean","description":"True when the task modifies it"}},"additionalProperties":false}]}}},"required":["title","input"],"additionalProperties":false}]}},
             "status":{"type":"string","enum":["completed","failed","skipped"]},"reason":{"type":"string"}
         },"required":["action"]}),
     }}
 }
 
-fn task_definition(value: &Value) -> Result<(String, String), &str> {
-    let (title, task_input) = if let Some(input) = value.as_str() {
-        (input, input)
+fn task_definition(value: &Value) -> Result<(String, String, Vec<tool::ResourceAccess>), String> {
+    let (title, task_input, resources) = if let Some(input) = value.as_str() {
+        (input, input, Vec::new())
     } else {
         (
             value["title"].as_str().ok_or("task title is required")?,
             value["input"]
                 .as_str()
                 .ok_or("complete task input is required")?,
+            match value.get("resources") {
+                Some(resources) => parse_resources(resources)?,
+                None => Vec::new(),
+            },
         )
     };
     if title.trim().is_empty() || task_input.trim().is_empty() {
-        return Err("task title and complete input must be nonempty");
+        return Err("task title and complete input must be nonempty".into());
     }
-    Ok((title.to_owned(), task_input.to_owned()))
+    Ok((title.to_owned(), task_input.to_owned(), resources))
+}
+
+/// Declared task resources. A bare string is a read of that path; an object
+/// carries `path` (or `name`) plus an optional `write` flag.
+fn parse_resources(value: &Value) -> Result<Vec<tool::ResourceAccess>, String> {
+    let entries = value.as_array().ok_or("resources must be an array")?;
+    let mut parsed = Vec::with_capacity(entries.len());
+    for entry in entries {
+        if let Some(path) = entry.as_str().filter(|path| !path.is_empty()) {
+            parsed.push(tool::ResourceAccess::read(tool::Resource::path(path)));
+            continue;
+        }
+        let write = entry["write"].as_bool().unwrap_or(false);
+        let resource = if let Some(path) = entry["path"].as_str().filter(|path| !path.is_empty()) {
+            tool::Resource::path(path)
+        } else if let Some(name) = entry["name"].as_str().filter(|name| !name.is_empty()) {
+            tool::Resource::Named(name.to_owned())
+        } else if entry["all"].as_bool() == Some(true) {
+            tool::Resource::All
+        } else {
+            return Err("each resource needs path, name or all".into());
+        };
+        parsed.push(tool::ResourceAccess { resource, write });
+    }
+    Ok(parsed)
 }
 
 pub(crate) fn apply(
@@ -412,14 +478,15 @@ pub(crate) fn apply(
                 .collect::<Result<Vec<_>, _>>()?;
             let titles = tasks
                 .iter()
-                .map(|(title, _)| title.clone())
+                .map(|(title, _, _)| title.clone())
                 .collect::<Vec<_>>();
             if titles.len() < 2 {
                 return Err("at least two tasks required".into());
             }
             let mut plan = TaskQueue::new(goal.into(), titles);
-            for (task, (_, input)) in plan.tasks.iter_mut().zip(tasks) {
+            for (task, (_, input, resources)) in plan.tasks.iter_mut().zip(tasks) {
                 task.input = input;
+                task.resources = resources;
             }
             if let Some(mode) = input.get("execution") {
                 if !matches!(mode.as_str(), Some("controller" | "children")) {

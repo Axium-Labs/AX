@@ -720,7 +720,13 @@ async fn controller_goal_can_create_isolated_workers_without_new_user_sessions()
     assert_eq!(results.len(), 1);
     assert!(results[0].result.is_ok());
     assert_eq!(
-        supervisor.template.task_queue().unwrap().state,
+        supervisor
+            .template
+            .as_ref()
+            .unwrap()
+            .task_queue()
+            .unwrap()
+            .state,
         QueueState::Active
     );
     let requests = provider.requests.lock().unwrap();

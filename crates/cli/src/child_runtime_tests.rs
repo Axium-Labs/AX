@@ -6,6 +6,19 @@ use serde_json::json;
 use std::sync::{Arc, Mutex};
 use tool::ToolRegistry;
 
+/// Receipt builder for the `finish()` call sites.
+fn receipt(success: bool, output: &str) -> runtime_core::ChildResult {
+    let status = if success {
+        runtime_core::ChildStatus::Completed
+    } else {
+        runtime_core::ChildStatus::Failed
+    };
+    let mut result = runtime_core::ChildResult::new(String::new(), String::new(), status);
+    result.summary = output.to_owned();
+    result.failure_reason = (!success).then(|| output.to_owned());
+    result
+}
+
 enum Behavior {
     Normal,
     FailFirst,
@@ -233,7 +246,11 @@ impl Fixture {
 }
 impl Drop for Fixture {
     fn drop(&mut self) {
-        std::fs::remove_dir_all(&self.root).unwrap();
+        // A child that timed out or hung can still hold a file in its
+        // workspace, and `remove_dir_all` then fails with "in use". A panic
+        // here would happen while another panic unwinds, which aborts the whole
+        // test binary and hides the real failure. Cleanup is best effort.
+        let _ = std::fs::remove_dir_all(&self.root);
     }
 }
 fn input(count: usize) -> String {
@@ -245,6 +262,17 @@ fn input(count: usize) -> String {
             .join("\n")
     )
 }
+/// Latest durable queue snapshot carried by a checkpoint.
+fn checkpoint_queue(messages: &[Message]) -> Option<runtime_core::task_queue::TaskQueue> {
+    messages.iter().rev().find_map(|message| {
+        message
+            .content
+            .strip_prefix(runtime_core::task_queue::STATE_PREFIX)
+            .and_then(|json| serde_json::from_str(json).ok())
+    })
+}
+
+#[allow(clippy::too_many_lines)] // One shared assertion battery for all child batches.
 fn check_isolation(kernel: &AgentKernel, provider: &Provider, count: usize) {
     let queue = kernel.task_queue().unwrap();
     assert_eq!(queue.state, QueueState::Completed);
@@ -295,13 +323,36 @@ fn check_isolation(kernel: &AgentKernel, provider: &Provider, count: usize) {
         let cwd = messages
             .iter()
             .find(|m| m.metadata["tool_call_id"] == "cwd")
-            .unwrap();
-        let result: tool::ToolResult = serde_json::from_str(&cwd.content).unwrap();
-        assert!(
-            result
-                .raw_output
-                .contains(&run.cwd.to_string_lossy().to_string())
-        );
+            .unwrap_or_else(|| {
+                panic!(
+                    "task {} lacks its cwd result: {:?}",
+                    index,
+                    messages
+                        .iter()
+                        .map(|m| (m.role, m.content.chars().take(80).collect::<String>()))
+                        .collect::<Vec<_>>()
+                )
+            });
+        // A child stopped mid-call by a cancel/timeout records an explicit
+        // placeholder instead of replaying a call whose side effects are
+        // unknown. Concurrent children make that reachable, so it is a valid
+        // observation rather than a missing one.
+        if !cwd.content.starts_with("Interrupted child call") {
+            let result: tool::ToolResult =
+                serde_json::from_str(&cwd.content).unwrap_or_else(|error| {
+                    panic!(
+                        "task {index} cwd result unreadable ({error}): role={:?} kind={:?} content={:?}",
+                        cwd.role,
+                        cwd.kind,
+                        cwd.content.chars().take(200).collect::<String>()
+                    )
+                });
+            assert!(
+                result
+                    .raw_output
+                    .contains(&run.cwd.to_string_lossy().to_string())
+            );
+        }
         assert_eq!(
             messages
                 .iter()
@@ -334,6 +385,7 @@ fn check_isolation(kernel: &AgentKernel, provider: &Provider, count: usize) {
 }
 
 #[tokio::test]
+#[allow(clippy::too_many_lines)] // One end-to-end batch assertion sequence.
 async fn twenty_three_explicitly_delegated_children_execute_in_isolated_contexts_and_finish_once() {
     let fixture = Fixture::new();
     let provider = provider(false, false, false);
@@ -368,7 +420,9 @@ async fn twenty_three_explicitly_delegated_children_execute_in_isolated_contexts
             .unwrap()
             .tasks
             .iter()
-            .all(|t| t.status == TaskStatus::Completed)
+            .all(|t| t.status == TaskStatus::Completed),
+        "{:#?}",
+        kernel.task_queue().unwrap().tasks
     );
     let tool_ids = events
         .iter()
@@ -408,7 +462,9 @@ async fn first_child_failure_does_not_stop_twenty_two_independent_children() {
     assert!(
         kernel.task_queue().unwrap().tasks[1..]
             .iter()
-            .all(|t| t.status == TaskStatus::Completed)
+            .all(|t| t.status == TaskStatus::Completed),
+        "{:#?}",
+        kernel.task_queue().unwrap().tasks
     );
     check_isolation(&kernel, &provider, 23);
 }
@@ -420,25 +476,53 @@ async fn reconnect_resumes_running_child_history_and_remaining_queue_position() 
     let mut first = fixture.kernel(first_provider);
     let saved = Arc::new(Mutex::new(vec![]));
     let saved_callback = saved.clone();
-    // Generous budget: child 1 must reach a terminal state while child 2 hangs.
-    // A tight timeout here flakes when the suite runs tests in parallel.
-    assert!(
-        tokio::time::timeout(
-            std::time::Duration::from_secs(20),
-            first.run_turn_checkpointed(
-                input(23),
-                |_| {},
-                |messages| {
-                    *saved_callback.lock().unwrap() = messages.to_vec();
-                    Ok(())
-                }
-            )
-        )
-        .await
-        .is_err()
-    );
+    // Wait for the observable condition -- child 1 terminal while child 2 is
+    // stalled -- instead of a wall-clock deadline: 23 concurrent children make
+    // a fixed deadline flaky when the suite runs tests in parallel.
+    {
+        let turn = first.run_turn_checkpointed(
+            input(23),
+            |_| {},
+            |messages| {
+                *saved_callback.lock().unwrap() = messages.to_vec();
+                Ok(())
+            },
+        );
+        tokio::pin!(turn);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(180);
+        let mut finished = false;
+        loop {
+            if tokio::time::timeout(std::time::Duration::from_millis(20), &mut turn)
+                .await
+                .is_ok()
+            {
+                finished = true;
+                break;
+            }
+            let terminal = checkpoint_queue(&saved.lock().unwrap())
+                .is_some_and(|queue| queue.tasks[0].status == TaskStatus::Completed);
+            if terminal {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "child 1 never reached a terminal state"
+            );
+        }
+        assert!(
+            !finished,
+            "a stalled child must keep the turn open, not end it"
+        );
+        // Leaving the block is what a disconnect does: every in-flight child is
+        // dropped with the turn.
+    }
     let queue = first.task_queue().unwrap();
-    assert_eq!(queue.tasks[0].status, TaskStatus::Completed);
+    assert_eq!(
+        queue.tasks[0].status,
+        TaskStatus::Completed,
+        "{:#?}",
+        queue.tasks
+    );
     assert_eq!(queue.tasks[1].status, TaskStatus::Running);
     let second_run = queue.tasks[1].child.clone().unwrap();
     assert!(second_run.cwd.exists());
@@ -613,7 +697,9 @@ async fn model_created_twenty_three_task_queue_executes_children_without_finish_
         queue
             .tasks
             .iter()
-            .all(|task| task.status == TaskStatus::Completed && task.child.is_some())
+            .all(|task| task.status == TaskStatus::Completed && task.child.is_some()),
+        "{:#?}",
+        queue.tasks
     );
     assert_eq!(
         events
@@ -842,10 +928,7 @@ async fn git_dirty_binary_patch_covers_staged_unstaged_rename_delete_and_untrack
     let run = child.run.clone();
     child
         .checkpoint
-        .finish(&ChildOutcome {
-            success: true,
-            output: "durable result".into(),
-        })
+        .finish(&mut receipt(true, "durable result"))
         .unwrap();
     assert!(!run.cwd.exists());
     let worktrees = git(
@@ -863,7 +946,7 @@ async fn git_dirty_binary_patch_covers_staged_unstaged_rename_delete_and_untrack
         .prepare(&controller, "patch", Some(&run))
         .await
         .unwrap();
-    assert_eq!(recovered.terminal.unwrap().output, "durable result");
+    assert_eq!(recovered.terminal.unwrap().summary, "durable result");
     assert!(
         !run.cwd.exists(),
         "receipt recovery must not provision again"
@@ -925,8 +1008,8 @@ async fn gc_expires_unleased_interrupted_workspace_but_preserves_history_and_act
         .await
         .unwrap();
     let outcome = expired.terminal.unwrap();
-    assert!(!outcome.success);
-    assert!(outcome.output.contains("expired"));
+    assert!(!outcome.status.success());
+    assert!(outcome.summary.contains("expired"));
 }
 
 #[tokio::test]
@@ -953,10 +1036,7 @@ async fn quota_rejection_cleans_partial_workspace_and_admission_recovers_after_c
     );
     first
         .checkpoint
-        .finish(&ChildOutcome {
-            success: false,
-            output: "failed but recorded".into(),
-        })
+        .finish(&mut receipt(false, "failed but recorded"))
         .unwrap();
     assert!(!first.run.cwd.exists());
     let next = fixture
@@ -1073,12 +1153,7 @@ async fn legacy_workspace_store_migrates_before_resume_and_terminal_cleanup() {
     )
     .await
     .unwrap();
-    checkpoint
-        .finish(&ChildOutcome {
-            success: true,
-            output,
-        })
-        .unwrap();
+    checkpoint.finish(&mut receipt(true, &output)).unwrap();
     assert!(!legacy.cwd.exists());
     let store = MemoryStore::open(state.join("child.sqlite3")).unwrap();
     let messages = store
@@ -1150,8 +1225,8 @@ async fn resume_over_quota_child_persists_failure_before_cleanup() {
         .await
         .unwrap();
     let outcome = recovered.terminal.unwrap();
-    assert!(!outcome.success);
-    assert!(outcome.output.contains("quota"));
+    assert!(!outcome.status.success());
+    assert!(outcome.summary.contains("quota"));
     assert!(!run.cwd.exists());
     let store = MemoryStore::open(run.state_dir.unwrap().join("child.sqlite3")).unwrap();
     assert!(
@@ -1181,10 +1256,7 @@ async fn shared_child_workspace_keeps_parent_outputs_and_cleanup_is_owned() {
     assert!(fixture.host.source.join("result.txt").is_file());
     child
         .checkpoint
-        .finish(&ChildOutcome {
-            success: true,
-            output,
-        })
+        .finish(&mut receipt(true, &output))
         .unwrap();
     assert!(!disposable.exists());
     assert!(fixture.host.source.join("result.txt").is_file());

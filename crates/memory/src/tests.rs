@@ -209,7 +209,8 @@ fn migration_from_old_summary_schema_keeps_rows() {
         std::mem::replace(&mut store.connection, Connection::open_in_memory().unwrap());
     let events_dir = store.events_dir.clone();
     store.ephemeral_events = false;
-    let migrated = MemoryStore::initialize(connection, events_dir, true).unwrap();
+    let access = store.access.clone();
+    let migrated = MemoryStore::initialize(connection, events_dir, true, access).unwrap();
     assert_eq!(
         migrated.session_summary(&session.id).unwrap().as_deref(),
         Some("old summary")

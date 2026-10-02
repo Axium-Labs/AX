@@ -10,6 +10,9 @@ use super::state::AgentKernel;
 use crate::{AgentError, AgentEvent, GoalTurn, QueueState, task_queue};
 
 impl AgentKernel {
+    // Goal admission is one atomic decision: intent, queue state and the
+    // durable checkpoint must be written together, so the length is the point.
+    #[allow(clippy::too_many_lines)]
     pub(crate) fn begin_goal<H>(
         &mut self,
         input: &str,
@@ -81,10 +84,7 @@ impl AgentKernel {
                     .ok_or_else(|| {
                         AgentError::GoalMismatch(format!("no saved queue for goal {goal_id}"))
                     })?;
-                if !matches!(
-                    queue.state,
-                    QueueState::Active | QueueState::Summarizing | QueueState::Suspended
-                ) {
+                if !queue.resumable() {
                     return Ok(Some(
                         queue
                             .final_response
@@ -95,10 +95,49 @@ impl AgentKernel {
                 }
                 if cancel {
                     queue.stop(QueueState::Cancelled, "Task queue canceled by user.".into());
-                } else if queue.state == QueueState::Suspended {
+                } else if matches!(
+                    queue.state,
+                    QueueState::Suspended | QueueState::WaitingForUser
+                ) {
+                    // Resuming lifts the suspension; the queue itself is
+                    // untouched, so no task state is lost.
                     queue.state = QueueState::Active;
                     queue.stop_reason = None;
                     queue.advance();
+                }
+                self.goal_id = Some(goal_id);
+                self.checkpoint_queue(checkpoint)?;
+                Ok(None)
+            }
+            GoalTurn::Answer { goal_id, .. } => {
+                // A question can be asked with or without a task queue, so an
+                // answer resumes the goal rather than requiring one.
+                match self.task_queue.as_mut().filter(|q| q.goal_id == goal_id) {
+                    Some(queue) => {
+                        if !queue.resumable() {
+                            return Ok(Some(
+                                queue
+                                    .final_response
+                                    .clone()
+                                    .or_else(|| queue.stop_reason.clone())
+                                    .unwrap_or_default(),
+                            ));
+                        }
+                        if matches!(
+                            queue.state,
+                            QueueState::Suspended | QueueState::WaitingForUser
+                        ) {
+                            queue.state = QueueState::Active;
+                            queue.stop_reason = None;
+                            queue.advance();
+                        }
+                    }
+                    None if self.goal_id.as_deref() == Some(goal_id.as_str()) => {}
+                    None => {
+                        return Err(AgentError::GoalMismatch(format!(
+                            "no saved goal {goal_id} to answer"
+                        )));
+                    }
                 }
                 self.goal_id = Some(goal_id);
                 self.checkpoint_queue(checkpoint)?;

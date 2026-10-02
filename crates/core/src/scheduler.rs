@@ -17,6 +17,9 @@ pub(super) struct Job {
     dependencies: Vec<usize>,
     input_dependencies: Vec<usize>,
     resources: Vec<ResourceAccess>,
+    /// Index of an earlier call in the same round whose result this call
+    /// reuses instead of repeating an identical read-only traversal.
+    reuse: Option<usize>,
 }
 
 /// Advertise typed result references as part of the tool protocol. Scheduling
@@ -116,7 +119,36 @@ pub(super) fn prepare(calls: &[ToolCall], tools: &ToolRegistry) -> Result<Vec<Jo
             input_dependencies: dependencies.clone(),
             dependencies,
             resources,
+            reuse: None,
         });
+    }
+    check_acyclic(&jobs)?;
+    // One round never walks the same tree twice for the same request: an
+    // identical read-only discovery call is ordered after the first and reuses
+    // its result. This is state reuse only — it never chooses which tool the
+    // model should have called, and it never narrows a scope.
+    let mut seen: HashMap<(String, String), usize> = HashMap::new();
+    let mut duplicates = Vec::new();
+    for (index, job) in jobs.iter().enumerate() {
+        let discovery = job
+            .tool
+            .as_ref()
+            .is_some_and(|tool| tool.recursive_search())
+            && !job.resources.iter().any(|access| access.write);
+        if !discovery {
+            continue;
+        }
+        let key = (job.name.clone(), dedup_key(&job.input));
+        match seen.get(&key).copied() {
+            Some(first) => duplicates.push((index, first)),
+            None => {
+                seen.insert(key, index);
+            }
+        }
+    }
+    for (index, first) in duplicates {
+        jobs[index].reuse = Some(first);
+        jobs[index].dependencies.push(first);
     }
     check_acyclic(&jobs)?;
     // Preserve model order for conflicting effects unless an explicit data
@@ -136,6 +168,17 @@ pub(super) fn prepare(calls: &[ToolCall], tools: &ToolRegistry) -> Result<Vec<Jo
 
 fn invalid(message: &str) -> AgentError {
     ToolError::InvalidInput(message.into()).into()
+}
+
+/// Comparable form of a call's arguments. Runtime-only metadata is dropped so
+/// two calls that differ only in orchestration notes still compare equal.
+fn dedup_key(input: &Value) -> String {
+    let mut input = input.clone();
+    if let Some(object) = input.as_object_mut() {
+        object.remove("_ax_observe");
+        object.remove("_ax_execution");
+    }
+    input.to_string()
 }
 
 fn collect_references(input: &Value, dependencies: &mut Vec<String>) -> Result<(), AgentError> {
@@ -272,6 +315,19 @@ where
                 continue;
             }
             started[index] = true;
+            // An identical discovery call that already succeeded reuses that
+            // result instead of traversing the same scope again. A failed
+            // first call is not reused: the duplicate still runs normally.
+            if let Some(first) = jobs[index].reuse
+                && succeeded[first]
+                && let Some(output) = outputs[first].clone()
+            {
+                let message = emit_reuse(emit, &jobs[index], &jobs[first], &output);
+                succeeded[index] = true;
+                outputs[index] = Some(message.clone());
+                completed(message, &jobs[index].name, &jobs[index].input)?;
+                continue;
+            }
             let input = if job
                 .input_dependencies
                 .iter()
@@ -399,6 +455,43 @@ async fn execute<F: FnMut(AgentEvent) + Send>(
     }
 }
 
+/// Emit the reuse of an earlier discovery result and return the tool response
+/// for the duplicate call. The envelope shape is preserved so the model sees an
+/// ordinary success.
+fn emit_reuse<F: FnMut(AgentEvent) + Send>(
+    emit: &Mutex<F>,
+    duplicate: &Job,
+    first: &Job,
+    output: &Message,
+) -> Message {
+    let (message, result) = reused_message(&duplicate.id, &first.id, output);
+    (emit.lock().unwrap())(AgentEvent::ToolStarted {
+        id: duplicate.id.clone(),
+        name: duplicate.name.clone(),
+        detail: format!("reusing result of {}", first.id),
+        input: duplicate.input.clone(),
+    });
+    (emit.lock().unwrap())(AgentEvent::ToolFinished {
+        id: duplicate.id.clone(),
+        name: duplicate.name.clone(),
+        success: true,
+        diagnostics: Vec::new(),
+        result,
+    });
+    message
+}
+
+/// Reuse a completed discovery result for an identical call in the same round.
+fn reused_message(id: &str, first: &str, output: &Message) -> (Message, tool::ToolResult) {
+    let mut result = serde_json::from_str::<tool::ToolResult>(&output.content)
+        .unwrap_or_else(|_| tool::ToolResult::new(true, output.content.clone()));
+    result.summary = format!(
+        "Identical to tool call {first}; its result was reused instead of re-scanning the same scope"
+    );
+    let message = Message::tool(id, serde_json::to_string(&result).unwrap_or_default());
+    (message, result)
+}
+
 fn message(id: &str, result: Result<ToolOutput, ToolError>) -> Message {
     let envelope = envelope(&result);
     match result.unwrap_or_else(|error| ToolOutput::Text(error.to_string())) {
@@ -501,10 +594,13 @@ mod tests {
     };
     use tool::{Capability, Resource, SafetyLevel};
 
+    static HANG_STARTED: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(0);
+
     #[derive(Default)]
     struct State {
         active: AtomicUsize,
         peak: AtomicUsize,
+        executions: AtomicUsize,
         trace: Mutex<Vec<String>>,
     }
     struct Active(Arc<State>);
@@ -549,6 +645,9 @@ mod tests {
             self.0.peak.fetch_max(active, Ordering::SeqCst);
             let _active = Active(Arc::clone(&self.0));
             self.0.trace.lock().unwrap().push(format!("start:{id}"));
+            if id == "hang" {
+                HANG_STARTED.add_permits(1);
+            }
             tokio::time::sleep(Duration::from_millis(input["delay"].as_u64().unwrap_or(20))).await;
             self.0.trace.lock().unwrap().push(format!("end:{id}"));
             if input["fail"] == true {
@@ -580,14 +679,111 @@ mod tests {
             self.0.execute(input).await
         }
     }
+    /// The shipped discovery tool with concurrency instrumentation, so these
+    /// tests exercise the real resource declaration rather than a stand-in.
+    struct CountingSearch {
+        inner: tool::SearchTool,
+        state: Arc<State>,
+    }
+    #[async_trait]
+    impl Tool for CountingSearch {
+        fn name(&self) -> &str {
+            self.inner.name()
+        }
+        fn description(&self) -> &str {
+            self.inner.description()
+        }
+        fn input_schema(&self) -> Value {
+            self.inner.input_schema()
+        }
+        fn safety(&self, input: &Value) -> SafetyLevel {
+            self.inner.safety(input)
+        }
+        fn capability(&self, input: &Value) -> Capability {
+            self.inner.capability(input)
+        }
+        fn recursive_search(&self) -> bool {
+            self.inner.recursive_search()
+        }
+        fn resources(&self, input: &Value) -> Vec<ResourceAccess> {
+            self.inner.resources(input)
+        }
+        async fn execute(&self, input: Value) -> Result<String, ToolError> {
+            self.state.executions.fetch_add(1, Ordering::SeqCst);
+            let active = self.state.active.fetch_add(1, Ordering::SeqCst) + 1;
+            self.state.peak.fetch_max(active, Ordering::SeqCst);
+            let _active = Active(Arc::clone(&self.state));
+            tokio::time::sleep(Duration::from_millis(40)).await;
+            self.inner.execute(input).await
+        }
+    }
+    /// Any built-in tool with concurrency instrumentation, so the scheduler
+    /// tests exercise the real resource declaration rather than a stand-in.
+    struct CountingTool {
+        inner: std::sync::Arc<dyn Tool>,
+        state: Arc<State>,
+    }
+    #[async_trait]
+    impl Tool for CountingTool {
+        fn name(&self) -> &str {
+            self.inner.name()
+        }
+        fn description(&self) -> &str {
+            self.inner.description()
+        }
+        fn input_schema(&self) -> Value {
+            self.inner.input_schema()
+        }
+        fn safety(&self, input: &Value) -> SafetyLevel {
+            self.inner.safety(input)
+        }
+        fn capability(&self, input: &Value) -> Capability {
+            self.inner.capability(input)
+        }
+        fn recursive_search(&self) -> bool {
+            self.inner.recursive_search()
+        }
+        fn resources(&self, input: &Value) -> Vec<ResourceAccess> {
+            self.inner.resources(input)
+        }
+        async fn execute(&self, input: Value) -> Result<String, ToolError> {
+            self.state.executions.fetch_add(1, Ordering::SeqCst);
+            let active = self.state.active.fetch_add(1, Ordering::SeqCst) + 1;
+            self.state.peak.fetch_max(active, Ordering::SeqCst);
+            let _active = Active(Arc::clone(&self.state));
+            tokio::time::sleep(Duration::from_millis(40)).await;
+            self.inner.execute(input).await
+        }
+    }
+
+    fn search_fixture() -> (ToolRegistry, Arc<State>, std::path::PathBuf) {
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
+        let state = Arc::new(State::default());
+        let mut tools = ToolRegistry::with_mode(tool::SandboxMode::Off);
+        tools.register(CountingSearch {
+            inner: tool::SearchTool::default(),
+            state: Arc::clone(&state),
+        });
+        let root = std::env::temp_dir().join(format!(
+            "ax-sched-search-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::SeqCst)
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("input.txt"), "needle\n").unwrap();
+        (tools, state, root)
+    }
     fn call(id: &str, input: Value) -> ToolCall {
+        named(id, "probe", input)
+    }
+    fn named(id: &str, name: &str, input: Value) -> ToolCall {
         let arguments = input.to_string();
         drop(input);
         ToolCall {
             id: id.into(),
             kind: "function".into(),
             function: FunctionCall {
-                name: "probe".into(),
+                name: name.into(),
                 arguments,
             },
         }
@@ -745,6 +941,66 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn independent_searches_run_concurrently_in_one_round() {
+        let (tools, state, root) = search_fixture();
+        let calls = vec![
+            named("first", "search", json!({"query":"needle","path":root})),
+            named(
+                "second",
+                "search",
+                json!({"query":"needle-elsewhere","path":root}),
+            ),
+            named("third", "search", json!({"query":"absent","path":root})),
+        ];
+        // Read-only discovery declares read access, so no call depends on
+        // another and none of them takes the global write lock.
+        let jobs = prepare(&calls, &tools).unwrap();
+        assert!(jobs.iter().all(|job| job.dependencies.is_empty()));
+        assert!(jobs.iter().all(|job| {
+            job.tool.as_ref().is_some_and(|tool| {
+                tool.resources(&job.input)
+                    .iter()
+                    .all(|access| !access.write && access.resource != Resource::All)
+            })
+        }));
+
+        let results = schedule(&calls, &tools, 4).await;
+        assert_eq!(state.peak.load(Ordering::SeqCst), 3);
+        assert_eq!(state.executions.load(Ordering::SeqCst), 3);
+        let found: Value = serde_json::from_str(
+            &serde_json::from_str::<tool::ToolResult>(&results[0].content)
+                .unwrap()
+                .raw_output,
+        )
+        .unwrap();
+        assert_eq!(found["matches"][0]["path"], "input.txt");
+        let empty = serde_json::from_str::<tool::ToolResult>(&results[1].content).unwrap();
+        assert!(empty.raw_output.contains("\"matches\":[]"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn an_identical_discovery_call_reuses_the_first_result_instead_of_rescanning() {
+        let (tools, state, root) = search_fixture();
+        let calls = vec![
+            named("first", "search", json!({"query":"needle","path":root})),
+            named("again", "search", json!({"query":"needle","path":root})),
+        ];
+        let results = schedule(&calls, &tools, 4).await;
+        // One traversal, two protocol responses: the duplicate never re-walks
+        // the workspace.
+        assert_eq!(state.executions.load(Ordering::SeqCst), 1);
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[1].tool_call_id.as_deref(), Some("again"));
+        let first = serde_json::from_str::<tool::ToolResult>(&results[0].content).unwrap();
+        let reused = serde_json::from_str::<tool::ToolResult>(&results[1].content).unwrap();
+        assert_eq!(reused.status, "success");
+        assert_eq!(reused.raw_output, first.raw_output);
+        assert!(reused.summary.contains("reused"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
     async fn permissions_do_not_grant_concurrency_to_undeclared_effects() {
         let state = Arc::new(State::default());
         let mut tools = ToolRegistry::with_mode(tool::SandboxMode::Off);
@@ -828,15 +1084,93 @@ mod tests {
             "hang",
             json!({"label":"hang","resource":"cross-round","write":true,"delay":1000}),
         )];
-        assert!(
-            tokio::time::timeout(Duration::from_millis(30), schedule(&hanging, &tools, 4))
-                .await
-                .is_err()
-        );
+        {
+            let hang_future = schedule(&hanging, &tools, 4);
+            tokio::pin!(hang_future);
+            tokio::select! {
+                _ = &mut hang_future => panic!("hanging call must not complete"),
+                _started = HANG_STARTED.acquire() => {}
+            }
+        }
         assert_eq!(state.active.load(Ordering::SeqCst), 0);
-        tokio::time::timeout(Duration::from_millis(200), schedule(&second, &tools, 4))
-            .await
-            .unwrap();
+        // The released lease must be acquirable again.
+        schedule(&second, &tools, 4).await;
+    }
+
+    #[tokio::test]
+    async fn three_independent_read_only_tools_run_together() {
+        let root = std::env::temp_dir().join(format!(
+            "ax-sched-mixed-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("input.txt"), "needle\n").unwrap();
+        let state = Arc::new(State::default());
+        let mut tools = ToolRegistry::with_mode(tool::SandboxMode::Off);
+        let counting = |inner: std::sync::Arc<dyn Tool>| CountingTool {
+            inner,
+            state: Arc::clone(&state),
+        };
+        tools.register_arc(std::sync::Arc::new(counting(std::sync::Arc::new(
+            tool::SearchTool::default(),
+        ))));
+        tools.register_arc(std::sync::Arc::new(counting(std::sync::Arc::new(
+            tool::FindFilesTool::new(root.clone()),
+        ))));
+        tools.register_arc(std::sync::Arc::new(counting(std::sync::Arc::new(
+            tool::FilesystemTool,
+        ))));
+        let calls = vec![
+            named("search", "search", json!({"query":"needle","path":root})),
+            named("find", "find_files", json!({"pattern":"*.txt","path":root})),
+            named(
+                "read",
+                "filesystem",
+                json!({"operation":"read","path":root.join("input.txt")}),
+            ),
+        ];
+        let results = schedule(&calls, &tools, 4).await;
+        assert_eq!(state.peak.load(Ordering::SeqCst), 3);
+        assert_eq!(state.executions.load(Ordering::SeqCst), 3);
+        assert!(
+            results.iter().all(
+                |result| serde_json::from_str::<tool::ToolResult>(&result.content)
+                    .is_ok_and(|result| result.status == "success")
+            ),
+            "{results:?}"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_read_only_shell_command_overlaps_with_other_reads() {
+        let state = Arc::new(State::default());
+        let mut tools = ToolRegistry::with_mode(tool::SandboxMode::Off);
+        tools.register_arc(std::sync::Arc::new(CountingTool {
+            inner: std::sync::Arc::new(tool::ShellTool),
+            state: Arc::clone(&state),
+        }));
+        tools.register_arc(std::sync::Arc::new(CountingTool {
+            inner: std::sync::Arc::new(tool::SearchTool::default()),
+            state: Arc::clone(&state),
+        }));
+        let calls = vec![
+            named("echo", "shell", json!({"command":"echo scheduler"})),
+            named(
+                "search",
+                "search",
+                json!({"query":"needle","path":std::env::temp_dir()}),
+            ),
+        ];
+        // `echo` is a known read-only invocation, so it is not serialized behind
+        // an opaque global write and overlaps with an independent read.
+        let results = schedule(&calls, &tools, 4).await;
+        assert_eq!(state.peak.load(Ordering::SeqCst), 2);
+        assert_eq!(state.executions.load(Ordering::SeqCst), 2);
+        assert!(results[0].content.contains("scheduler"));
     }
 
     #[test]

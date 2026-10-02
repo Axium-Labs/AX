@@ -18,12 +18,15 @@
 mod approval;
 mod budget;
 pub mod child;
+mod child_dispatch;
 pub mod child_policy;
+pub mod child_result;
 mod compression;
 mod context;
 mod error;
 mod event;
 pub mod execution;
+pub mod instructions;
 mod kernel;
 mod loop_runtime;
 mod scheduler;
@@ -31,21 +34,30 @@ pub mod subagent;
 mod supervisor;
 pub mod task_queue;
 mod token;
+pub mod user_input;
 
 pub use approval::{AllowAll, ApprovalPolicy, DenyDangerous};
 pub use budget::{ContextBudget, ContextDemand, ContextPoolPolicy, ExecutionBudget};
-pub use child::{ChildCheckpoint, ChildHost, ChildOutcome, ChildRun, PreparedChild};
+pub use child::{ChildCheckpoint, ChildHost, ChildRun, PreparedChild, terminal_result};
 pub use child_policy::ChildPolicy;
+pub use child_result::{
+    Artifact, ChangedFile, ChildMetrics, ChildResult, ChildStatus, DiffStat, Validation,
+    from_durable_json,
+};
 pub use compression::CompressionResult;
 pub use context::select_context;
 pub use error::AgentError;
 pub use event::{AgentEvent, tool_activity};
 pub use execution::{ExecutionState, NoProgressDetector};
+pub use instructions::{
+    InstructionResolution, InstructionResolver, InstructionScope, InstructionSegment,
+};
 pub use kernel::AgentKernel;
 pub use subagent::{AgentTemplate, SpawnOptions, SubagentConfig, SubagentManager, SubagentResult};
 pub use supervisor::{AgentSupervisor, AgentTask, AgentTaskResult, MultiAgentEvent};
 pub use task_queue::{GoalTurn, QueueState};
 pub use token::{estimate_tokens, estimate_tool_schema_tokens};
+pub use user_input::{UserAnswer, UserOption, UserQuestion};
 
 #[cfg(test)]
 mod tests;

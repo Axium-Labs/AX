@@ -11,11 +11,13 @@ use model::{Message, ModelProvider};
 use tool::ToolRegistry;
 
 use crate::{
-    ApprovalPolicy, ContextBudget, ContextPoolPolicy, ExecutionBudget, ExecutionState, QueueState,
+    ApprovalPolicy, ChildResult, ContextBudget, ContextPoolPolicy, ExecutionBudget, ExecutionState,
+    QueueState, UserAnswer, UserQuestion,
     child::{ChildHost, ChildRun},
     subagent::{AgentTemplate, SubagentConfig, SubagentManager},
     task_queue,
     token::{estimate_tokens, estimate_tool_schema_tokens},
+    user_input,
 };
 
 pub struct AgentKernel {
@@ -38,14 +40,34 @@ pub struct AgentKernel {
     pub(crate) child_host: Option<Arc<dyn ChildHost>>,
     pub(crate) child_run: Option<ChildRun>,
     pub(crate) child_budget: Option<ExecutionBudget>,
+    pub(crate) child_concurrency: usize,
+    /// Controller-side receipt index. Durable, never part of the request.
+    pub(crate) child_results: std::collections::BTreeMap<String, ChildResult>,
+    /// Set while a `request_user_input` question is unanswered.
+    pub(crate) pending_question: Option<UserQuestion>,
+    /// Whether the receipt index needs one durable write.
+    pub(crate) receipts_dirty: bool,
     pub(crate) subagent_config: SubagentConfig,
     pub(crate) agent_templates: Vec<AgentTemplate>,
     pub(crate) subagent_manager: Option<Arc<SubagentManager>>,
     pub(crate) execution: Arc<std::sync::Mutex<ExecutionState>>,
     pub(crate) execution_root: Option<PathBuf>,
+    /// Last time this kernel made observable progress. The turn timeout is an
+    /// idle timeout: delegated children have their own budgets, so a long but
+    /// productive batch must not be killed by a wall clock.
+    pub(crate) progress_clock: Arc<std::sync::Mutex<std::time::Instant>>,
 }
 
 impl AgentKernel {
+    /// Record observable progress: a model round, a tool round, a child
+    /// dispatch or a child receipt.
+    pub(crate) fn touch_progress(&self) {
+        *self
+            .progress_clock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = std::time::Instant::now();
+    }
+
     #[must_use]
     pub fn execution_state(&self) -> ExecutionState {
         self.execution
@@ -62,6 +84,18 @@ impl AgentKernel {
     #[must_use]
     pub fn has_tool(&self, name: &str) -> bool {
         self.tools.get(name).is_some()
+    }
+
+    /// Names of the tools this kernel will actually send.
+    #[must_use]
+    pub fn tool_names(&self) -> Vec<String> {
+        self.tools.names().into_iter().map(str::to_owned).collect()
+    }
+
+    /// Schema cost of exactly this kernel's registry.
+    #[must_use]
+    pub fn tool_schema_tokens(&self) -> usize {
+        estimate_tool_schema_tokens(&self.tools)
     }
 
     /// Adds dynamically selected context, such as lazily loaded skill instructions.
@@ -88,7 +122,10 @@ impl AgentKernel {
         let mut budget = ContextBudget::new(
             self.provider.context_window(),
             self.provider.max_output_tokens(),
-            estimate_tool_schema_tokens(&self.tools) + task_queue::schema_tokens(),
+            estimate_tool_schema_tokens(&self.tools)
+                + task_queue::schema_tokens()
+                + crate::user_input::schema_tokens()
+                + crate::child_result::schema_tokens(),
         );
         budget.pool = self.context_pool;
         budget
@@ -141,5 +178,70 @@ impl AgentKernel {
     #[must_use]
     pub fn task_queue(&self) -> Option<&task_queue::TaskQueue> {
         self.task_queue.as_ref()
+    }
+
+    /// The question this run is parked on, when `request_user_input` suspended it.
+    #[must_use]
+    pub fn pending_question(&self) -> Option<&UserQuestion> {
+        self.pending_question.as_ref()
+    }
+
+    /// Full child receipts produced during this goal, keyed by child id.
+    #[must_use]
+    pub fn child_results(&self) -> &std::collections::BTreeMap<String, ChildResult> {
+        &self.child_results
+    }
+
+    #[must_use]
+    pub fn child_result(&self, child_id: &str) -> Option<&ChildResult> {
+        self.child_results.get(child_id).or_else(|| {
+            self.child_results
+                .values()
+                .find(|receipt| receipt.task_id == child_id)
+        })
+    }
+
+    /// Record a question raised by the model and persist its marker. Called
+    /// before the run suspends, so the question survives a reconnect.
+    pub(crate) fn ask_user(&mut self, question: UserQuestion) {
+        self.pending_question = Some(question);
+    }
+
+    /// Write a structured answer back to the tool call that asked, then clear
+    /// the pending question. The run resumes from that exact position: the
+    /// answer becomes the tool result the model was waiting for.
+    ///
+    /// # Errors
+    /// Returns a lifecycle error when no question is pending or the answer
+    /// belongs to a different question.
+    pub(crate) fn answer_user(
+        &mut self,
+        answer: &UserAnswer,
+    ) -> Result<Message, crate::AgentError> {
+        let question = self
+            .pending_question
+            .take()
+            .ok_or_else(|| crate::AgentError::GoalMismatch("no pending user question".into()))?;
+        if answer.question_id != question.id {
+            self.pending_question = Some(question);
+            return Err(crate::AgentError::GoalMismatch(format!(
+                "answer targets `{}` but the pending question is `{}`",
+                answer.question_id,
+                self.pending_question.as_ref().unwrap().id
+            )));
+        }
+        let payload = UserQuestion::answer_payload(&question, answer);
+        let message = Message::tool(
+            question.tool_call_id.clone(),
+            serde_json::to_string(&payload).unwrap_or_default(),
+        );
+        self.messages.push(message.clone());
+        self.raw_turn_messages.push(message.clone());
+        Ok(message)
+    }
+
+    /// Durable question marker for the caller's checkpoint sink.
+    pub(crate) fn question_marker(&self) -> Option<Message> {
+        self.pending_question.as_ref().map(user_input::snapshot)
     }
 }

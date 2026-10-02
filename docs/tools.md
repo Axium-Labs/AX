@@ -40,10 +40,11 @@ permissions from tool-name strings (e.g. `mcp__`/`::`).
 
 | Tool | Purpose | Capability |
 |---|---|---|
-| `shell` | Run a shell command | `Shell` / `Process` |
-| `filesystem` | Read/write files | `FilesystemRead` / `FilesystemWrite` |
+| `shell` | Run a shell command; last-resort fallback | `Shell` / `Process` |
+| `filesystem` | Read/list/write a path you already know | `FilesystemRead` / `FilesystemWrite` |
+| `find_files` / `glob` | Discover files and directories by name, path or extension; never reads content | `FilesystemRead` |
 | `patch` | Structured multi-hunk edits; any failing hunk aborts the whole write | `FilesystemWrite` |
-| `search` | Line-scoped text search | `FilesystemRead` |
+| `search` | Line-scoped content, symbol and regex search (grep) | `FilesystemRead` |
 | `web` | `search` up to 4 concurrent queries via a replaceable provider; `fetch` up to 6 concurrent HTTP(S) GETs as cleaned Markdown/text; merged, deduplicated, partial failures tolerated | `Network` |
 | `view_image` | Native image content from a workspace file, when the model supports vision | `FilesystemRead` |
 
@@ -51,12 +52,57 @@ The registry is assembled per composition root (`runtime::tools` in
 `crates/cli/src/runtime/builder.rs`): the built-ins,
 then discovered MCP proxies.
 
+### Local discovery and search
+
+`find_files` (also registered as `glob`) and `search` are one shared
+implementation, not two agents' worth of logic:
+
+- `find_files`/`glob` only answers "which paths exist": `pattern` is a glob
+  (`**/*.jsonl`, `src/**/*.ts`, `*.toml`; a bare name pattern matches at any
+  depth), plus `include`/`exclude`, `type` (`file`/`dir`/`any`), `max_depth` and
+  `max_results`. It never opens a file.
+- `search` only answers "where does this text/symbol/regex appear": `mode`
+  (`literal`/`regex`), `case_sensitive` (default true), `include`/`exclude`,
+  `context_lines`, `max_results` and `output_mode` (`content` or
+  `files_with_matches`). Matching is per line.
+- Both accept `path` (canonical) or `root` (alias); omitting it means the bound
+  workspace root. Results are workspace-relative, `/`-separated paths, so a
+  returned path can be passed straight to `filesystem.read`.
+- Both skip `.git`, `target`, `node_modules`, `.venv`/`venv`, `dist`, `build`,
+  `__pycache__`, caches, `coverage`, `vendor`, `.ax` and `child-runs` by default,
+  honour `.gitignore` rules plus `.axignore` even outside a git checkout, never
+  follow symlinks and never read files above 4 MB.
+- A search with no match returns `success` with an empty `matches` array. It is
+  an observation, not a failure.
+- Traversal is provided by the `ignore` crate — the walker ripgrep uses — and
+  matching by `regex`, so AX carries its own implementation and never shells out
+  to a user-installed `rg`.
+
+Both tools declare their resolved scope as a **read-only** resource, so
+independent discovery calls in one round run concurrently instead of queueing
+behind the global write lock. One round also never walks the same scope twice:
+an identical read-only discovery call is ordered after the first and reuses its
+result (the duplicate still receives its own tool response). This is state
+reuse only — the runtime never chooses which tool to call, and never hardcodes a
+search order.
+
+Child agents get the identical registry. `SandboxedTool::fork_for_run` delegates
+to the wrapped tool's `fork_for_run`, and the discovery tools carry the
+workspace they are bound to, so a child is the same struct with `cwd` rebound to
+`child.cwd`; `filesystem` read/list/write are rebound through `WorkspaceTool`
+the same way. Path binding plus the runtime's declared-scope check plus the
+sandbox keep a child inside its own workspace — no second search implementation
+is involved.
+
 ### Tool use and result protocol
 
 The CLI supplies a strategy without changing permissions or the dependency DAG.
-Known independent search/read calls must be emitted in one response. Prefer
-targeted exact search, then numbered `filesystem.read` ranges (`start_line`,
-`end_line`). Failure recovery uses minimal diagnostics, a local repair and the
+The model selects the tool from the descriptions: a known path is read or listed
+directly, an unknown location is resolved with `find_files`/`glob`, and text,
+symbols or regexes go to `search`. Known independent search/read calls must be
+emitted in one response. After discovery returns candidates, they are read
+directly rather than searched again. Recursive shell scans are the last
+fallback. Failure recovery uses minimal diagnostics, a local repair and the
 smallest relevant check before required full tests.
 
 `patch` addresses original 1-based coordinates with `start_line`, `delete_count`,
@@ -301,11 +347,16 @@ existing recovery placeholders.
 | Concern | Code |
 |---|---|
 | `Tool`, `ToolRegistry`, `SafetyLevel` | `crates/tool/src/lib.rs` |
-| Built-in tools | `crates/tool/src/shell.rs`, `filesystem.rs`, `patch.rs`, `search.rs`, `web.rs`, `view_image.rs` |
+| Built-in tools | `crates/tool/src/shell.rs`, `filesystem.rs`, `patch.rs`, `find.rs`, `search.rs`, `web.rs`, `view_image.rs` |
+| Shared traversal/glob policy for discovery | `crates/tool/src/discovery.rs` |
+| Workspace path binding for one shared registry | `crates/tool/src/workspace.rs`, `crates/tool/src/sandboxed.rs` |
 | `Capability`, `PermissionStore` | `crates/tool/src/permission.rs` |
 | Telemetry | `crates/tool/src/telemetry.rs` |
-| Runtime scheduling and resource locks | `crates/core/src/scheduler.rs`, `crates/tool/src/resources.rs` |
+| Runtime scheduling, resource locks, same-round reuse | `crates/core/src/scheduler.rs`, `crates/tool/src/resources.rs` |
 | Registry assembly, approval wiring | `crates/cli/src/runtime/builder.rs`, `crates/cli/src/bootstrap.rs` |
+| Control tools (`task_queue`, `child_result`, `request_user_input`) | `crates/core/src/task_queue.rs`, `crates/core/src/child_result.rs`, `crates/core/src/user_input.rs` |
+| Parallel child dispatch and receipts | `crates/core/src/child_dispatch.rs`, `crates/core/src/child.rs` |
+| Project instruction resolution | `crates/core/src/instructions.rs`, `crates/cli/src/project_instructions.rs` |
 | `/permissions`, `/tools` views | `crates/cli/src/tui/commands.rs`, `crates/cli/src/tui/commands/catalogs.rs` |
 
 ## Shell and child runtime awareness
@@ -319,12 +370,17 @@ Unix uses POSIX `sh`. The description is dynamic tool metadata, not a new system
 prompt.
 
 For isolated children, `Tool::fork_for_run` must rebind extension state to the
-provided `RunContext`. Built-in workspace tools reject file paths outside that
-child root, including symlink escapes, and resolve resource leases to the bound
-paths. Shell inherits installed runtimes/PATH but launches with the child cwd
-and child AX_HOME/session/memory environment. AX_HOME and memory databases bind
-to `RunContext.state_dir`, outside the disposable workspace. Tool execution keeps ordinary
-approval rules and the existing DAG. This does not introduce an OS container.
+provided `RunContext`. `SandboxedTool::fork_for_run` delegates to the wrapped
+tool's `fork_for_run` and re-applies the boundary, so a child receives the same
+tools rebound to `child.cwd` rather than a separate implementation; the
+discovery tools carry the workspace they are bound to and `filesystem`
+read/list/write are rebound through `WorkspaceTool`. Built-in workspace tools
+reject file paths outside that child root, including symlink escapes, and
+resolve resource leases to the bound paths. Shell inherits installed
+runtimes/PATH but launches with the child cwd and child AX_HOME/session/memory
+environment. AX_HOME and memory databases bind to `RunContext.state_dir`,
+outside the disposable workspace. Tool execution keeps ordinary approval rules
+and the existing DAG. This does not introduce an OS container.
 
 
 ## Execution scope and advisory recovery
@@ -356,13 +412,15 @@ bind relative tool paths to that workspace. Unknown/global tool effects still
 use an exclusive resource lease and their declared permission/sandbox boundary.
 
 Recursive searches respect the current declared scope. Broader searches can
-explicitly bind a new step within the workspace. `fallback_reason` is an optional
-orchestration note and never grants access outside the resource scope.
-Search traverses
-at most 2,000 entries, eight directory levels and two seconds; skips symlinks,
-binary files and files larger than 1 MB; and excludes `.git`, build/target/dist,
-node_modules, child-runs, caches, virtual environments, runtime storage and vendor
-outputs. Limits produce partial/truncated results or an explicit timeout error.
+explicitly bind a new step within the workspace. `search` and
+`find_files`/`glob` declare the resolved scope as a read resource, so the same
+scope check rejects a call that points outside the current step; the legacy
+`fallback_reason` argument is still accepted but never grants access and does not
+gate execution.
+Discovery skips generated, vendored and cache directories, symlinks, binary
+files and files larger than 4 MB, and stops at `max_results` (defaults 100 for
+`search`, 200 for `find_files`). Limits produce partial/truncated results rather
+than errors.
 
 
 ## Optional subagents
@@ -518,6 +576,44 @@ a failed dependency skips dependents while independent tasks continue.
 Queue responsibilities are state, dependencies, scheduling and outcomes.
 Old serialized queues retain their state; existing child receipts allow an
 explicit goal resume to continue an already delegated run.
+
+`resources` is optional per task: a bare string is a read of that path, and an
+object carries `path` or `name` plus `write`. The runtime refuses to run two
+tasks whose declared accesses conflict, so a shared file must be declared rather
+than assumed safe. All ready, non-conflicting tasks are dispatched in one batch
+and newly ready tasks are admitted as children settle; concurrency is the
+supervisor's, never a prompt instruction.
+
+## Control tools and structured receipts
+
+Three tools are handled by the kernel rather than by a registry entry, because
+they change orchestration state instead of touching the world:
+
+| Tool | Purpose |
+|---|---|
+| `task_queue` | Create, finish, block or cancel a goal's tasks. |
+| `child_result` | Read a full child receipt by `child_id` (`full`, `findings`, `diagnostics`, `artifacts`, `diff`, `validation`, `metrics`); omit `child_id` to list receipts. |
+| `request_user_input` | Ask the user one structured question (`question`, `options`, `allow_free_text`) when the answer materially changes the result. |
+
+Each must be called alone in a round; a mixed round is rejected and nothing in it
+executes. They are offered to the main agent only: a child owns no queue, cannot
+park the controller's run, and cannot orchestrate.
+
+`request_user_input` is not a permission request. Dangerous operations are
+authorized by the permission system, and a question never grants or denies
+anything. Asking checkpoints the goal, queue, session and question, parks the
+queue in `waiting_for_user` and suspends the run; the answer is written back to
+the same tool call id, so execution resumes in place with no new user turn.
+Frontends surface it through `AgentEvent::UserQuestion`: the TUI shows it and
+treats the next submission as the answer, ACP sends an `agent_question` session
+update, and a non-interactive `ax run` reads the answer from stdin.
+
+A child's receipt is a `ChildResult`. The controller model receives only
+`model_summary()`; the full record is durable and is read through `child_result`,
+so recovering detail never means re-running a child. A receipt recovered from an
+earlier process short-circuits provisioning, so a resumed session never repeats a
+completed child. Metrics (wall time, model rounds, tool calls, reported tokens,
+failed tool calls) come from the child's own event stream and transcript.
 
 ## Sandbox enforcement
 

@@ -67,6 +67,85 @@ impl MemoryStore {
         Ok(stored)
     }
 
+    /// Appends a run of messages as one transaction, one JSONL sync and one
+    /// commit, instead of one of each per message.
+    ///
+    /// Durability matches [`Self::append_message`]: the JSONL stream is flushed
+    /// before the transaction commits, so a crash can only leave an orphaned
+    /// event, which `sync_session_locked` re-indexes on the next open. A child
+    /// checkpoint writes a batch per save, so this is what keeps its fsync
+    /// count constant instead of linear in the message count.
+    ///
+    /// # Errors
+    /// Returns an error when serialization or the transaction fails.
+    pub fn append_batch(
+        &mut self,
+        session_id: &str,
+        messages: &[NewMessage],
+    ) -> Result<Vec<StoredMessage>, MemoryError> {
+        if messages.is_empty() {
+            return Ok(Vec::new());
+        }
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        sync_session_locked(&transaction, &self.events_dir, session_id)?;
+        let mut stored = Vec::with_capacity(messages.len());
+        let mut jsonl = Vec::new();
+        let mut offset = crate::events::events_size(&self.events_dir, session_id)?;
+        for message in messages {
+            let NewMessage {
+                role,
+                kind,
+                content,
+                metadata,
+            } = message.clone();
+            transaction.execute(
+                "INSERT INTO messages (session_id, role, kind, content, metadata)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![session_id, role.as_str(), kind.as_str(), "", "null"],
+            )?;
+            let id = transaction.last_insert_rowid();
+            let created_at: i64 = transaction.query_row(
+                "SELECT created_at FROM messages WHERE id=?1",
+                [id],
+                |row| row.get(0),
+            )?;
+            let stored_message = StoredMessage {
+                id,
+                session_id: session_id.to_owned(),
+                role,
+                kind,
+                content,
+                metadata,
+                created_at,
+            };
+            let mut line = serde_json::to_vec(&stored_message)?;
+            line.push(b'\n');
+            let length = i64::try_from(line.len())
+                .map_err(|_| MemoryError::InvalidValue("event too large".into()))?;
+            jsonl.extend_from_slice(&line);
+            transaction.execute(
+                "UPDATE messages SET event_offset=?2,event_length=?3 WHERE id=?1",
+                params![id, offset, length],
+            )?;
+            offset = offset.saturating_add(length);
+            if kind == MessageKind::AgentState {
+                transaction.execute("INSERT INTO agent_states(message_id,session_id,content,metadata,created_at) VALUES (?1,?2,?3,?4,?5)",
+                    params![id, session_id, stored_message.content, serde_json::to_string(&stored_message.metadata)?, created_at])?;
+            }
+            stored.push(stored_message);
+        }
+        transaction.execute(
+            "UPDATE sessions SET updated_at = unixepoch() WHERE id = ?1",
+            [session_id],
+        )?;
+        // Flush the JSONL stream once, before the commit.
+        crate::events::append_event_buffer(&self.events_dir, session_id, &jsonl)?;
+        transaction.commit()?;
+        Ok(stored)
+    }
+
     /// Loads one page of a session, returning messages in chronological order.
     /// `before_id` provides stable backward pagination without loading full history.
     ///

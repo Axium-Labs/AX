@@ -8,8 +8,11 @@ mod workspace;
 pub use workspace::{RunContext, WorkspaceTool};
 mod result;
 pub use result::{ResultReader, ToolResult, path_error};
+mod discovery;
+mod find;
 mod patch;
 mod search;
+pub use find::FindFilesTool;
 mod web;
 pub use web::{
     FetchError, FetchErrorKind, MAX_FETCH_URLS, MAX_PAGE_CHARS, MAX_QUERIES, MAX_TOTAL_CHARS,
@@ -175,6 +178,18 @@ impl Default for ToolRegistry {
     }
 }
 
+/// The kernel's baseline tool set: the runtime-owned `tool_output` reader,
+/// and no `view_image` for a provider that cannot see.
+///
+/// Both the kernel constructor and the run's pre-kernel estimate call this, so
+/// the registry that is measured and the registry that is sent are the same.
+pub fn kernel_baseline(tools: &mut ToolRegistry, vision: bool) {
+    if !vision {
+        tools.remove("view_image");
+    }
+    tools.register(result::ResultReader::default());
+}
+
 impl ToolRegistry {
     #[must_use]
     pub fn new() -> Self {
@@ -279,5 +294,53 @@ mod tests {
             ShellTool.safety(&serde_json::json!({ "command": "pwd" })),
             SafetyLevel::RequiresApproval
         );
+    }
+
+    /// The model picks a discovery tool from its description, so the split
+    /// between browsing, finding and searching has to stay explicit.
+    #[test]
+    fn tool_descriptions_state_the_discovery_split() {
+        let root = std::path::PathBuf::from(".");
+        let find = FindFilesTool::new(root.clone());
+        assert!(
+            find.description()
+                .contains("without reading their contents")
+        );
+        assert!(find.description().contains("recursive shell scan"));
+
+        let search = SearchTool::new(root.clone());
+        assert!(search.description().contains("grep"));
+        assert!(
+            search
+                .description()
+                .contains("No match is a successful empty result")
+        );
+
+        assert!(
+            FilesystemTool
+                .description()
+                .contains("not a discovery tool")
+        );
+        assert!(FilesystemTool.description().contains("find_files"));
+        assert!(ShellTool.description().contains("Fallback only"));
+    }
+
+    #[test]
+    fn discovery_tools_are_read_only_and_recursive() {
+        let root = std::path::PathBuf::from(".");
+        let mut registry = ToolRegistry::with_mode(sandbox::SandboxMode::Off);
+        registry.register(FindFilesTool::new(root.clone()));
+        registry.register(FindFilesTool::glob(root.clone()));
+        registry.register(SearchTool::new(root));
+        for name in ["find_files", "glob", "search"] {
+            let tool = registry.get(name).unwrap();
+            assert!(tool.recursive_search(), "{name} traverses a subtree");
+            let access = tool.resources(&serde_json::json!({"query":"x"}));
+            assert!(!access.is_empty(), "{name} declares its scope");
+            assert!(
+                !access.iter().any(|access| access.write),
+                "{name} is read-only"
+            );
+        }
     }
 }

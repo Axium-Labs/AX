@@ -43,8 +43,14 @@ impl Tool for SandboxedTool {
         crate::ExecutionBoundary::Sandboxed
     }
     fn fork_for_run(&self, context: &RunContext) -> Option<Arc<dyn Tool>> {
-        // Preserve the boundary instead of delegating to the raw child tool.
-        let mut tool = Self::new(self.inner.clone(), context.cwd.clone());
+        // Rebind the wrapped tool to the child scope first (workspace path
+        // binding lives there), then re-apply the boundary so a child keeps the
+        // same confinement. Tools that carry no run state are reused as-is.
+        let inner = self
+            .inner
+            .fork_for_run(context)
+            .unwrap_or_else(|| Arc::clone(&self.inner));
+        let mut tool = Self::new(inner, context.cwd.clone());
         tool.child_state = Some(context.state_dir.clone());
         Some(Arc::new(tool))
     }
@@ -80,8 +86,10 @@ impl Tool for SandboxedTool {
     }
     fn resources(&self, input: &Value) -> Vec<ResourceAccess> {
         let mut input = input.clone();
-        if let Some(path) = input["path"].as_str() {
-            input["path"] = Value::String(self.root.join(path).to_string_lossy().into());
+        for field in ["path", "root"] {
+            if let Some(path) = input[field].as_str() {
+                input[field] = Value::String(self.root.join(path).to_string_lossy().into());
+            }
         }
         self.inner.resources(&input)
     }
@@ -181,18 +189,23 @@ pub async fn sandbox_worker(name: &str) -> Result<(), ToolError> {
         .await?;
     let input: Value =
         serde_json::from_slice(&bytes).map_err(|e| ToolError::InvalidInput(e.to_string()))?;
-    if let Some(path) = input["path"].as_str() {
-        sandbox::authorize_workspace_path(
-            std::path::Path::new(path),
-            input["operation"] == "write",
-        )?;
+    for field in ["path", "root"] {
+        if let Some(path) = input[field].as_str() {
+            sandbox::authorize_workspace_path(
+                std::path::Path::new(path),
+                input["operation"] == "write",
+            )?;
+        }
     }
+    let workspace = std::env::current_dir()?;
     let tool: Box<dyn Tool> = match name {
         "shell" => Box::new(crate::ShellTool),
         "filesystem" => Box::new(crate::FilesystemTool),
         "patch" => Box::new(crate::PatchTool),
-        "search" => Box::new(crate::SearchTool),
-        "view_image" => Box::new(crate::ViewImageTool::new(std::env::current_dir()?)),
+        "search" => Box::new(crate::SearchTool::new(workspace.clone())),
+        "find_files" => Box::new(crate::FindFilesTool::new(workspace.clone())),
+        "glob" => Box::new(crate::FindFilesTool::glob(workspace.clone())),
+        "view_image" => Box::new(crate::ViewImageTool::new(workspace)),
         _ => return Err(ToolError::Unknown(name.into())),
     };
     let result = tool.execute_output(input).await.map_err(|e| e.to_string());

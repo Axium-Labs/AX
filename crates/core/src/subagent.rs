@@ -1,5 +1,8 @@
 //! Optional delegation adapter. All execution uses `ChildHost` and `AgentSupervisor`.
-use crate::{AgentError, AgentEvent, AgentKernel, AgentSupervisor, ChildHost, ChildOutcome};
+use crate::{
+    AgentError, AgentEvent, AgentKernel, AgentSupervisor, ChildHost,
+    child_result::{ChildResult, ChildStatus},
+};
 use async_trait::async_trait;
 use futures_util::FutureExt;
 use serde::{Deserialize, Serialize};
@@ -425,7 +428,7 @@ impl SubagentManager {
             }
         }
         self.event(AgentEvent::SubagentStarted { id: id.into() });
-        let result = if let Some(outcome) = child.terminal.take() {
+        let mut result: ChildResult = if let Some(outcome) = child.terminal.take() {
             outcome
         } else {
             let output = AgentSupervisor::run_child(
@@ -448,24 +451,21 @@ impl SubagentManager {
             )
             .await;
             match output {
-                Ok(output) => crate::child::terminal_outcome(child.kernel.messages()).unwrap_or(
-                    ChildOutcome {
-                        success: true,
-                        output,
-                    },
-                ),
-                Err(error) => ChildOutcome {
-                    success: false,
-                    output: error.to_string(),
-                },
+                Ok(output) => crate::child::terminal_result(child.kernel.messages())
+                    .unwrap_or_else(|| {
+                        let mut result = ChildResult::new(id, id, ChildStatus::Completed);
+                        result.summary = output;
+                        result
+                    }),
+                Err(error) => ChildResult::failed(id, id, ChildStatus::Failed, error.to_string()),
             }
         };
-        child.checkpoint.finish(&result)?;
+        child.checkpoint.finish(&mut result)?;
         guard.finished = true;
-        Ok::<_, AgentError>(if result.success {
+        Ok::<_, AgentError>(if result.status.success() {
             SubagentResult {
                 status: "completed".into(),
-                summary: result.output,
+                summary: result.summary,
                 artifacts: guard
                     .child
                     .run
@@ -477,7 +477,7 @@ impl SubagentManager {
                 error: None,
             }
         } else {
-            SubagentResult::failed("failed", result.output)
+            SubagentResult::failed("failed", result.summary)
         })
     }
 
@@ -529,10 +529,14 @@ struct ChildGuard {
 impl Drop for ChildGuard {
     fn drop(&mut self) {
         if !self.finished {
-            let _ = self.child.checkpoint.finish(&ChildOutcome {
-                success: false,
-                output: "subagent cancelled or timed out".into(),
-            });
+            let mut result = ChildResult::new(
+                self.child.run.session_id.clone(),
+                self.child.run.goal_id.clone(),
+                ChildStatus::Cancelled,
+            );
+            result.failure_reason = Some("subagent cancelled or timed out".into());
+            result.summary = "subagent cancelled or timed out".into();
+            let _ = self.child.checkpoint.finish(&mut result);
         }
     }
 }

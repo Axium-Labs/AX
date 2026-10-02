@@ -89,11 +89,13 @@ impl Tool for MemoryTool {
             &self.database
         };
         let resource = tool::Resource::path(path);
-        vec![if matches!(input["action"].as_str(), Some("list")) {
-            tool::ResourceAccess::read(resource)
-        } else {
-            tool::ResourceAccess::write(resource)
-        }]
+        vec![
+            if matches!(input["action"].as_str(), Some("list" | "read" | "index")) {
+                tool::ResourceAccess::read(resource)
+            } else {
+                tool::ResourceAccess::write(resource)
+            },
+        ]
     }
     fn name(&self) -> &'static str {
         "memory"

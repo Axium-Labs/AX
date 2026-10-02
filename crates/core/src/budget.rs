@@ -97,6 +97,12 @@ impl ContextBudget {
     pub fn memory_budget_tokens(&self) -> usize {
         self.usable().min(self.pool.memory_maximum)
     }
+    /// Project instructions compete with the rest of the system context; they
+    /// are a demand on the same pool, never a separate allowance.
+    #[must_use]
+    pub fn instructions_budget_tokens(&self) -> usize {
+        self.usable().min(self.pool.instructions_maximum)
+    }
     /// Project the next request including expected tool results, with hard reply/schema reserves.
     #[must_use]
     pub const fn needs_compaction(&self, current: usize, next_request_growth: usize) -> bool {
@@ -113,6 +119,7 @@ pub struct ContextPoolPolicy {
     pub recent_raw_maximum: usize,
     pub memory_maximum: usize,
     pub skill_metadata_maximum: usize,
+    pub instructions_maximum: usize,
 }
 impl ContextPoolPolicy {
     pub const DEFAULT: Self = Self {
@@ -121,6 +128,7 @@ impl ContextPoolPolicy {
         recent_raw_maximum: 4096,
         memory_maximum: 8192,
         skill_metadata_maximum: 4096,
+        instructions_maximum: 4096,
     };
 }
 impl Default for ContextPoolPolicy {

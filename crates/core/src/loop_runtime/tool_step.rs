@@ -13,7 +13,8 @@ use tokio::sync::mpsc;
 use tool::ToolError;
 
 use crate::{
-    AgentError, AgentEvent, AgentKernel, QueueState, child, scheduler, subagent, task_queue,
+    AgentError, AgentEvent, AgentKernel, QueueState, UserQuestion, child, child_result, scheduler,
+    subagent, task_queue, user_input,
 };
 
 /// Whether the turn ended or needs another model step.
@@ -22,6 +23,8 @@ pub(crate) enum ToolStep {
     Final(String),
     /// The loop must run another model step.
     Continue,
+    /// The run suspended on a user question and must be resumed with an answer.
+    Waiting(Box<UserQuestion>),
 }
 
 impl AgentKernel {
@@ -45,10 +48,12 @@ impl AgentKernel {
     {
         if tool_calls.is_empty() {
             if self.child_run.is_some()
-                && let Some(outcome) = child::terminal_outcome(&self.messages)
-                && !outcome.success
+                && let Some(outcome) = child::terminal_result(&self.messages)
+                && !outcome.status.success()
             {
-                return Err(AgentError::Tool(ToolError::Execution(outcome.output)));
+                return Err(AgentError::Tool(ToolError::Execution(
+                    outcome.failure_reason.unwrap_or(outcome.summary),
+                )));
             }
             if let Some(queue) = self.task_queue.as_mut().filter(|q| q.active()) {
                 // A final response is goal-scoped. Never interpret it as one
@@ -78,6 +83,18 @@ impl AgentKernel {
             return Err(AgentError::Budget("tool call limit".into()));
         }
         *calls_used = calls_used.saturating_add(tool_calls.len());
+        if tool_calls
+            .iter()
+            .any(|call| call.function.name == user_input::TOOL_NAME)
+        {
+            return self.user_input_step(emit, checkpoint, &tool_calls);
+        }
+        if tool_calls
+            .iter()
+            .any(|call| call.function.name == child_result::TOOL_NAME)
+        {
+            return self.child_result_step(checkpoint, &tool_calls);
+        }
         if tool_calls
             .iter()
             .any(|call| call.function.name == task_queue::TOOL_NAME)
@@ -263,6 +280,119 @@ impl AgentKernel {
         }
         self.messages.extend(results);
         self.checkpoint_queue(checkpoint)?;
+        Ok(ToolStep::Continue)
+    }
+
+    /// `request_user_input`: park the run on the question instead of ending it.
+    ///
+    /// The pending tool call is deliberately left unanswered so the answer can
+    /// be written back to the same call id and execution resumes exactly here.
+    fn user_input_step<F, H>(
+        &mut self,
+        emit: &std::sync::Mutex<F>,
+        checkpoint: &mut H,
+        tool_calls: &[ToolCall],
+    ) -> Result<ToolStep, AgentError>
+    where
+        F: FnMut(AgentEvent) + Send,
+        H: FnMut(&[Message]) -> Result<(), AgentError> + Send,
+    {
+        let call = &tool_calls[0];
+        let input: Value = serde_json::from_str(&call.function.arguments).unwrap_or(Value::Null);
+        let parsed = (|| -> Result<UserQuestion, String> {
+            if tool_calls.len() != 1 {
+                return Err(
+                    "request_user_input must be called alone; no tools in this round were executed"
+                        .into(),
+                );
+            }
+            user_input::parse_question(&input, &call.id)
+        })();
+        match parsed {
+            Ok(question) => {
+                let envelope = tool::ToolResult::new(
+                    true,
+                    "Suspended: the run resumes when the user answers.".to_owned(),
+                );
+                self.execution.lock().unwrap().record_control(
+                    &call.id,
+                    &call.function.name,
+                    &input,
+                    &envelope,
+                    false,
+                );
+                self.ask_user(question.clone());
+                (emit.lock().unwrap())(AgentEvent::UserQuestion {
+                    question: Box::new(question.clone()),
+                });
+                Ok(ToolStep::Waiting(Box::new(question)))
+            }
+            Err(reason) => {
+                let message = Message::tool(
+                    &call.id,
+                    serde_json::to_string(&tool::ToolResult::new(
+                        false,
+                        format!("request_user_input rejected: {reason}"),
+                    ))
+                    .unwrap_or_default(),
+                );
+                self.execution.lock().unwrap().record_control(
+                    &call.id,
+                    &call.function.name,
+                    &input,
+                    &tool::ToolResult::new(false, reason),
+                    false,
+                );
+                self.messages.push(message.clone());
+                self.raw_turn_messages.push(message);
+                self.checkpoint_queue(checkpoint)?;
+                checkpoint(&self.raw_turn_messages)?;
+                Ok(ToolStep::Continue)
+            }
+        }
+    }
+
+    /// `child_result`: read a full child receipt without re-running the child.
+    fn child_result_step<H>(
+        &mut self,
+        checkpoint: &mut H,
+        tool_calls: &[ToolCall],
+    ) -> Result<ToolStep, AgentError>
+    where
+        H: FnMut(&[Message]) -> Result<(), AgentError> + Send,
+    {
+        let alone = tool_calls.len() == 1;
+        for call in tool_calls {
+            let input: Value =
+                serde_json::from_str(&call.function.arguments).unwrap_or(Value::Null);
+            let outcome = if alone {
+                child_result::apply_read(&self.child_results, &input)
+            } else {
+                Err(
+                    "child_result must be called alone; no tools in this round were executed"
+                        .into(),
+                )
+            };
+            let envelope = match &outcome {
+                Ok(text) => tool::ToolResult::new(true, text.clone()),
+                Err(reason) => tool::ToolResult::new(false, reason.clone()),
+            };
+            self.execution.lock().unwrap().record_control(
+                &call.id,
+                &call.function.name,
+                &input,
+                &envelope,
+                false,
+            );
+            let message = Message::tool(
+                &call.id,
+                serde_json::to_string(&envelope).unwrap_or_default(),
+            );
+            self.messages.push(message.clone());
+            self.raw_turn_messages.push(message);
+        }
+        self.checkpoint_queue(checkpoint)?;
+        checkpoint(&self.raw_turn_messages)?;
         Ok(ToolStep::Continue)
     }
 }
