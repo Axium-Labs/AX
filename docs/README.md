@@ -23,6 +23,7 @@ design decisions that shaped the code are recorded as ADRs in
 | [evolution.md](evolution.md) | Low-frequency Experience learning and evolved Skill lifecycle |
 | [providers.md](providers.md) | Models, providers, authentication |
 | [development.md](development.md) | Building, testing, extending and releasing AX |
+| [release-notes/0.3.1.md](release-notes/0.3.1.md) | AX 0.3.1 liveness fix and validation |
 | [adr/README.md](adr/README.md) | Architecture Decision Records (index) |
 
 ## TUI features

@@ -53,3 +53,5 @@ What becomes easier, what becomes harder, and what we accepted.
 - [0011: Model-directed policies](0011-model-directed-policies.md) — semantic selection with deterministic runtime ceilings.
 
 - [0013: Workspace runtime sandbox](0013-workspace-runtime-sandbox.md) — centralized OS confinement independent of Permission.
+
+- [0014: Advisory execution policy](0014-advisory-execution-policy.md) — observation and recovery never gate safe tool execution.

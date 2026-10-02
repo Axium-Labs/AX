@@ -22,8 +22,12 @@ pub struct ExecutionState {
     pub expected_output: String,
     pub allowed_scope: Vec<PathBuf>,
     pub recovery_for: Option<String>,
+    #[serde(default)]
+    pub recovery_call_id: Option<String>,
     pub recent_actions: VecDeque<ExecutionEvent>,
     pub progress: Progress,
+    #[serde(default)]
+    pub step_status: StepStatus,
     failed_action: Option<u64>,
     failed_tool: Option<String>,
     failed_paths: Vec<PathBuf>,
@@ -36,6 +40,14 @@ pub struct ExecutionState {
     observed_evidence: VecDeque<u64>,
     observed_mutations: VecDeque<u64>,
     child_cursors: std::collections::BTreeMap<String, (usize, usize)>,
+}
+/// A completed call is an observation even when it fails or returns no matches.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StepStatus {
+    #[default]
+    Running,
+    Observed,
 }
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Progress {
@@ -120,7 +132,8 @@ impl ExecutionState {
     }
     /// Bind before execution, after result references have been resolved. No prose/keyword routing.
     /// # Errors
-    /// Rejects unanchored steps, scope expansion and unbounded or repeated recovery actions.
+    /// Rejects invalid bindings and paths outside the declared resource scope.
+    /// Progress and recovery never determine tool admission.
     pub fn prepare(&mut self, tool: &dyn Tool, input: Value) -> Result<Value, ToolError> {
         let mut next = self.clone();
         let input = next.prepare_inner(tool, input)?;
@@ -146,13 +159,7 @@ impl ExecutionState {
             .iter()
             .map(|path| normalized(&self.workspace_root.join(path)))
             .collect();
-        let successor = self.step_declared
-            && binding.step != self.current_step
-            && self.recovery_for.is_none()
-            && self
-                .recent_actions
-                .back()
-                .is_some_and(|event| event.advanced);
+        let successor = self.step_declared && binding.step != self.current_step;
         if scope.iter().any(|path| {
             if successor {
                 !path.starts_with(&self.workspace_root)
@@ -160,23 +167,12 @@ impl ExecutionState {
                 !self.allowed_scope.iter().any(|root| path.starts_with(root))
             }
         }) {
-            return Err(invalid("a step may narrow scope, never silently expand it"));
-        }
-        if self.recovery_for.is_some() && binding.step != self.current_step {
             return Err(invalid(
-                "finish recovery of the failed step before replacing it",
+                "a step may narrow scope; new steps must stay within the workspace",
             ));
         }
-        if self.step_declared
-            && binding.step != self.current_step
-            && !self
-                .recent_actions
-                .back()
-                .is_some_and(|event| event.advanced)
-        {
-            return Err(invalid(
-                "changing step requires observed progress on its predecessor",
-            ));
+        if binding.step != self.current_step {
+            self.clear_recovery();
         }
         self.current_step = binding.step;
         self.expected_output = binding.expected_output;
@@ -185,6 +181,9 @@ impl ExecutionState {
         Ok(())
     }
     fn prepare_inner(&mut self, tool: &dyn Tool, mut input: Value) -> Result<Value, ToolError> {
+        if let Some(scope) = self.resume_scope.take() {
+            self.allowed_scope = scope.iter().map(|path| normalized(path)).collect();
+        }
         let invalid =
             |reason: &str| ToolError::InvalidInput(format!("execution invariant: {reason}"));
         if let Some(binding) = input
@@ -193,68 +192,6 @@ impl ExecutionState {
         {
             self.bind_step(binding)?;
         }
-        if tool.recursive_search()
-            && input["path"]
-                .as_str()
-                .is_some_and(|p| normalized(&self.workspace_root.join(p)) == self.workspace_root)
-        {
-            if self
-                .allowed_scope
-                .first()
-                .is_some_and(|root| root != &self.workspace_root)
-                && input["fallback_reason"]
-                    .as_str()
-                    .is_none_or(|reason| reason.trim().is_empty())
-            {
-                input["path"] = Value::String(self.allowed_scope[0].to_string_lossy().into_owned());
-            } else if input["fallback_reason"]
-                .as_str()
-                .is_none_or(|reason| reason.trim().is_empty())
-            {
-                return Err(invalid(
-                    "workspace search requires necessary fallback_reason",
-                ));
-            }
-        }
-        if self.progress.no_progress
-            && self.recent_actions.iter().rev().take(WINDOW).any(|event| {
-                !event.advanced
-                    && event.tool == tool.name()
-                    && event.input_fingerprint == fingerprint(tool.name(), &input)
-            })
-        {
-            return Err(invalid(
-                "no_progress: choose a different action instead of repeating ineffective exploration",
-            ));
-        }
-        if self.recovery_attempts >= RECOVERY_LIMIT
-            && self.failed_action == Some(fingerprint(tool.name(), &input))
-        {
-            return Err(invalid(
-                "recovery retry limit: change strategy using a bounded repair before retrying",
-            ));
-        }
-        if self.progress.no_progress
-            && self
-                .progress
-                .tool_calls
-                .saturating_sub(self.progress.last_intervention)
-                >= RECOVERY_LIMIT
-            && tool.resources(&input).iter().all(|access| !access.write)
-            && self.failed_action != Some(fingerprint(tool.name(), &input))
-        {
-            return Err(invalid(
-                "no_progress exploration budget exhausted: produce or repair the expected output before more observations",
-            ));
-        }
-        let workspace_fallback = tool.recursive_search()
-            && self.recovery_for.is_none()
-            && input["fallback_reason"]
-                .as_str()
-                .is_some_and(|reason| !reason.trim().is_empty())
-            && input["path"].as_str().is_some_and(|path| {
-                normalized(&self.workspace_root.join(path)) == self.workspace_root
-            });
         let resources = tool.resources(&input);
         for resource in &resources {
             if let Resource::Path(raw_path) = &resource.resource
@@ -262,7 +199,6 @@ impl ExecutionState {
                     .allowed_scope
                     .iter()
                     .any(|root| normalized(raw_path).starts_with(root))
-                && !workspace_fallback
                 && !tool.runtime_owned_resources()
             {
                 return Err(invalid(&format!(
@@ -272,20 +208,12 @@ impl ExecutionState {
                 )));
             }
         }
-        if self.recovery_for.is_some()
-            && resources
-                .iter()
-                .any(|access| access.resource == Resource::All)
-            && self.failed_action != Some(fingerprint(tool.name(), &input))
-        {
-            return Err(invalid(
-                "unbounded recovery tool: use scoped tools or retry the failed operation",
-            ));
-        }
+        self.step_status = StepStatus::Running;
         Ok(input)
     }
     #[allow(clippy::too_many_lines)] // Keep event accounting and recovery transition atomic.
     pub fn record(&mut self, id: &str, tool: &dyn Tool, input: &Value, result: &ToolResult) {
+        self.step_status = StepStatus::Observed;
         let success = result.status == "success";
         // Read/list/search success alone is observation, not a goal state transition.
         // Unknown effects (shell/MCP) require explicit result evidence, never an assumed write.
@@ -341,32 +269,12 @@ impl ExecutionState {
             self.progress.no_progress = false;
         }
         if !success {
-            if self.recovery_for.is_none() {
-                self.resume_scope = Some(self.allowed_scope.clone());
+            if self.failed_action.is_none() {
                 self.recovery_for = Some(self.current_step.clone());
+                self.recovery_call_id = Some(id.into());
                 self.failed_action = Some(fingerprint(tool.name(), input));
                 self.failed_tool = Some(tool.name().into());
                 self.failed_paths = paths;
-                // Narrow recovery to the failing operation's parent when available.
-                let paths: Vec<_> = tool
-                    .resources(input)
-                    .into_iter()
-                    .filter_map(|r| match r.resource {
-                        Resource::Path(path) => Some(if path.is_dir() {
-                            path
-                        } else {
-                            path.parent().unwrap_or(&path).to_owned()
-                        }),
-                        _ => None,
-                    })
-                    .collect();
-                if !paths.is_empty()
-                    && paths
-                        .iter()
-                        .all(|path| self.allowed_scope.iter().any(|root| path.starts_with(root)))
-                {
-                    self.allowed_scope = paths;
-                }
             }
             self.recovery_attempts += 1;
             if self.recovery_attempts.is_multiple_of(RECOVERY_LIMIT) {
@@ -377,14 +285,7 @@ impl ExecutionState {
         } else if self.recovery_for.is_some()
             && (retry || (self.failed_action.is_none() && advanced))
         {
-            self.recovery_for = None;
-            self.failed_action = None;
-            self.failed_tool = None;
-            self.failed_paths.clear();
-            self.recovery_attempts = 0;
-            if let Some(scope) = self.resume_scope.take() {
-                self.allowed_scope = scope;
-            }
+            self.clear_recovery();
         } else if success && self.recovery_for.is_some() {
             self.recovery_attempts = 0;
         }
@@ -399,6 +300,17 @@ impl ExecutionState {
             input_fingerprint: fingerprint(tool.name(), input),
         });
     }
+    fn clear_recovery(&mut self) {
+        self.recovery_for = None;
+        self.recovery_call_id = None;
+        self.failed_action = None;
+        self.failed_tool = None;
+        self.failed_paths.clear();
+        self.recovery_attempts = 0;
+        if let Some(scope) = self.resume_scope.take() {
+            self.allowed_scope = scope;
+        }
+    }
     fn append_event(&mut self, event: ExecutionEvent) {
         self.recent_actions.push_back(event);
         while self.recent_actions.len() > WINDOW * 2 {
@@ -409,7 +321,6 @@ impl ExecutionState {
         {
             self.progress.no_progress = true;
             if self.recovery_for.is_none() {
-                self.resume_scope = Some(self.allowed_scope.clone());
                 self.recovery_for = Some(self.current_step.clone());
             }
             self.progress.strategy_changes += 1;
@@ -425,6 +336,7 @@ impl ExecutionState {
         result: &ToolResult,
         advanced: bool,
     ) {
+        self.step_status = StepStatus::Observed;
         let success = result.status == "success";
         self.progress.tool_calls += 1;
         self.total_tool_calls += 1;
@@ -488,8 +400,8 @@ impl ExecutionState {
             serde_json::json!({
                 "goal_id":self.goal_id,"overall_goal":self.overall_goal,"current_step":self.current_step,
                 "expected_output":self.expected_output,"allowed_scope":self.allowed_scope,"recovery_for":self.recovery_for,
-                "progress":self.progress,"total_tool_calls":self.history_complete.then_some(self.total_tool_calls),"known_tool_calls":self.total_tool_calls,"history_complete":self.history_complete,"actual_recent_tool_events":events,
-                "next_action":if self.progress.no_progress {"No progress: reconsider the step using the logged ineffective actions; choose a different bounded strategy. Do not repeat exploration."} else if self.recovery_for.is_some() {"Repair this specific failed step within scope, then retry it. After three failures switch strategy."} else {"Bind new steps with _ax_execution. Answer execution-history questions from actual events; omitted events are unknown, not zero calls."}
+                "step_status":self.step_status,"recovery_call_id":self.recovery_call_id,"failed_tool":self.failed_tool,"failed_resources":self.failed_paths,"progress":self.progress,"total_tool_calls":self.history_complete.then_some(self.total_tool_calls),"known_tool_calls":self.total_tool_calls,"history_complete":self.history_complete,"actual_recent_tool_events":events,
+                "next_action":if self.progress.no_progress {"No progress: consider retry, diagnosis or replanning using actual observations. Empty results and no-match are valid observations; tools remain available."} else if self.recovery_for.is_some() {"Consider retrying the failed operation, diagnosing with other tools, replanning or continuing an independent step. Recovery is advisory; permissions and resource boundaries still apply."} else {"Bind new steps with _ax_execution. Answer execution-history questions from actual events; omitted events are unknown, not zero calls."}
             })
         ))
     }

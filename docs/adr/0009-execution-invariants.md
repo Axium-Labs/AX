@@ -1,6 +1,10 @@
 # 0009. Goal-bound execution invariants
 
-Status: accepted
+Status: amended by [0014](0014-advisory-execution-policy.md)
+
+The predecessor-progress and recovery admission decisions below are historical.
+ADR 0014 retains resource/safety constraints and authoritative execution history,
+but replaces semantic execution gates with advisory orchestration policy.
 
 ## Context
 

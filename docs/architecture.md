@@ -271,11 +271,11 @@ interruptions suspend that goal for explicit resume. CLI exposes `ax run --sessi
 Successful ACP prompt responses return the goal ID in `_meta.axGoal.goal_id`.
 
 Tasks have pending/running/completed/failed/skipped states. Explicit `finish`
-controls advance the queue; task failures require a recovery opportunity first.
+controls advance the queue; recovery before failure is an orchestration choice.
 Tool failures and tool timeouts remain local, allowing independent tasks to
-continue. Recovery is bound to the failed execution step and its task directories.
-Unbounded recovery tools are rejected; successful retries restore the original
-step scope, and repeated failures require a different bounded strategy. Provider failures use classified attempt/time-bounded retry policy; configuration,
+continue. Recovery records the failed step, call ID, tool and path resources as
+advisory context. It never narrows scope or disables diagnostics, retries or
+subsequent subtasks. Provider failures use classified attempt/time-bounded retry policy; configuration,
 authentication, persistence and exhausted provider retries block the goal.
 
 Queue states are active/summarizing/suspended/completed/blocked/cancelled/superseded.
@@ -359,18 +359,26 @@ cannot leak indefinitely.
 `ExecutionState` lives in the kernel independently of conversation compression.
 It retains the original goal and identity, current step, expected output, task
 scope, failed-step recovery binding, bounded real completion events and progress.
-The execution model can declare a narrower step through `_ax_execution` on an
-ordinary tool call. A successor requires observed progress; recovery cannot
-replace the failed step or enlarge its directories. Scope admission uses declared
-resources after typed result substitution, before approval and execution.
+The execution model can declare step metadata through `_ax_execution` on an
+ordinary tool call. Within a step, declared scopes may narrow; a new step may
+select directories within the initial workspace after any observation. Scope
+admission checks declared resources after typed result substitution, before
+approval and execution. Empty results, no-match and failed calls all move the
+step from `running` to `observed`, permitting retry, replan, next step or an
+explicit failed task outcome without requiring positive progress.
 
-Eight consecutive calls without a declared state transition trigger
-`NoProgressDetector`. Read/list/search success alone is observation; new successful
-declared mutations, explicit result evidence and repaired retries count as progress.
-Repeated mutations/evidence are deduplicated. A stall binds recovery to the current
-step, injects its goal and ineffective actions and rejects repeated exploration.
-No separate planner/model request is made. See [context.md](context.md),
-[tools.md](tools.md) and [ADR 0009](adr/0009-execution-invariants.md).
+Eight consecutive calls without a declared state transition trigger an advisory
+`NoProgressDetector` projection. Read/list/search success is observation; new
+successful mutations, explicit result evidence and repaired retries count as
+progress. Repeated mutations/evidence are deduplicated. Neither this accounting
+nor recovery, retry counts or exploration counts restrict tool admission.
+Permissions, sandbox confinement, resource conflicts, dependencies, configured
+budgets/timeouts and cancellation remain enforced. Unknown shell/MCP effects
+retain exclusive resource leases. No separate planner/model request is made.
+Legacy checkpoints restore their original declared scope before tool admission.
+See [context.md](context.md), [tools.md](tools.md),
+[ADR 0009](adr/0009-execution-invariants.md) and
+[ADR 0014](adr/0014-advisory-execution-policy.md).
 
 
 ### Optional model-selected delegation

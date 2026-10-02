@@ -47,7 +47,7 @@ pub(super) fn input_schema(mut schema: Value) -> Value {
         schema["properties"] = serde_json::json!({});
     }
     if let Some(properties) = schema.get_mut("properties").and_then(Value::as_object_mut) {
-        properties.insert("_ax_execution".into(), serde_json::json!({"type":"object","properties":{"goal_id":{"type":"string"},"step":{"type":"string"},"expected_output":{"type":"string"},"scope":{"type":"array","items":{"type":"string"}}},"required":["goal_id","step","expected_output","scope"],"additionalProperties":false,"description":"Bind a step to the original goal ID, output and narrower directories. Runtime enforces scope and predecessor progress."}));
+        properties.insert("_ax_execution".into(), serde_json::json!({"type":"object","properties":{"goal_id":{"type":"string"},"step":{"type":"string"},"expected_output":{"type":"string"},"scope":{"type":"array","items":{"type":"string"}}},"required":["goal_id","step","expected_output","scope"],"additionalProperties":false,"description":"Bind a step to the original goal ID, output and directories. Runtime enforces resource scope. Any observation permits retry, replan or a new step."}));
         properties.insert("_ax_observe".into(), serde_json::json!({"type":"string","description":"JSON pointer to a true boolean in the actual result verifying the expected output; observation alone is not progress."}));
         properties.insert("_ax_depends_on".into(), serde_json::json!({"type":"array","items":{"type":"string"},"description":"Tool call IDs whose successful completion is required by this call."}));
     }

@@ -110,7 +110,6 @@ async fn twenty_three_tasks_first_fails_remaining_execute_and_only_summary_is_em
     let executions = Arc::new(Mutex::new(vec![]));
     let mut responses = vec![
         call("bad", "record_task", serde_json::json!({"task":1})),
-        finish("failed", "environment unavailable"), // rejected until recovery executes
         call("retry", "record_task", serde_json::json!({"task":1})),
         finish("failed", "environment unavailable after recovery"),
     ];
@@ -308,7 +307,6 @@ impl tool::Tool for HangingTool {
 async fn task_tool_timeout_recovery_then_continues_other_independent_tasks() {
     let provider = provider(vec![
         call("hang", "hang", serde_json::json!({})),
-        finish("failed", "timed out"),
         call("retry", "hang", serde_json::json!({})),
         finish("failed", "tool timeout after recovery"),
         finish("completed", "second complete"),
@@ -841,4 +839,25 @@ fn explicit_dependencies_validate_and_failed_dependency_skips_only_dependents() 
     assert_eq!(queue.tasks[2].status, TaskStatus::Running);
     assert!(!queue.delegate);
     assert!(task_queue::apply(&mut None,&serde_json::json!({"action":"start","overall_goal":"goal","tasks":["a","b"],"dependencies":[[1],[]]}),"g",None).is_err());
+}
+
+#[tokio::test]
+async fn failed_task_can_finish_without_forced_recovery_and_next_subtask_executes() {
+    let executions = Arc::new(Mutex::new(vec![]));
+    let provider = provider(vec![
+        call("failed", "record_task", serde_json::json!({"task":1})),
+        finish("failed", "unavailable input"),
+        call("independent", "record_task", serde_json::json!({"task":2})),
+        finish("completed", "done"),
+        text("summary"),
+    ]);
+    let mut kernel = kernel(provider).with_tool(RecordingTool(executions.clone()));
+    kernel
+        .run_turn("Goal\n1. unavailable task\n2. independent task", |_| {})
+        .await
+        .unwrap();
+    assert_eq!(*executions.lock().unwrap(), vec![1, 2]);
+    let queue = kernel.task_queue().unwrap();
+    assert_eq!(queue.tasks[0].status, TaskStatus::Failed);
+    assert_eq!(queue.tasks[1].status, TaskStatus::Completed);
 }

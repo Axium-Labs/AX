@@ -11,8 +11,8 @@ struct Input {
     query: String,
     #[serde(default = "default_limit")]
     max_results: usize,
-    #[serde(default)]
-    fallback_reason: Option<String>,
+    #[serde(default, rename = "fallback_reason")]
+    _fallback_reason: Option<String>,
 }
 const fn default_limit() -> usize {
     100
@@ -39,7 +39,7 @@ impl Tool for SearchTool {
         "Search exact literal text in a targeted file/subtree before reading code. Batch independent searches/reads in the SAME model response; the DAG executes them concurrently. Returns paths, 1-based lines and snippets; read small hit ranges next. Do not enumerate broad directories first."
     }
     fn input_schema(&self) -> Value {
-        json!({"type":"object","properties":{"path":{"type":"string"},"query":{"type":"string"},"max_results":{"type":"integer","minimum":1,"maximum":200},"fallback_reason":{"type":"string","description":"Why targeted search was insufficient and workspace-wide fallback is necessary"}},"required":["path","query"],"additionalProperties":false})
+        json!({"type":"object","properties":{"path":{"type":"string"},"query":{"type":"string"},"max_results":{"type":"integer","minimum":1,"maximum":200},"fallback_reason":{"type":"string","description":"Optional orchestration note explaining a broader search; does not gate execution"}},"required":["path","query"],"additionalProperties":false})
     }
     fn capability(&self, _input: &Value) -> Capability {
         Capability::FilesystemRead
@@ -61,15 +61,6 @@ impl Tool for SearchTool {
             return Err(ToolError::InvalidInput(
                 "empty query or invalid result limit".into(),
             ));
-        }
-        let root = input.path.canonicalize()?;
-        if root == std::env::current_dir()?.canonicalize()?
-            && input
-                .fallback_reason
-                .as_ref()
-                .is_none_or(|reason| reason.trim().is_empty())
-        {
-            return Err(ToolError::InvalidInput("workspace-wide search requires a necessary fallback_reason; choose a targeted subtree first".into()));
         }
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
         let mut pending = vec![(input.path, 0)];
@@ -193,15 +184,12 @@ mod tests {
         tokio::fs::remove_file(path).await.unwrap();
     }
     #[tokio::test]
-    async fn default_workspace_search_requires_explicit_fallback() {
-        assert!(
-            SearchTool
-                .execute(json!({"path":".","query":"anything"}))
-                .await
-                .unwrap_err()
-                .to_string()
-                .contains("fallback_reason")
-        );
+    async fn workspace_search_needs_no_semantic_fallback_permission() {
+        let output = SearchTool
+            .execute(json!({"path":".","query":"unlikely-ax-search-match-7b63"}))
+            .await
+            .unwrap();
+        assert!(serde_json::from_str::<Value>(&output).unwrap()["matches"].is_array());
     }
     #[tokio::test]
     async fn excludes_generated_directories_large_files_and_deep_subtrees() {

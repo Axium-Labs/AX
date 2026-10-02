@@ -326,32 +326,38 @@ to `RunContext.state_dir`, outside the disposable workspace. Tool execution keep
 approval rules and the existing DAG. This does not introduce an OS container.
 
 
-## Execution scope and bounded recovery
+## Execution scope and advisory recovery
 
 Ordinary tool arguments may include `_ax_execution` with `goal_id`, `step`,
 `expected_output` and `scope`. The scheduler resolves result references first;
-the kernel validates the binding and declared path resources before tool execution,
-then strips runtime-only metadata. `_ax_observe` may name a JSON pointer to an
-actual true boolean verifying the expected output; repeated evidence does not
-reset stagnation. After a stall, only three fresh observations are admitted
-before the runtime requires a repair/output-producing action. Permissions remain independently declared by each tool.
+the kernel validates the binding and declared path resources before execution,
+then strips runtime-only metadata. New steps may select directories within the
+initial workspace; the same step may narrow its scope. Scope expansion beyond
+that workspace is rejected. `_ax_observe` optionally names a JSON pointer to an
+actual true boolean verifying output; repeated evidence does not reset stagnation.
+Every completed result is an observation, including empty/no-match and failure.
 
-Recovery retains the failed step. Filesystem failures narrow recovery to the
-operation's directory within the existing scope. Only a successful retry of that
-operation (including corrected arguments on the same resource) closes failure
-recovery and restores the previous scope. After three consecutive failures the
-runtime rejects another identical retry until a bounded repair changes strategy.
-Tools with unknown/global effects may retry the exact failed operation, but cannot
-launch new unbounded recovery commands. Tool-owned runtime storage is explicitly
-declared through `runtime_owned_resources`; memory uses this for its private
-session database, which is outside disposable workspaces. This declaration is
-for owned storage, not caller-selected paths. Embedders can choose an initial
-workspace with `AgentKernel::with_execution_scope` and must bind relative tool
-paths to that workspace.
+Progress, recovery, retries and replanning are orchestration policy. Stagnation
+and repeated failures produce advice, never execution rejection. A failed
+operation can retry; search/read/list/shell/MCP can diagnose or recover; a model
+can switch steps or finish a failed task and continue independent subtasks.
+Recovery metadata identifies the failed step, tool call and declared resources;
+it does not narrow the declared scope or propagate a global tool lock. Old
+checkpoints with failure-derived narrowed scopes restore their original scope
+before admission. Permission, sandbox, resource leases, dependencies, configured
+budgets/timeouts and cancellation remain independent hard constraints.
 
-Recursive searches default to the step subtree. A workspace-wide fallback needs
-an explicit nonempty `fallback_reason`, remains inside the initial workspace,
-and is unavailable outside the failed-step scope during recovery. Search traverses
+Tool-owned runtime storage is explicitly declared through
+`runtime_owned_resources`; memory uses it for its private session database.
+This declaration covers owned storage, not caller-selected paths. Embedders can
+choose an initial workspace with `AgentKernel::with_execution_scope` and must
+bind relative tool paths to that workspace. Unknown/global tool effects still
+use an exclusive resource lease and their declared permission/sandbox boundary.
+
+Recursive searches respect the current declared scope. Broader searches can
+explicitly bind a new step within the workspace. `fallback_reason` is an optional
+orchestration note and never grants access outside the resource scope.
+Search traverses
 at most 2,000 entries, eight directory levels and two seconds; skips symlinks,
 binary files and files larger than 1 MB; and excludes `.git`, build/target/dist,
 node_modules, child-runs, caches, virtual environments, runtime storage and vendor

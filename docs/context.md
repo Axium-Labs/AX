@@ -185,7 +185,9 @@ snapshots and bounded history pages. Compression changes conversation only and
 cannot replace execution state with a model-generated guess.
 
 Each execution request receives a replaceable `[ax-execution]` projection with
-the goal, step, expected output, scopes, recovery and actual events. Normal requests
+the goal, step, observation status, expected output, scopes, recovery and actual events.
+Progress/recovery projections are advisory: empty results, no-match and failures
+are observations and never remove tool access. Normal requests
 show two recent events; new user turns and stalls show up to eight, fitted against
 `ContextBudget`. This also supplies history/progress questions without matching
 language-specific keywords. Missing older events mean unknown details, never zero

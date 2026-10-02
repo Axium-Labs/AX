@@ -260,10 +260,6 @@ impl TaskQueue {
         if status != TaskStatus::Completed && reason.trim().is_empty() {
             return Err("failed/skipped tasks require a reason".into());
         }
-        if status == TaskStatus::Failed && task.recovery_attempts == 0 {
-            task.failure_reason = Some(reason);
-            return Err("attempt recovery first: repair the failed step within its declared directories and runtime; do not scan unrelated workspace projects, then retry or use an alternative".into());
-        }
         task.status = status;
         task.outcome = Some(reason.clone());
         task.failure_reason = (status != TaskStatus::Completed).then_some(reason);
@@ -332,7 +328,7 @@ impl TaskQueue {
 pub(crate) fn spec() -> ToolSpec {
     ToolSpec { kind: "function", function: FunctionSpec {
         name: TOOL_NAME.into(),
-        description: "Create structured tasks only when you explicitly decide decomposition is useful. Lists are formatting hints, never authorization to split. Use alone in a round. execution=controller keeps work in this model; execution=children explicitly delegates complete task inputs to isolated children. dependencies are zero-based prior task indices. Finish the current task with completed/failed/skipped and an outcome. Attempt bounded recovery before failure. block/cancel stop the goal. Text-only responses never advance tasks.".into(),
+        description: "Create structured tasks only when you explicitly decide decomposition is useful. Lists are formatting hints, never authorization to split. Use alone in a round. execution=controller keeps work in this model; execution=children explicitly delegates complete task inputs to isolated children. dependencies are zero-based prior task indices. Finish the current task with completed/failed/skipped and an outcome. Consider recovery before failure; recovery is advisory. block/cancel stop the goal. Text-only responses never advance tasks.".into(),
         parameters: json!({"type":"object","properties":{
             "action":{"type":"string","enum":["start","finish","block","cancel"]},
             "execution":{"type":"string","enum":["controller","children"]},"dependencies":{"type":"array","items":{"type":"array","items":{"type":"integer","minimum":0}}},
