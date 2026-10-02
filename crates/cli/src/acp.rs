@@ -19,7 +19,10 @@ use tokio::{
 };
 use uuid::Uuid;
 
-use crate::{Cli, ReplState, context_budget, model_selection, run_prompt_with};
+use crate::{
+    args::Cli, commands::run::run_prompt_with, model_selection, repl::ReplState,
+    runtime::context_budget,
+};
 use runtime_core::{AgentEvent, ApprovalPolicy};
 use tool::{Capability, PermissionDecision, PermissionStore, SafetyLevel, ToolPermission};
 
@@ -145,7 +148,7 @@ fn error(out: &Outbox, id: Value, code: i32, message: impl AsRef<str>) {
 /// server, so this read-only catalog stays offline and reports the tools AX
 /// itself ships; `_ax/mcp` reports the servers.
 fn builtin_tools() -> Vec<Value> {
-    let mut tools = crate::tools(&[])
+    let mut tools = crate::runtime::tools(&[])
         .iter()
         .map(|tool| (tool.name().to_owned(), tool.description().to_owned()))
         .collect::<Vec<_>>();
@@ -218,7 +221,7 @@ fn update(out: &Outbox, session_id: &str, event: AgentEvent, calls: &mut HashMap
 /// ACP adapter uses the same prompt composition and Agent Loop as CLI/TUI.
 pub(super) async fn run_session_prompt(
     state: &mut ReplState,
-    selection: &crate::ModelSelection,
+    selection: &crate::model_selection::ModelSelection,
     approval: Arc<dyn ApprovalPolicy>,
     prompt: &str,
     out: &Outbox,
@@ -236,7 +239,7 @@ pub(super) async fn run_session_prompt(
 /// silently do nothing.
 fn provider_catalog(codex_auth: Option<&PathBuf>) -> Vec<Value> {
     let credentialed = crate::providers::credentialed_providers(codex_auth);
-    let stored = model::AuthStorage::new(crate::ax_auth_path())
+    let stored = model::AuthStorage::new(crate::bootstrap::ax_auth_path())
         .provider_ids()
         .unwrap_or_default();
     let snapshot = crate::tui::catalog_refresh::cached_snapshot(&PathBuf::new(), codex_auth);
@@ -254,7 +257,7 @@ fn provider_catalog(codex_auth: Option<&PathBuf>) -> Vec<Value> {
             },
             "unsupported_reason":model::provider_unsupported_reason(spec.id),
             "source":if !configured { None } else if stored.iter().any(|id| id == spec.id) { Some("AX") } else { Some("environment") },
-            "model_source": if models.is_empty() { "none" } else if crate::ax_models_dir().join(format!("{}.json", spec.id)).is_file() { "cache" } else { "fallback" },
+            "model_source": if models.is_empty() { "none" } else if crate::bootstrap::ax_models_dir().join(format!("{}.json", spec.id)).is_file() { "cache" } else { "fallback" },
             "models":models})
     }).collect()
 }
@@ -921,7 +924,7 @@ pub async fn run(cli: &Cli, data_dir: PathBuf, skills_dir: PathBuf) -> Result<()
                     .get(&session_id)
                     .cloned();
                 let task_cwd = cwd.clone();
-                let task_budget = crate::execution_budget(cli);
+                let task_budget = crate::runtime::execution_budget(cli);
                 let task_child_timeout = cli.child_timeout_secs;
                 let task = tokio::spawn(async move {
                     let result: Result<String> = async {
@@ -1110,7 +1113,7 @@ pub async fn run(cli: &Cli, data_dir: PathBuf, skills_dir: PathBuf) -> Result<()
             }
             "_ax/skills" | "_ax/mcp" | "_ax/agents" | "_ax/scopedCapabilities" => {
                 let result = (|| -> Result<Value> {
-                    let root = crate::discover_project_root(&std::env::current_dir()?);
+                    let root = crate::bootstrap::discover_project_root(&std::env::current_dir()?);
                     let mut state = ReplState::new_in_project(
                         data_dir.clone(),
                         skills_dir.clone(),

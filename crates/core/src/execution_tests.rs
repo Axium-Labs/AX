@@ -1,8 +1,15 @@
 use super::*;
 use async_trait::async_trait;
-use model::{FunctionCall, ModelResponse, Role, ToolCall};
-use serde_json::json;
-use std::{path::PathBuf, sync::Mutex};
+use model::{
+    FunctionCall, Message, ModelError, ModelProvider, ModelRequest, ModelResponse, Role, ToolCall,
+};
+use serde_json::{Value, json};
+use std::{
+    collections::VecDeque,
+    path::PathBuf,
+    sync::{Arc, Mutex},
+};
+use tool::ToolRegistry;
 
 fn state(root: &std::path::Path) -> ExecutionState {
     let mut state = ExecutionState::default();

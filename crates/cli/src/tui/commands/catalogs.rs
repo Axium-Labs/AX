@@ -1,6 +1,6 @@
 //! Skill, tool, and MCP metadata managers.
 use super::{BottomPane, ReplState, Result, SurfaceItem, SurfaceView, item};
-use crate::tools;
+use crate::runtime::tools;
 use tool::Tool;
 
 fn available_tools(state: &ReplState) -> Vec<String> {

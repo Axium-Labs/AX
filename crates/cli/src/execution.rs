@@ -98,7 +98,7 @@ fn linux_path(path: &std::ffi::OsStr) -> Result<String> {
         reason = "The Windows launcher performs fallible WSL setup"
     )
 )]
-pub(crate) fn launch(cli: &crate::Cli) -> Result<Option<i32>> {
+pub(crate) fn launch(cli: &crate::args::Cli) -> Result<Option<i32>> {
     #[cfg(windows)]
     {
         use std::process::Stdio;
@@ -110,15 +110,14 @@ pub(crate) fn launch(cli: &crate::Cli) -> Result<Option<i32>> {
         let mut args = Vec::new();
         let mut path_next = false;
         let archive_path = match &cli.command {
-            Some(crate::Command::Export { path, .. } | crate::Command::Import { path, .. }) => {
-                Some(path.as_os_str())
-            }
             Some(
-                crate::Command::Skill {
-                    command: crate::CapabilityCommand::Import { path, .. },
+                crate::args::Command::Export { path, .. }
+                | crate::args::Command::Import { path, .. }
+                | crate::args::Command::Skill {
+                    command: crate::args::CapabilityCommand::Import { path, .. },
                 }
-                | crate::Command::Mcp {
-                    command: crate::CapabilityCommand::Import { path, .. },
+                | crate::args::Command::Mcp {
+                    command: crate::args::CapabilityCommand::Import { path, .. },
                 },
             ) => Some(path.as_os_str()),
             _ => None,
@@ -152,7 +151,7 @@ pub(crate) fn launch(cli: &crate::Cli) -> Result<Option<i32>> {
             );
             args.push(text);
         }
-        let acp = matches!(cli.command, Some(crate::Command::Acp));
+        let acp = matches!(cli.command, Some(crate::args::Command::Acp));
         let mut command = wsl_command();
         command
             .args([

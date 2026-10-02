@@ -183,7 +183,7 @@ fn process(
         return Ok(false);
     }
     let lock_path = root.join("writer.lock");
-    super::plain(&lock_path)?;
+    crate::storage::plain(&lock_path)?;
     let lock = fs::OpenOptions::new()
         .create(true)
         .truncate(false)

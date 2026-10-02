@@ -23,8 +23,11 @@ pub(crate) fn initialize(
     skills: Option<PathBuf>,
 ) -> Result<(PathBuf, PathBuf)> {
     migrate_home()?;
-    let directories = crate::resolve_directories(cwd, data, skills);
-    migrate_project(&crate::discover_project_root(cwd), &directories.0)?;
+    let directories = crate::bootstrap::resolve_directories(cwd, data, skills);
+    migrate_project(
+        &crate::bootstrap::discover_project_root(cwd),
+        &directories.0,
+    )?;
     Ok(directories)
 }
 

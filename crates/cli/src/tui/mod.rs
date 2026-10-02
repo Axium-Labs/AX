@@ -61,9 +61,11 @@ use startup::StartupInfo;
 use transcript::{Transcript, TranscriptKind};
 
 use crate::{
-    ModelResolution, ModelSelection, PermissionDecision, PermissionStore, ReplState,
-    model_selection, run_prompt_with,
+    commands::run::run_prompt_with,
+    model_selection::{self, ModelResolution, ModelSelection},
+    repl::ReplState,
 };
+use tool::{PermissionDecision, PermissionStore};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 const ACTIVE_POLL: Duration = Duration::from_millis(25);
@@ -1096,7 +1098,7 @@ mod tests {
 
     fn selection() -> ModelSelection {
         ModelSelection {
-            provider: crate::ProviderKind::Deepseek,
+            provider: crate::model_selection::ProviderKind::Deepseek,
             provider_id: "deepseek".to_owned(),
             endpoint: None,
             model: "deepseek-chat".to_owned(),
@@ -1366,7 +1368,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             state.permissions.get("filesystem-write"),
-            crate::PermissionDecision::Deny
+            tool::PermissionDecision::Deny
         );
         let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
         terminal

@@ -37,7 +37,11 @@ use super::bottom_pane::{
 use super::catalog_refresh;
 use super::{App, BottomPane, TranscriptKind};
 use crate::config::{AxConfig, InferenceMode};
-use crate::{ModelSelection, PermissionDecision, ProviderKind, ReplState};
+use crate::{
+    model_selection::{ModelSelection, ProviderKind},
+    repl::ReplState,
+};
+use tool::PermissionDecision;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SlashPresentation {
@@ -542,7 +546,7 @@ fn memory_root() -> Box<dyn super::bottom_pane::PaneView> {
     )
 }
 
-fn permission_items(config: &crate::PermissionStore) -> Vec<SurfaceItem> {
+fn permission_items(config: &tool::PermissionStore) -> Vec<SurfaceItem> {
     vec![
         item("shell", "Shell", &config.get("shell").to_string()),
         item(
@@ -565,7 +569,7 @@ fn permission_items(config: &crate::PermissionStore) -> Vec<SurfaceItem> {
     ]
 }
 
-fn permissions(config: &crate::PermissionStore) -> Box<dyn super::bottom_pane::PaneView> {
+fn permissions(config: &tool::PermissionStore) -> Box<dyn super::bottom_pane::PaneView> {
     SurfaceView::manager(
         "Permissions",
         "permissions",
@@ -703,7 +707,7 @@ pub(super) fn open_provider_login(pane: &mut BottomPane) {
 }
 
 fn open_login_provider_list(pane: &mut BottomPane, auth_type: &str) -> Result<()> {
-    let auth = AuthStorage::new(crate::ax_auth_path());
+    let auth = AuthStorage::new(crate::bootstrap::ax_auth_path());
     let stored = auth.provider_ids()?;
     let items = PROVIDERS
         .iter()
@@ -745,7 +749,7 @@ fn open_login_provider_list(pane: &mut BottomPane, auth_type: &str) -> Result<()
 }
 
 fn open_provider_logout(_state: &ReplState, app: &mut App, pane: &mut BottomPane) -> Result<()> {
-    let auth = AuthStorage::new(crate::ax_auth_path());
+    let auth = AuthStorage::new(crate::bootstrap::ax_auth_path());
     let items = auth
         .provider_ids()?
         .into_iter()
@@ -846,7 +850,7 @@ fn sessions_across_projects(
 ) -> Result<Vec<(memory::Session, crate::session_projects::ProjectLocation)>> {
     let mut sessions = Vec::new();
     for project in projects {
-        let database = crate::database_path(&project.data_dir);
+        let database = crate::bootstrap::database_path(&project.data_dir);
         if !database.is_file() {
             continue;
         }
@@ -879,13 +883,13 @@ fn open_session(
         state.switch_project(&project)?;
     }
     app.directory = state.project_root.display().to_string();
-    let budget = crate::context_budget(selection, &state.mcp_tools);
+    let budget = crate::runtime::context_budget(selection, &state.mcp_tools);
     if state.open_session(id, &budget)? {
         let history = state
             .store()?
             .load_messages(id, None, crate::session_restore::HISTORY_PAGE_SIZE)?
             .iter()
-            .map(crate::restore_message)
+            .map(crate::repl::restore_message)
             .collect::<Vec<_>>();
         super::restore_transcript(app, &history, selection);
         app.push(TranscriptKind::Status, "Session resumed");
@@ -927,7 +931,7 @@ pub(super) async fn apply_modal_action(
             apply_model_info(selection, state, app, model, Some(effort));
         }
         ModalAction::ApiKeyConfigured { provider, key } => {
-            AuthStorage::new(crate::ax_auth_path()).store_api_key(&provider, key)?;
+            AuthStorage::new(crate::bootstrap::ax_auth_path()).store_api_key(&provider, key)?;
             pane.clear_views();
             state.invalidate_runtime();
             app.push(
@@ -987,7 +991,7 @@ pub(super) async fn apply_modal_action(
                 .into_iter()
                 .find(|project| project.id == project_id)
             {
-                memory::MemoryStore::open(crate::database_path(&project.data_dir))?
+                memory::MemoryStore::open(crate::bootstrap::database_path(&project.data_dir))?
                     .delete_session(session_id)?;
             }
             app.push(
@@ -1016,7 +1020,7 @@ pub(super) async fn apply_modal_action(
                 .into_iter()
                 .find(|project| project.id == project_id)
             {
-                memory::MemoryStore::open(crate::database_path(&project.data_dir))?
+                memory::MemoryStore::open(crate::bootstrap::database_path(&project.data_dir))?
                     .rename_session(session_id, &title)?;
             }
             app.push(
@@ -1305,7 +1309,7 @@ pub(super) async fn apply_modal_action(
                     match provider.auth {
                         ProviderAuthKind::CodexOAuth => {
                             pane.clear_views();
-                            start_codex_login(app, login_tx, crate::ax_auth_path());
+                            start_codex_login(app, login_tx, crate::bootstrap::ax_auth_path());
                         }
                         ProviderAuthKind::ApiKey if model::provider_supports_oauth(provider.id) => {
                             pane.clear_views();
@@ -1392,14 +1396,14 @@ pub(super) async fn apply_modal_action(
                     login.abort();
                 }
                 if id == "openai-codex" {
-                    AuthStorage::new(crate::ax_auth_path()).remove("openai-codex")?;
+                    AuthStorage::new(crate::bootstrap::ax_auth_path()).remove("openai-codex")?;
                     state.invalidate_runtime();
                     app.push(
                         TranscriptKind::Status,
                         "OpenAI Codex credentials removed from AX auth storage",
                     );
                 } else {
-                    let removed = AuthStorage::new(crate::ax_auth_path()).remove(&id)?;
+                    let removed = AuthStorage::new(crate::bootstrap::ax_auth_path()).remove(&id)?;
                     state.invalidate_runtime();
                     app.push(
                         if removed {
@@ -1533,7 +1537,7 @@ mod session_picker_tests {
         let mut state =
             ReplState::new_in_project(a.join(".ax"), a.join("skills"), None, &a).unwrap();
         state.store().unwrap().create_session("Alpha").unwrap();
-        memory::MemoryStore::open(crate::database_path(&b.join(".ax")))
+        memory::MemoryStore::open(crate::bootstrap::database_path(&b.join(".ax")))
             .unwrap()
             .create_session("Beta")
             .unwrap();

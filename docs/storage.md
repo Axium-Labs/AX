@@ -207,7 +207,8 @@ legacy `config.toml`, saves the result as `config.json`, and continues.
 
 | Concern | Code |
 |---|---|
-| Storage repository, sync, schema | `crates/memory/src/lib.rs` |
+| Storage repository, sync | `crates/memory/src/store.rs`, `crates/memory/src/events.rs` |
+| Schema and migrations | `crates/memory/src/schema.rs`, `crates/memory/src/migrations.rs` |
 | Scoped memories | `crates/memory/src/scoped.rs` |
 | Project identity migration | `crates/cli/src/project_identity.rs` |
 | Config migration | `crates/cli/src/config.rs` |

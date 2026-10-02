@@ -127,7 +127,7 @@ packages. See [evolution.md](evolution.md) for scheduling, lifecycle and control
 |---|---|
 | Parsing, validation, discovery, routing | `crates/skill/src/lib.rs` |
 | Unicode features and similarity (shared with memory retrieval) | `crates/lexical/src/lib.rs` |
-| CLI routing and context injection | `crates/cli/src/main.rs` |
+| CLI routing and context injection | `crates/cli/src/repl/state.rs` (`prepare_skill_context`, `ranked_skill_catalog_context`) |
 | Enable and disable | `crates/cli/src/skill_settings.rs` |
 | `/skills` UI | `crates/cli/src/tui/commands/catalogs.rs` |
 

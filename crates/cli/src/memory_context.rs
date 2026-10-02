@@ -1,5 +1,5 @@
 //! Scoped memory pipeline for the CLI: user extraction -> retrieval -> context.
-use crate::ReplState;
+use crate::repl::ReplState;
 use anyhow::Result;
 use memory::{MemoryRecord, MemoryScope, MemoryStore};
 use model::Message;

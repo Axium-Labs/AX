@@ -1,8 +1,16 @@
 #![allow(clippy::unnecessary_wraps, clippy::needless_pass_by_value)]
 use super::*;
-use model::{FunctionCall, ModelResponse, ToolCall};
-use std::sync::Mutex;
+use async_trait::async_trait;
+use model::{
+    FunctionCall, Message, ModelError, ModelProvider, ModelRequest, ModelResponse, ToolCall,
+};
+use serde_json::Value;
+use std::{
+    collections::VecDeque,
+    sync::{Arc, Mutex},
+};
 use task_queue::{ARCHIVE_PREFIX, PROGRESS_PREFIX, STATE_PREFIX, TaskStatus};
+use tool::{SafetyLevel, ToolError, ToolRegistry};
 
 struct QueueProvider {
     requests: Mutex<Vec<ModelRequest>>,

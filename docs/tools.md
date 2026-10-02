@@ -47,7 +47,8 @@ permissions from tool-name strings (e.g. `mcp__`/`::`).
 | `web` | `search` up to 4 concurrent queries via a replaceable provider; `fetch` up to 6 concurrent HTTP(S) GETs as cleaned Markdown/text; merged, deduplicated, partial failures tolerated | `Network` |
 | `view_image` | Native image content from a workspace file, when the model supports vision | `FilesystemRead` |
 
-The registry is assembled per composition root (`cli::tools`): the built-ins,
+The registry is assembled per composition root (`runtime::tools` in
+`crates/cli/src/runtime/builder.rs`): the built-ins,
 then discovered MCP proxies.
 
 ### Tool use and result protocol
@@ -304,7 +305,7 @@ existing recovery placeholders.
 | `Capability`, `PermissionStore` | `crates/tool/src/permission.rs` |
 | Telemetry | `crates/tool/src/telemetry.rs` |
 | Runtime scheduling and resource locks | `crates/core/src/scheduler.rs`, `crates/tool/src/resources.rs` |
-| Registry assembly, approval wiring | `crates/cli/src/main.rs` |
+| Registry assembly, approval wiring | `crates/cli/src/runtime/builder.rs`, `crates/cli/src/bootstrap.rs` |
 | `/permissions`, `/tools` views | `crates/cli/src/tui/commands.rs`, `crates/cli/src/tui/commands/catalogs.rs` |
 
 ## Shell and child runtime awareness

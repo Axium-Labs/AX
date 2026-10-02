@@ -1,5 +1,5 @@
 //! Browser login composed with AX's existing provider credential/catalog stores.
-use crate::{AuthCommand, WorkBuddyLoginRegion};
+use crate::args::{AuthCommand, WorkBuddyLoginRegion};
 use anyhow::{Result, anyhow};
 use model::workbuddy::WorkBuddyRegion;
 
@@ -15,8 +15,9 @@ pub(crate) async fn login_workbuddy(
         login.auth_url
     ));
     let credential = login.wait().await?;
-    model::AuthStorage::new(crate::ax_auth_path()).store_oauth(region.provider_id(), credential)?;
-    let cache = crate::ax_models_dir().join(format!("{}.json", region.provider_id()));
+    model::AuthStorage::new(crate::bootstrap::ax_auth_path())
+        .store_oauth(region.provider_id(), credential)?;
+    let cache = crate::bootstrap::ax_models_dir().join(format!("{}.json", region.provider_id()));
     match std::fs::remove_file(cache) {
         Ok(()) => {}
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -27,12 +28,12 @@ pub(crate) async fn login_workbuddy(
     }
     // This refresh is awaited: exiting the CLI must not lose the model cache.
     let provider = model::workbuddy::WorkBuddyProvider::for_region(
-        model::AuthStorage::new(crate::ax_auth_path()),
+        model::AuthStorage::new(crate::bootstrap::ax_auth_path()),
         "catalog-only".into(),
         128_000,
         region,
     )?;
-    let catalog = model::ModelRegistry::new(crate::ax_models_dir())
+    let catalog = model::ModelRegistry::new(crate::bootstrap::ax_models_dir())
         .discover(&provider)
         .await;
     if let Some(warning) = catalog.warning {
@@ -92,7 +93,7 @@ async fn login_codex() -> Result<()> {
     let auth = model::begin().await?;
     eprintln!("{}", auth.prompt());
     let tokens = auth.poll_and_exchange().await?;
-    model::AuthStorage::new(crate::ax_auth_path()).store_oauth(
+    model::AuthStorage::new(crate::bootstrap::ax_auth_path()).store_oauth(
         "openai-codex",
         model::OAuthCredential {
             access: tokens.access_token,
@@ -120,11 +121,11 @@ mod tests {
     use clap::Parser;
     #[test]
     fn browser_auth_cli_and_model_provider_use_native_workbuddy() {
-        let cli = crate::Cli::try_parse_from(["ax", "auth", "login", "workbuddy"]).unwrap();
+        let cli = crate::args::Cli::try_parse_from(["ax", "auth", "login", "workbuddy"]).unwrap();
         assert!(
-            matches!(cli.command, Some(crate::Command::Auth { command: crate::AuthCommand::Login {provider, ..} }) if provider == "workbuddy")
+            matches!(cli.command, Some(crate::args::Command::Auth { command: crate::args::AuthCommand::Login {provider, ..} }) if provider == "workbuddy")
         );
-        let cli = crate::Cli::try_parse_from([
+        let cli = crate::args::Cli::try_parse_from([
             "ax",
             "--provider",
             "workbuddy",
@@ -155,8 +156,8 @@ mod tests {
             if let Some(flag) = flag {
                 args.extend(["--region", flag]);
             }
-            let cli = crate::Cli::try_parse_from(args).unwrap();
-            let Some(crate::Command::Auth {
+            let cli = crate::args::Cli::try_parse_from(args).unwrap();
+            let Some(crate::args::Command::Auth {
                 command: AuthCommand::Login { provider, region },
             }) = cli.command
             else {
@@ -166,8 +167,15 @@ mod tests {
         }
         assert!(selected_region("workbuddy-cn", Some(WorkBuddyLoginRegion::Intl)).is_err());
         assert!(
-            crate::Cli::try_parse_from(["ax", "auth", "login", "workbuddy", "--region", "invalid"])
-                .is_err()
+            crate::args::Cli::try_parse_from([
+                "ax",
+                "auth",
+                "login",
+                "workbuddy",
+                "--region",
+                "invalid"
+            ])
+            .is_err()
         );
         assert!(model::provider_supported("workbuddy-cn"));
         assert_eq!(

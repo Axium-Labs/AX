@@ -3,7 +3,7 @@ use std::collections::BTreeSet;
 
 use anyhow::Result;
 
-use crate::ReplState;
+use crate::repl::ReplState;
 
 impl ReplState {
     pub(crate) fn disabled_skills(&self) -> Result<BTreeSet<String>> {
@@ -32,7 +32,8 @@ impl ReplState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Message, active_skill_name};
+    use crate::repl::active_skill_name;
+    use model::Message;
 
     #[test]
     fn toggle_persists_affects_routing_and_resume_without_deleting_history() {

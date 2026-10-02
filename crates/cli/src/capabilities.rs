@@ -1,6 +1,7 @@
 //! Composition adapters for the single shared scope registry and manager.
-use crate::{McpConfig, ReplState};
+use crate::repl::ReplState;
 use anyhow::{Context, Result, bail};
+use mcp::McpConfig;
 use scoped::{Scope, ScopePolicy, ScopedRegistry};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -71,7 +72,7 @@ fn skill_definitions(roots: &[PathBuf]) -> Result<Definitions> {
     }
     Ok(catalog
         .statuses(
-            crate::tools(&[])
+            crate::runtime::tools(&[])
                 .names()
                 .into_iter()
                 .chain(["mcp", "memory"]),
@@ -327,7 +328,7 @@ fn add_definition(
 impl ReplState {
     pub(crate) fn configure_scoped_subagents(&mut self) -> Result<()> {
         let state = self;
-        let mut subagent_config = crate::AxConfig::load()?.subagent;
+        let mut subagent_config = crate::config::AxConfig::load()?.subagent;
         if let Some(project) =
             scoped::read_document(&state.project_root.join(".ax/config.toml"))?.get("subagent")
         {
@@ -534,7 +535,7 @@ impl ReplState {
         self.mcp_tools.clear();
         // Raw history stays intact; stale active Skill context is removed before reuse.
         self.loaded_messages
-            .retain(|message| crate::active_skill_name(message).is_none());
+            .retain(|message| crate::repl::active_skill_name(message).is_none());
         self.active_skills.clear();
         Ok(())
     }
@@ -628,7 +629,7 @@ mod tests {
             .manage_capability(Kind::Mcp, Scope::Project, "enable", "off", None)
             .unwrap();
         assert!(state.effective_mcp_config().unwrap().servers["off"].enabled);
-        assert_eq!(crate::McpManager::new(config).connected_server_count(), 0);
+        assert_eq!(mcp::McpManager::new(config).connected_server_count(), 0);
         // Agent manifests refer to absent bodies: listing and resolution still succeeded.
         assert!(
             state

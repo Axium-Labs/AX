@@ -1,4 +1,7 @@
+use std::{fs, path::PathBuf};
+
 use super::*;
+use crate::storage::screen;
 
 struct Fixture {
     root: PathBuf,

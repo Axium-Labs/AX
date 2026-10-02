@@ -812,7 +812,7 @@ fn merge(
                 session.updated_at
             ],
         )?;
-        let final_path = super::event_path(&store.events_dir, &session.id)?;
+        let final_path = crate::events::event_path(&store.events_dir, &session.id)?;
         if final_path.exists() {
             return Err(BackupError::Invalid(format!(
                 "session event path already exists: {}",

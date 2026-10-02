@@ -130,7 +130,7 @@ timeout.
 | Auth storage | `crates/model/src/auth.rs` |
 | Model catalog | `crates/model/src/registry.rs` |
 | User config | `crates/cli/src/config.rs` |
-| Provider detection, CLI resolution | `crates/cli/src/providers.rs`, `crates/cli/src/model_selection.rs` |
+| Provider detection, CLI resolution (`ModelSelection`, `ProviderKind`) | `crates/cli/src/providers.rs`, `crates/cli/src/model_selection.rs` |
 | `/login`, `/logout`, `/model` | `crates/cli/src/tui/commands.rs` |
 
 ## Catalog and connection status in Crew

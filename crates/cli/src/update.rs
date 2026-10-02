@@ -787,7 +787,7 @@ mod tests {
     #[test]
     fn parses_update_flag_without_a_command() {
         use clap::Parser;
-        let cli = super::super::Cli::try_parse_from(["ax", "--update"]).unwrap();
+        let cli = crate::args::Cli::try_parse_from(["ax", "--update"]).unwrap();
         assert!(cli.update);
     }
 }

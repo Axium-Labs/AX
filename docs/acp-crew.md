@@ -1,6 +1,6 @@
 # ACP and AX Crew integration
 
-`ax acp` is an additive [Agent Client Protocol v1](https://agentclientprotocol.com/protocol/v1/initialization) stdio adapter in `crates/cli/src/acp.rs`. It uses the existing CLI composition root: `ReplState` creates or restores sessions and `run_prompt_with` invokes `AgentKernel::run_turn_checkpointed`. It does not implement a second model loop, tool registry, memory store, or credential store.
+`ax acp` is an additive [Agent Client Protocol v1](https://agentclientprotocol.com/protocol/v1/initialization) stdio adapter in `crates/cli/src/acp.rs`. It uses the existing CLI composition root: `ReplState` (`crates/cli/src/repl/state.rs`) creates or restores sessions and `run_prompt_with` (`crates/cli/src/commands/run.rs`) invokes `AgentKernel::run_turn_checkpointed`. It does not implement a second model loop, tool registry, memory store, or credential store.
 
 
 CLI/TUI/ACP all bind the same LocalChildHost and child budget through

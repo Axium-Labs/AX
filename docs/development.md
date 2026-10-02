@@ -84,8 +84,8 @@ documented in [web-latency.md](web-latency.md).
 2. If the tool supports isolated child runs, implement `fork_for_run` and bind
    all workspace/session/memory/process state to the supplied `RunContext`.
    Otherwise it is omitted from child registries.
-3. Register it in the composition root's registry (`cli::tools` in
-   `crates/cli/src/main.rs`).
+3. Register it in the composition root's registry (`runtime::tools` in
+   `crates/cli/src/runtime/builder.rs`).
 
 ### A new MCP transport
 

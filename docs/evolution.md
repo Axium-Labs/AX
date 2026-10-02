@@ -130,6 +130,12 @@ privacy considerations as session history and is sent only to the selected
 AX model provider for an eligible analysis. Evolution data is not yet included
 in `.axpack` exports; normal learned Memory facts use existing export behavior.
 
+Internally the crate is `config.rs` (limits), `types.rs` (experiences, ledger,
+proposals), `engine.rs` (the single mutation boundary), `policy.rs` (the
+lifecycle decision table the engine enforces), `storage.rs` (atomic writes,
+digests, territory guards, credential screening) and `worker.rs` (the
+off-startup analysis thread). `lib.rs` only re-exports.
+
 Thresholds live centrally in `evolution::Config`. For example:
 
 ```json

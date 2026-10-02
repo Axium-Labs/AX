@@ -171,7 +171,7 @@ overwrites a user-authored fact. Ordinary turns do not gain a learning model cal
 
 | Concern | Code |
 |---|---|
-| Storage repository, scopes, resume | `crates/memory/src/lib.rs`, `crates/memory/src/scoped.rs` |
+| Storage repository, scopes, resume | `crates/memory/src/` (`store.rs`, `session.rs`, `message.rs`, `context.rs`, `events.rs`), `crates/memory/src/scoped.rs` |
 | Memory tool and context injection | `crates/cli/src/memory_tool.rs`, `crates/cli/src/memory_context.rs` |
 | Fact views and editor | `crates/cli/src/tui/commands/memories.rs`, `crates/cli/src/tui/bottom_pane/memory_editor.rs` |
 | Project identity | `crates/cli/src/project_identity.rs` |

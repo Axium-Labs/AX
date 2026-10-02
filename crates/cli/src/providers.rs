@@ -31,7 +31,7 @@ pub(crate) fn is_supported_provider(provider_id: &str) -> bool {
 /// drive are included on purpose, so the ACP surface can report them as
 /// unsupported instead of dropping a saved key without a word.
 pub(crate) fn credentialed_providers(codex_auth: Option<&PathBuf>) -> Vec<String> {
-    let auth = AuthStorage::new(crate::ax_auth_path());
+    let auth = AuthStorage::new(crate::bootstrap::ax_auth_path());
     let mut credentialed = Vec::new();
     for id in auth.provider_ids().unwrap_or_default() {
         push_unique(&mut credentialed, &id);

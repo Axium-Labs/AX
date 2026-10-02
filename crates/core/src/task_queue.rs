@@ -482,7 +482,7 @@ pub(crate) fn apply(
 
 pub(crate) fn schema_tokens() -> usize {
     let spec = spec();
-    crate::estimate_text_tokens(&spec.function.name)
-        + crate::estimate_text_tokens(&spec.function.description)
-        + crate::estimate_text_tokens(&spec.function.parameters.to_string())
+    crate::token::estimate_text_tokens(&spec.function.name)
+        + crate::token::estimate_text_tokens(&spec.function.description)
+        + crate::token::estimate_text_tokens(&spec.function.parameters.to_string())
 }

@@ -1,10 +1,25 @@
 //! Exercise the prompt adapters used by the three frontends, with real local children.
-use super::*;
+use std::{
+    collections::HashSet,
+    fs,
+    path::PathBuf,
+    sync::{Arc, Mutex},
+};
+
 use async_trait::async_trait;
-use model::{FunctionCall, ModelError, ModelRequest, ModelResponse, ToolCall};
-use runtime_core::{AllowAll, ExecutionBudget, task_queue::TaskStatus};
+use model::{FunctionCall, ModelError, ModelProvider, ModelRequest, ModelResponse, ToolCall};
+use runtime_core::{
+    AgentKernel, AllowAll, ApprovalPolicy, ExecutionBudget, task_queue::TaskStatus,
+};
 use serde_json::{Value, json};
-use std::sync::Mutex;
+use tool::{FilesystemTool, ToolRegistry};
+
+use crate::{
+    acp,
+    commands::run::{run_prompt, run_prompt_with},
+    model_selection::{ModelSelection, ProviderKind},
+    repl::ReplState,
+};
 
 struct DataProvider {
     requests: Mutex<Vec<ModelRequest>>,

@@ -1,5 +1,5 @@
 //! Dependency DAG, bounded in-task futures, and process-wide resource leases.
-use super::{AgentError, AgentEvent, ApprovalPolicy, fetch_diagnostics, tool_activity};
+use crate::{AgentError, AgentEvent, ApprovalPolicy, event::fetch_diagnostics, tool_activity};
 use futures_util::{StreamExt, future::BoxFuture, stream::FuturesUnordered};
 use model::{Message, ToolCall};
 use serde_json::Value;

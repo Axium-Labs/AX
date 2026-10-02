@@ -25,7 +25,7 @@ use model::{
 use serde::Deserialize;
 
 use crate::{
-    Cli, ModelSelection, ProviderKind,
+    args::Cli,
     config::{AxConfig, ModelConfig, ax_home},
     providers::is_supported_provider,
 };
@@ -711,5 +711,38 @@ mod tests {
             "deepseek-flash"
         );
         fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+pub(crate) enum ProviderKind {
+    Deepseek,
+    Openai,
+    Codex,
+    Workbuddy,
+    Compatible,
+}
+#[derive(Clone, Debug)]
+pub(crate) struct ModelSelection {
+    pub(crate) provider: ProviderKind,
+    pub(crate) provider_id: String,
+    pub(crate) endpoint: Option<String>,
+    pub(crate) model: String,
+    pub(crate) codex_auth: Option<PathBuf>,
+    pub(crate) context_window: Option<usize>,
+    pub(crate) max_output_tokens: Option<usize>,
+    pub(crate) reasoning_effort: Option<ReasoningEffort>,
+    pub(crate) supports_tools: bool,
+}
+impl ModelSelection {
+    pub(crate) const fn context_capacity(&self) -> usize {
+        match self.context_window {
+            Some(capacity) => capacity,
+            None => match self.provider {
+                ProviderKind::Deepseek => 64_000,
+                ProviderKind::Workbuddy => 128_000,
+                ProviderKind::Openai | ProviderKind::Codex | ProviderKind::Compatible => 200_000,
+            },
+        }
     }
 }

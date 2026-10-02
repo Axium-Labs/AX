@@ -22,7 +22,7 @@ pub(crate) fn recent_history(
         before = page.first().map(|message| message.id);
         tokens += page
             .iter()
-            .map(|message| runtime_core::estimate_tokens(&[crate::restore_message(message)]))
+            .map(|message| runtime_core::estimate_tokens(&[crate::repl::restore_message(message)]))
             .sum::<usize>();
         has_user |= page
             .iter()
@@ -54,7 +54,7 @@ pub(crate) fn interrupted_results(messages: &[Message]) -> Vec<Message> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ReplState, memory_role};
+    use crate::repl::{ReplState, memory_role};
 
     #[test]
     fn restart_repairs_interrupted_calls_once_without_replaying_tools() {

@@ -19,7 +19,7 @@ pub(crate) struct LocalChildHost {
 
 /// Shared composition boundary for CLI, TUI and ACP prompt kernels.
 /// No workspace is provisioned until the kernel requests a child.
-pub(crate) fn configure_controller(state: &mut crate::ReplState) -> anyhow::Result<()> {
+pub(crate) fn configure_controller(state: &mut crate::repl::ReplState) -> anyhow::Result<()> {
     let host = std::sync::Arc::new(LocalChildHost::for_controller(
         &state.project_root,
         &state.data_dir,
@@ -174,7 +174,7 @@ impl ChildCheckpoint for SessionCheckpoint {
                 .append_message(
                     &self.session,
                     NewMessage {
-                        role: crate::memory_role(&message.role),
+                        role: crate::repl::memory_role(&message.role),
                         kind: if message.role == model::Role::System {
                             MessageKind::AgentState
                         } else if message.role == model::Role::Tool
@@ -322,7 +322,7 @@ impl LocalChildHost {
             source: source.to_owned(),
             root: data_dir.join("child-runs"),
             excluded: vec![
-                crate::database_path(data_dir),
+                crate::bootstrap::database_path(data_dir),
                 data_dir.join("sessions"),
                 data_dir.join("evolution"),
             ],

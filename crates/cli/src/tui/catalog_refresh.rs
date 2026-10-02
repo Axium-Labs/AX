@@ -159,8 +159,8 @@ pub async fn refresh_provider(
     codex_auth: Option<PathBuf>,
     provider_id: &str,
 ) -> Option<ModelCatalog> {
-    let registry = ModelRegistry::new(crate::ax_models_dir());
-    let auth = AuthStorage::new(crate::ax_auth_path());
+    let registry = ModelRegistry::new(crate::bootstrap::ax_models_dir());
+    let auth = AuthStorage::new(crate::bootstrap::ax_auth_path());
     // Refuse to probe a provider that has no usable credential: discovery would
     // fail with an authentication error that hides the real problem.
     if !configured_providers(data_dir, codex_auth.as_ref())
@@ -229,8 +229,8 @@ fn codex_provider(
 /// Non-blocking cached snapshot restricted to configured providers, used as
 /// the base and as the timeout fallback.
 pub(crate) fn cached_snapshot(data_dir: &Path, codex_auth: Option<&PathBuf>) -> Vec<ModelInfo> {
-    let registry = ModelRegistry::new(crate::ax_models_dir());
-    let auth = AuthStorage::new(crate::ax_auth_path());
+    let registry = ModelRegistry::new(crate::bootstrap::ax_models_dir());
+    let auth = AuthStorage::new(crate::bootstrap::ax_auth_path());
     let configured = configured_providers(data_dir, codex_auth);
     let mut models = Vec::new();
     if configured.iter().any(|provider| provider == "deepseek") {
@@ -287,8 +287,8 @@ fn fallback(data_dir: &Path, codex_auth: Option<&PathBuf>) -> Arc<CatalogRefresh
 /// every configured provider concurrently, then replace each provider's models
 /// as a whole.
 async fn run_refresh(data_dir: &Path, codex_auth: Option<PathBuf>) -> CatalogRefreshResult {
-    let registry = ModelRegistry::new(crate::ax_models_dir());
-    let auth = AuthStorage::new(crate::ax_auth_path());
+    let registry = ModelRegistry::new(crate::bootstrap::ax_models_dir());
+    let auth = AuthStorage::new(crate::bootstrap::ax_auth_path());
     let configured = configured_providers(data_dir, codex_auth.as_ref());
     let mut models = cached_snapshot(data_dir, codex_auth.as_ref());
     let mut failed = Vec::new();
@@ -350,7 +350,7 @@ async fn run_refresh(data_dir: &Path, codex_auth: Option<PathBuf>) -> CatalogRef
         .filter(|provider| !matches!(provider.as_str(), "deepseek" | "openai" | "openai-codex"))
         .filter_map(|provider_id| compatible_provider(&auth, provider_id))
         .map(|provider| async move {
-            ModelRegistry::new(crate::ax_models_dir())
+            ModelRegistry::new(crate::bootstrap::ax_models_dir())
                 .discover(&provider)
                 .await
         });

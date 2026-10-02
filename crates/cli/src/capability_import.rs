@@ -2,28 +2,28 @@
 use anyhow::{Result, bail};
 use std::{fs, io::Write, path::Path};
 
-pub(crate) fn run(cli: &crate::Cli, _data_dir: &Path, _skills_dir: &Path) -> Result<bool> {
-    if let Some(crate::Command::Skill {
-        command: crate::CapabilityCommand::Import { path, global },
+pub(crate) fn run(cli: &crate::args::Cli, _data_dir: &Path, _skills_dir: &Path) -> Result<bool> {
+    if let Some(crate::args::Command::Skill {
+        command: crate::args::CapabilityCommand::Import { path, global },
     }) = &cli.command
     {
         let root = if *global {
             crate::config::ax_home().join("skills")
         } else {
-            crate::discover_project_root(&std::env::current_dir()?).join(".ax/skills")
+            crate::bootstrap::discover_project_root(&std::env::current_dir()?).join(".ax/skills")
         };
         println!("{}", skill::install_skill_directory(path, &root)?.display());
         return Ok(true);
     }
-    if let Some(crate::Command::Mcp {
-        command: crate::CapabilityCommand::Import { path, global },
+    if let Some(crate::args::Command::Mcp {
+        command: crate::args::CapabilityCommand::Import { path, global },
     }) = &cli.command
     {
         let destination = if *global {
             crate::config::ax_home().join("mcp.toml")
         } else {
             cli.mcp_config.clone().unwrap_or_else(|| {
-                crate::discover_project_root(&std::env::current_dir().expect("cwd"))
+                crate::bootstrap::discover_project_root(&std::env::current_dir().expect("cwd"))
                     .join(".ax/mcp.toml")
             })
         };

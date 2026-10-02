@@ -88,6 +88,14 @@ for the `/status` panel.
 
 ### `runtime-core`
 
+Internal layout: `kernel/` (state, construction, goal lifecycle),
+`loop_runtime/` (one model step, one tool step, the turn loop that orders
+them), `compression/` (pipeline and structured summary), `event` / `error` /
+`approval` / `token` as the kernel's outward contracts, and `budget` /
+`context` / `scheduler` / `execution` / `child` / `child_policy` / `subagent` /
+`supervisor` / `task_queue` for execution machinery. `lib.rs` is a façade of
+`mod` declarations and `pub use` re-exports only.
+
 Owns:
 
 - The **agent loop** with an `ExecutionBudget` (max model steps, max
@@ -106,7 +114,7 @@ Owns:
 - **Context management**: `context::select_context` picks history for the
   model by token budget (not fixed message count) and never cuts through an
   unfinished tool-call round.
-- **`ContextBudget`** (`runtime-core::budget`): one structure from which every
+- **`ContextBudget`** (`runtime-core::ContextBudget`, derived in `crates/core/src/budget.rs`): one structure from which every
   context-space limit is derived — reserved output tokens, tool-schema
   estimate, one elastic context pool, per-source maxima and projected next-request compaction. Modules no longer hard-code their own
   character counts or fixed fractions of the raw window. See
@@ -148,6 +156,12 @@ routing model request is added. See [skills.md](skills.md).
 
 ### `memory`
 
+Internal layout: `store.rs` (open, migrations, `MemoryStore`),
+`schema.rs` / `migrations.rs` (additive schema and its order), `session.rs` /
+`message.rs` / `context.rs` / `long_term.rs` (the four stored concerns),
+`events.rs` (the JSONL stream and its index), `types.rs` / `error.rs`, plus
+`scoped.rs` and `backup.rs`. `MemoryStore` stays the single façade.
+
 SQLite stores raw session messages, effective-context snapshots and scoped
 facts. Global facts live in the AX home; Project and Session facts live in the
 selected installation-owned project database. Project ownership is a UUID
@@ -172,6 +186,12 @@ snapshots stay session-local; raw messages are retained. See
 [memory.md](memory.md) and [storage.md](storage.md).
 
 ### `cli`
+
+Internal layout: `main.rs` parses arguments, bootstraps, dispatches and exits;
+`args.rs` (the clap definition), `bootstrap.rs` (sandbox and state locations),
+`app.rs` (command routing), `repl/` (session state), `commands/` (run, agents,
+export/import), `runtime/` (kernel, provider and tool assembly). Every other
+module owns one command family or one frontend.
 
 The only composition root. Owns clap arguments, provider selection, lazy
 SQLite/Skill/MCP initialization, the REPL, the ratatui TUI, session commands

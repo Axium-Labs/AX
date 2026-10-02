@@ -133,11 +133,12 @@ marker and are never replayed automatically — see [memory.md](memory.md).
 | Concern | Code |
 |---|---|
 | Budget derivation | `crates/core/src/budget.rs` |
-| Token-aware selection | `crates/core/src/context.rs` |
-| Compaction, kernel loop | `crates/core/src/lib.rs` (`AgentKernel::compact_now`, `compress`) |
-| Session snapshot storage | `crates/memory/src/lib.rs` (`save_effective_context`) |
+| Token-aware selection | `crates/core/src/context.rs` (`select_context`, `request_context`) |
+| Compaction pipeline | `crates/core/src/compression/` (`pipeline.rs`, `summary.rs`) |
+| Agent loop, model and tool steps | `crates/core/src/loop_runtime/` (`mod.rs`, `model_step.rs`, `tool_step.rs`) |
+| Session snapshot storage | `crates/memory/src/context.rs` (`save_effective_context`) |
 | Dispatch and pickers | `crates/cli/src/tui/commands.rs` (`execute_slash`, `open_session_picker`) |
-| Session restoration | `crates/cli/src/main.rs` (`ReplState::open_session`, `reset_new_session`) |
+| Session restoration | `crates/cli/src/repl/state.rs` (`ReplState::open_session`, `reset_new_session`) |
 | Session restore helpers | `crates/cli/src/session_restore.rs` |
 
 ## Long task progress

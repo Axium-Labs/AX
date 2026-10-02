@@ -1,5 +1,5 @@
 //! Observe the existing runtime event boundary; never alter its loop or tools.
-use crate::{ModelSelection, ReplState};
+use crate::{model_selection::ModelSelection, repl::ReplState};
 use ::evolution::{Experience, Step};
 use runtime_core::AgentEvent;
 use std::collections::HashMap;
@@ -157,7 +157,7 @@ pub(crate) async fn run_once(
     approval: std::sync::Arc<dyn runtime_core::ApprovalPolicy>,
     prompt: &str,
 ) -> anyhow::Result<()> {
-    let result = crate::run_prompt(state, selection, approval, prompt).await;
+    let result = crate::commands::run::run_prompt(state, selection, approval, prompt).await;
     state.evolution_finish().await;
     result.map(|_| ())
 }
@@ -235,11 +235,11 @@ impl ReplState {
                         .collect()
                 })
                 .unwrap_or_default();
-            match crate::build_provider(selection, &crate::ax_auth_path()) {
+            match crate::runtime::build_provider(selection, &crate::bootstrap::ax_auth_path()) {
                 Ok(provider) => {
                     self.evolution = Some(::evolution::start(
                         self.evolution_root(),
-                        crate::database_path(&self.data_dir),
+                        crate::bootstrap::database_path(&self.data_dir),
                         self.project_id.clone(),
                         provider,
                         protected,
@@ -257,7 +257,7 @@ impl ReplState {
                 // Refreshed evolved instructions will be routed again within the normal budget.
                 let prefix = self.evolution_root().to_string_lossy().into_owned();
                 self.loaded_messages.retain(|m| {
-                    !m.content.starts_with(crate::SKILL_CONTEXT_PREFIX)
+                    !m.content.starts_with(crate::repl::SKILL_CONTEXT_PREFIX)
                         || !m.content.contains(&prefix)
                 });
                 if let Some(runtime) = &mut self.runtime {
@@ -265,14 +265,16 @@ impl ReplState {
                         .messages()
                         .iter()
                         .filter(|m| {
-                            m.content.starts_with(crate::SKILL_CONTEXT_PREFIX)
+                            m.content.starts_with(crate::repl::SKILL_CONTEXT_PREFIX)
                                 && m.content.contains(&prefix)
                         })
-                        .filter_map(crate::active_skill_name)
+                        .filter_map(crate::repl::active_skill_name)
                         .collect();
                     for name in stale {
-                        runtime
-                            .set_context(&format!("{}{name}]", crate::SKILL_CONTEXT_PREFIX), None);
+                        runtime.set_context(
+                            &format!("{}{name}]", crate::repl::SKILL_CONTEXT_PREFIX),
+                            None,
+                        );
                         self.active_skills.remove(&name);
                     }
                 }
@@ -387,7 +389,7 @@ mod tests {
         let messages = state.route_skills("sample-evolved", 1000).unwrap();
         assert!(messages.is_empty());
         let loaded = state.skills().unwrap().load("sample-evolved").unwrap();
-        let messages = vec![crate::Message::system(format!(
+        let messages = vec![model::Message::system(format!(
             "[ax-skill:sample-evolved]\nSkill root: {}\n{}",
             loaded.directory.display(),
             loaded.instructions
@@ -406,7 +408,7 @@ mod tests {
             state
                 .loaded_messages
                 .iter()
-                .all(|m| crate::active_skill_name(m).as_deref() != Some("sample-evolved"))
+                .all(|m| crate::repl::active_skill_name(m).as_deref() != Some("sample-evolved"))
         );
         assert!(
             state
@@ -495,7 +497,7 @@ mod tests {
         let root = state.evolution_root();
         let mut engine = ::evolution::Engine::open(
             root.clone(),
-            crate::database_path(&state.data_dir),
+            crate::bootstrap::database_path(&state.data_dir),
             state.project_id.clone(),
         )
         .unwrap();

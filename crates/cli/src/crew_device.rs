@@ -1,6 +1,6 @@
 //! Outbound AX Crew device bridge. Each routed run is executed by this same AX
 //! binary's ACP adapter; this module never implements an agent loop.
-use crate::CrewCommand;
+use crate::args::CrewCommand;
 use anyhow::{Result, anyhow};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use ed25519_dalek::{Signer, SigningKey};
