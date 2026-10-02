@@ -11,10 +11,11 @@ work without introducing a separate planner or replacing the scheduler.
 ## Decision
 
 Keep ordered task metadata in the runtime kernel and checkpoint it through the
-existing AgentState/JSONL path. Recognize explicit top-level lists directly;
-expose a small queue tool to the execution model for semantic task boundaries.
+existing AgentState/JSONL path. Only an explicit model `task_queue start` creates
+a queue; top-level numbered/bullet formatting never creates executable tasks.
+Expose a small queue tool for model-selected semantic task boundaries.
 Only the compact current progress state enters each execution request. Task-local
-failures get a recovery opportunity, then advance independent work. Keep existing
+failures permit advisory recovery and advance independent work. Keep existing
 execution budgets global. Gate final content output and TurnFinished on terminal
 queue state plus the final summary, with cancellation and global errors allowed
 to stop execution.
@@ -53,3 +54,5 @@ breaking controller recovery. Leased running/interrupted workspaces alone remain
 resumable; bounded admission/checkpoint quotas and lazy expiry GC limit their disk
 usage while preserving raw history. GC never relies solely on an old heartbeat to
 delete a workspace that is leased by a running process.
+
+See [0015](0015-shared-child-composition.md) for shared frontend wiring, complete task inputs and replacement of unexecuted plans.

@@ -259,6 +259,17 @@ The existing Agent Loop and tool-round DAG remain the execution mechanisms. A
 small Task Queue stores only explicit model-created tasks through `task_queue`;
 numbered/bulleted formatting is a hint and never creates a queue.
 There is no separate planner call or fixed orchestration system prompt.
+`task_queue start` accepts full input strings or `{title, input}` objects. Titles
+are display metadata; isolated children receive the complete `input` and explicit
+context rather than headings or sibling/controller history. The model may first
+read data and then create the actual dynamically discovered instances.
+An active same-goal queue that has not dispatched a task can be replaced by
+another explicit `start`; its prior plan is archived as superseded. Dispatch is
+checkpointed before tools or child provisioning so resumed in-flight work is not
+silently replaced. Existing child identities, task outcomes or failures also
+prevent replacement; a new goal remains the explicit way to supersede executed
+work. Legacy string queues fall back to their full stored title as task input.
+
 
 Queues belong to a `goal_id`, not a session. Ordinary user turns start a new goal,
 supersede and archive any resumable old queue, and persist a fresh state head.
@@ -292,7 +303,13 @@ Queue checkpoints use the existing AgentState path; see [context.md](context.md)
 
 ### Automatic isolated child execution
 
-The CLI attaches a `ChildHost` to the kernel. Once the model explicitly sets `execution="children"`, the controller
+CLI, TUI and ACP/Crew prompt adapters all call the shared `run_prompt_with`
+composition boundary. `child_runtime::configure_controller` uses one
+`LocalChildHost::for_controller` constructor to bind the project scope, storage
+exclusions, controller budget and independent child execution budget on every
+prompt, including restored/preinitialized kernels. ACP's early command dispatch
+still reaches this boundary through `run_session_prompt`; it adds no Agent Loop.
+Once the model explicitly sets `execution="children"`, the controller
 consumes that queue's running/pending entries, calls `AgentSupervisor::run_child`
 and collects each outcome. Children use the existing kernel loop; they do not
 receive the controller queue or siblings' messages. The controller makes a single

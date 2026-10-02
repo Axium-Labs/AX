@@ -1695,7 +1695,7 @@ where
     } else {
         state.ensure_session(prompt)?;
     }
-    attach_child_host(state)?;
+    child_runtime::configure_controller(state)?;
     prepare_turn_context(state, selection, prompt)?;
     let mut runtime = state.runtime.take().expect("runtime initialized");
     let result = evolution::checkpointed_turn(&mut runtime, state, prompt, emit).await;
@@ -1724,32 +1724,6 @@ where
         }
     }
     result.map_err(Into::into)
-}
-
-/// Binds this turn to a disposable child host and the current scoped subagents.
-/// The controller keeps its own budget; children get their own timeout.
-fn attach_child_host(state: &mut ReplState) -> Result<()> {
-    let child_host = Arc::new(child_runtime::LocalChildHost {
-        sandbox: std::sync::OnceLock::new(),
-        policy: child_runtime::WorkspacePolicy::default(),
-        source: state.project_root.clone(),
-        root: state.data_dir.join("child-runs"),
-        excluded: vec![
-            database_path(&state.data_dir),
-            state.data_dir.join("sessions"),
-            state.data_dir.join("evolution"),
-        ],
-    });
-    let runtime = state.runtime.take().expect("runtime initialized");
-    state.runtime = Some(
-        runtime
-            .with_child_host(child_host)
-            .with_child_execution_budget(runtime_core::ExecutionBudget {
-                turn_timeout_secs: state.child_timeout_secs,
-                ..state.execution_budget
-            }),
-    );
-    state.configure_scoped_subagents()
 }
 
 /// Binds memory access to the current session and request, then fills the
@@ -2162,3 +2136,6 @@ mod goal_argument_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod prompt_execution_tests;

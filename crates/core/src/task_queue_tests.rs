@@ -208,7 +208,7 @@ async fn twenty_three_tasks_first_fails_remaining_execute_and_only_summary_is_em
                 .unwrap(),
         )
         .unwrap();
-        assert_eq!(state.as_object().unwrap().len(), 5);
+        assert_eq!(state.as_object().unwrap().len(), 6);
     }
     let latest = saved
         .iter()
@@ -860,4 +860,113 @@ async fn failed_task_can_finish_without_forced_recovery_and_next_subtask_execute
     let queue = kernel.task_queue().unwrap();
     assert_eq!(queue.tasks[0].status, TaskStatus::Failed);
     assert_eq!(queue.tasks[1].status, TaskStatus::Completed);
+}
+
+#[test]
+fn unexecuted_legacy_queue_can_replan_but_dispatched_or_terminal_tasks_cannot() {
+    let plan =
+        |tasks: Value| serde_json::json!({"action":"start","overall_goal":"goal","tasks":tasks});
+    let mut queue = None;
+    task_queue::apply(
+        &mut queue,
+        &plan(serde_json::json!(["rule 1", "rule 2"])),
+        "g",
+        None,
+    )
+    .unwrap();
+    let mut old = serde_json::to_value(queue.as_ref().unwrap()).unwrap();
+    for task in old["tasks"].as_array_mut().unwrap() {
+        task.as_object_mut().unwrap().remove("input");
+        task.as_object_mut().unwrap().remove("execution_started");
+    }
+    queue = Some(serde_json::from_value(old).unwrap());
+    task_queue::apply(
+        &mut queue,
+        &plan(serde_json::json!([
+            {"title":"instance 1","input":"Read dataset.json and process instance 1"},
+            {"title":"instance 2","input":"Read dataset.json and process instance 2"}
+        ])),
+        "g",
+        None,
+    )
+    .unwrap();
+    assert_eq!(
+        queue.as_ref().unwrap().tasks[0].task_input(),
+        "Read dataset.json and process instance 1"
+    );
+    assert!(
+        task_queue::apply(
+            &mut queue,
+            &plan(serde_json::json!([{"title":"heading only"},{"title":"another heading"}])),
+            "g",
+            None
+        )
+        .is_err()
+    );
+    assert_eq!(queue.as_ref().unwrap().tasks[0].title, "instance 1");
+    queue.as_mut().unwrap().tasks[0].execution_started = true;
+    assert!(
+        task_queue::apply(
+            &mut queue,
+            &plan(serde_json::json!(["replacement 1", "replacement 2"])),
+            "g",
+            None
+        )
+        .is_err()
+    );
+    let mut legacy = serde_json::to_value(queue.as_ref().unwrap()).unwrap();
+    for task in legacy["tasks"].as_array_mut().unwrap() {
+        task.as_object_mut().unwrap().remove("input");
+        task.as_object_mut().unwrap().remove("execution_started");
+    }
+    let restored: task_queue::TaskQueue = serde_json::from_value(legacy).unwrap();
+    assert_eq!(restored.tasks[0].task_input(), "instance 1");
+    queue.as_mut().unwrap().tasks[0].execution_started = false;
+    queue
+        .as_mut()
+        .unwrap()
+        .finish(TaskStatus::Completed, "already completed".into())
+        .unwrap();
+    assert!(
+        task_queue::apply(
+            &mut queue,
+            &plan(serde_json::json!(["replacement 1", "replacement 2"])),
+            "g",
+            None
+        )
+        .is_err()
+    );
+}
+#[tokio::test]
+async fn replan_before_execution_archives_mistaken_queue_and_executes_new_plan() {
+    let responses = vec![
+        call(
+            "mistaken",
+            "task_queue",
+            serde_json::json!({"action":"start","overall_goal":"goal","tasks":["rule 1","rule 2"]}),
+        ),
+        call(
+            "replan",
+            "task_queue",
+            serde_json::json!({"action":"start","overall_goal":"goal","tasks":["real task 1","real task 2"]}),
+        ),
+        finish("completed", "first done"),
+        finish("completed", "second done"),
+        text("summary"),
+    ];
+    let mut kernel = kernel(provider(responses));
+    kernel
+        .run_turn("Process actual independent tasks", |_| {})
+        .await
+        .unwrap();
+    assert_eq!(kernel.task_queue().unwrap().tasks[0].title, "real task 1");
+    let archive = kernel
+        .raw_turn_messages
+        .iter()
+        .find(|m| m.content.starts_with(ARCHIVE_PREFIX))
+        .unwrap();
+    let previous: task_queue::TaskQueue =
+        serde_json::from_str(archive.content.strip_prefix(ARCHIVE_PREFIX).unwrap()).unwrap();
+    assert_eq!(previous.state, QueueState::Superseded);
+    assert_eq!(previous.tasks[0].title, "rule 1");
 }

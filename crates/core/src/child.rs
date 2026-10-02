@@ -181,13 +181,20 @@ impl AgentKernel {
                     .find(|task| task.status == crate::task_queue::TaskStatus::Running)
             })
             .expect("active child task");
-        let input = task.title.clone();
+        let input = task.task_input().to_owned();
         self.execution
             .lock()
             .unwrap()
             .current_step
             .clone_from(&input);
         let previous = task.child.clone();
+        self.task_queue
+            .as_mut()
+            .unwrap()
+            .current_mut()
+            .unwrap()
+            .execution_started = true;
+        self.checkpoint_queue(checkpoint)?;
         let host = self.child_host.as_ref().expect("child host").clone();
         let outcome = match host.prepare(self, &input, previous.as_ref()).await {
             Ok(mut child) => {

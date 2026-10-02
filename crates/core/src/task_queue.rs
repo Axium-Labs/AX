@@ -65,6 +65,12 @@ pub enum TaskStatus {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct QueuedTask {
     pub title: String,
+    /// Complete task input; old string queues and checkpoints fall back to title.
+    #[serde(default)]
+    pub input: String,
+    /// Persisted before dispatch so an interrupted task is never silently replaced.
+    #[serde(default)]
+    pub execution_started: bool,
     #[serde(default)]
     pub depends_on: Vec<usize>,
     pub status: TaskStatus,
@@ -74,6 +80,17 @@ pub struct QueuedTask {
     pub recovery_attempts: usize,
     #[serde(default)]
     pub child: Option<crate::ChildRun>,
+}
+
+impl QueuedTask {
+    #[must_use]
+    pub fn task_input(&self) -> &str {
+        if self.input.is_empty() {
+            &self.title
+        } else {
+            &self.input
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -105,6 +122,8 @@ impl TaskQueue {
             tasks: titles
                 .into_iter()
                 .map(|title| QueuedTask {
+                    input: title.clone(),
+                    execution_started: false,
                     title,
                     depends_on: vec![],
                     status: TaskStatus::Pending,
@@ -161,6 +180,17 @@ impl TaskQueue {
             }
         }
         titles
+    }
+
+    fn unexecuted(&self) -> bool {
+        self.tasks.iter().all(|task| {
+            !task.execution_started
+                && task.child.is_none()
+                && matches!(task.status, TaskStatus::Pending | TaskStatus::Running)
+                && task.outcome.is_none()
+                && task.failure_reason.is_none()
+                && task.recovery_attempts == 0
+        })
     }
 
     pub(crate) fn active(&self) -> bool {
@@ -276,6 +306,7 @@ impl TaskQueue {
             json!({
                 "overall_goal": self.overall_goal,
                 "current_task": current.map(|task| &task.title),
+                "current_task_input": current.map(QueuedTask::task_input),
                 "completed_count": self.tasks.iter().filter(|task| task.status == TaskStatus::Completed).count(),
                 "failed_count": self.tasks.iter().filter(|task| task.status == TaskStatus::Failed).count(),
                 "remaining_tasks": self.tasks.iter().enumerate().filter(|(_,task)| task.status == TaskStatus::Pending).map(|(i,_)| i+1).collect::<Vec<_>>()
@@ -332,10 +363,27 @@ pub(crate) fn spec() -> ToolSpec {
         parameters: json!({"type":"object","properties":{
             "action":{"type":"string","enum":["start","finish","block","cancel"]},
             "execution":{"type":"string","enum":["controller","children"]},"dependencies":{"type":"array","items":{"type":"array","items":{"type":"integer","minimum":0}}},
-            "overall_goal":{"type":"string"},"tasks":{"type":"array","minItems":2,"items":{"type":"string"}},
+            "overall_goal":{"type":"string"},"tasks":{"type":"array","minItems":2,"items":{"anyOf":[{"type":"string","description":"Complete independently executable task input, not a heading"},{"type":"object","properties":{"title":{"type":"string"},"input":{"type":"string","description":"Complete independently executable task input including necessary data/context"}},"required":["title","input"],"additionalProperties":false}]}},
             "status":{"type":"string","enum":["completed","failed","skipped"]},"reason":{"type":"string"}
         },"required":["action"]}),
     }}
+}
+
+fn task_definition(value: &Value) -> Result<(String, String), &str> {
+    let (title, task_input) = if let Some(input) = value.as_str() {
+        (input, input)
+    } else {
+        (
+            value["title"].as_str().ok_or("task title is required")?,
+            value["input"]
+                .as_str()
+                .ok_or("complete task input is required")?,
+        )
+    };
+    if title.trim().is_empty() || task_input.trim().is_empty() {
+        return Err("task title and complete input must be nonempty");
+    }
+    Ok((title.to_owned(), task_input.to_owned()))
 }
 
 pub(crate) fn apply(
@@ -348,29 +396,31 @@ pub(crate) fn apply(
         Some("start") => {
             if queue
                 .as_ref()
-                .is_some_and(|q| q.goal_id != goal_id || !q.active() || !q.tasks.is_empty())
+                .is_some_and(|q| q.goal_id != goal_id || !q.active() || !q.unexecuted())
             {
-                return Err("continue the existing queue; do not replan".into());
+                return Err("cannot replace a queue after task execution starts; continue it or start a new goal".into());
             }
             let goal = input["overall_goal"]
                 .as_str()
                 .filter(|s| !s.trim().is_empty())
                 .ok_or("overall_goal is required")?;
-            let titles = input["tasks"]
+            let tasks = input["tasks"]
                 .as_array()
                 .ok_or("tasks are required")?
                 .iter()
-                .map(|v| {
-                    v.as_str()
-                        .filter(|s| !s.trim().is_empty())
-                        .map(str::to_owned)
-                        .ok_or("task must be nonempty")
-                })
+                .map(task_definition)
                 .collect::<Result<Vec<_>, _>>()?;
+            let titles = tasks
+                .iter()
+                .map(|(title, _)| title.clone())
+                .collect::<Vec<_>>();
             if titles.len() < 2 {
                 return Err("at least two tasks required".into());
             }
             let mut plan = TaskQueue::new(goal.into(), titles);
+            for (task, (_, input)) in plan.tasks.iter_mut().zip(tasks) {
+                task.input = input;
+            }
             if let Some(mode) = input.get("execution") {
                 if !matches!(mode.as_str(), Some("controller" | "children")) {
                     return Err("invalid execution mode".into());

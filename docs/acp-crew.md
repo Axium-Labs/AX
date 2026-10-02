@@ -2,6 +2,21 @@
 
 `ax acp` is an additive [Agent Client Protocol v1](https://agentclientprotocol.com/protocol/v1/initialization) stdio adapter in `crates/cli/src/acp.rs`. It uses the existing CLI composition root: `ReplState` creates or restores sessions and `run_prompt_with` invokes `AgentKernel::run_turn_checkpointed`. It does not implement a second model loop, tool registry, memory store, or credential store.
 
+
+CLI/TUI/ACP all bind the same LocalChildHost and child budget through
+`child_runtime::configure_controller`. ACP's `session/prompt` invokes
+`run_session_prompt`, which uses the shared prompt runner. A model-created queue
+with `execution="children"` automatically enters the kernel's
+`execute_next_child()` for each running task, executes isolated children
+sequentially and emits only the controller summary. Child failures advance
+independent tasks. `--child-timeout-secs` applies independently of the controller
+turn timeout in Crew/ACP too. Child tool updates retain session-prefixed call IDs.
+
+Prompt lists never imply executable tasks. After reading a dataset, the model can
+call `task_queue start` with actual instances and complete `{title,input}` task
+objects. A mistaken queue with no dispatched work can be explicitly replanned;
+its previous state remains archived in authoritative history.
+
 The adapter accepts `initialize`, `session/new`, `session/load`, `session/resume`, `session/prompt`, and `session/cancel`. JSON-RPC messages are one JSON object per line. The ACP session ID is the AX `MemoryStore` session UUID. `session/load` replays stored user, assistant, and tool messages as `session/update` notifications; `session/resume` restores context without replay. ACP clients must send a `cwd` equal to the ACP process working directory. Crew starts one `ax acp` process in the member's configured directory, which also keeps AX's existing project-root and tool-workspace resolution intact.
 
 `AgentEvent` deltas and tool start/finish events become `session/update` notifications. Lifecycle updates use the model's original `tool_call_id`, so parallel calls to the same tool remain distinct. The adapter's `ApprovalPolicy` maps `session/request_permission` responses into the existing `PermissionStore`. Explicit Deny remains authoritative. `session/cancel` aborts the current turn future and returns `stopReason: cancelled`; it does not promise to undo a tool's external effects. The next resume uses AX's existing interrupted-tool recovery and never replays a tool automatically.

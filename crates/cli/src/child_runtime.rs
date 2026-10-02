@@ -17,6 +17,27 @@ pub(crate) struct LocalChildHost {
     pub policy: WorkspacePolicy,
 }
 
+/// Shared composition boundary for CLI, TUI and ACP prompt kernels.
+/// No workspace is provisioned until the kernel requests a child.
+pub(crate) fn configure_controller(state: &mut crate::ReplState) -> anyhow::Result<()> {
+    let host = std::sync::Arc::new(LocalChildHost::for_controller(
+        &state.project_root,
+        &state.data_dir,
+    ));
+    let runtime = state.runtime.take().expect("runtime initialized");
+    state.runtime = Some(
+        runtime
+            .with_execution_scope(state.project_root.clone())
+            .with_execution_budget(state.execution_budget)
+            .with_child_host(host)
+            .with_child_execution_budget(runtime_core::ExecutionBudget {
+                turn_timeout_secs: state.child_timeout_secs,
+                ..state.execution_budget
+            }),
+    );
+    state.configure_scoped_subagents()
+}
+
 fn failure(error: impl std::fmt::Display) -> AgentError {
     AgentError::Persistence(error.to_string())
 }
@@ -294,6 +315,19 @@ fn restore_saved(root: &Path, run: &ChildRun) -> Result<ChildStorage, AgentError
     Ok((run, state.join("child.sqlite3"), state, lease))
 }
 impl LocalChildHost {
+    fn for_controller(source: &Path, data_dir: &Path) -> Self {
+        Self {
+            sandbox: std::sync::OnceLock::new(),
+            policy: WorkspacePolicy::default(),
+            source: source.to_owned(),
+            root: data_dir.join("child-runs"),
+            excluded: vec![
+                crate::database_path(data_dir),
+                data_dir.join("sessions"),
+                data_dir.join("evolution"),
+            ],
+        }
+    }
     async fn provision_new(
         &self,
         input: &str,

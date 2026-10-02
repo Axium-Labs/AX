@@ -1103,6 +1103,7 @@ impl AgentKernel {
                 .iter()
                 .any(|call| call.function.name == task_queue::TOOL_NAME)
             {
+                let previous_queue = self.task_queue.clone();
                 let queue_before = serde_json::to_string(&self.task_queue).unwrap();
                 let result = if tool_calls.len() == 1 {
                     serde_json::from_str::<Value>(&tool_calls[0].function.arguments)
@@ -1121,6 +1122,21 @@ impl AgentKernel {
                             .into(),
                     )
                 };
+                if result.is_ok()
+                    && serde_json::from_str::<Value>(&tool_calls[0].function.arguments)
+                        .is_ok_and(|input| input["action"] == "start")
+                    && let Some(mut previous) = previous_queue.filter(|q| !q.tasks.is_empty())
+                {
+                    previous.stop(
+                        QueueState::Superseded,
+                        "replaced before task execution".into(),
+                    );
+                    self.raw_turn_messages.push(Message::system(format!(
+                        "{}{}",
+                        task_queue::ARCHIVE_PREFIX,
+                        serde_json::to_string(&previous).unwrap()
+                    )));
+                }
                 for call in &tool_calls {
                     let message = Message::tool(&call.id, match &result {
                         Ok(()) => "Queue updated. Continue current_task; summarize only after all tasks are terminal.".into(),
@@ -1178,6 +1194,14 @@ impl AgentKernel {
                 && task.failure_reason.is_some()
             {
                 task.recovery_attempts += 1;
+            }
+            if let Some(task) = self
+                .task_queue
+                .as_mut()
+                .and_then(task_queue::TaskQueue::current_mut)
+            {
+                task.execution_started = true;
+                self.checkpoint_queue(checkpoint)?;
             }
             let round_start = self.messages.len();
             let results = subagent::forward_events(

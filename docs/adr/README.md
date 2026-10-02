@@ -55,3 +55,5 @@ What becomes easier, what becomes harder, and what we accepted.
 - [0013: Workspace runtime sandbox](0013-workspace-runtime-sandbox.md) — centralized OS confinement independent of Permission.
 
 - [0014: Advisory execution policy](0014-advisory-execution-policy.md) — observation and recovery never gate safe tool execution.
+
+- [0015: Shared child composition](0015-shared-child-composition.md) — frontend parity, explicit complete task inputs and unexecuted-plan replacement.

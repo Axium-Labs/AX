@@ -215,6 +215,22 @@ fn update(out: &Outbox, session_id: &str, event: AgentEvent, calls: &mut HashMap
     let _ = out.send(json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":session_id,"update":stamp(body, now_seconds())}}));
 }
 
+/// ACP adapter uses the same prompt composition and Agent Loop as CLI/TUI.
+pub(super) async fn run_session_prompt(
+    state: &mut ReplState,
+    selection: &crate::ModelSelection,
+    approval: Arc<dyn ApprovalPolicy>,
+    prompt: &str,
+    out: &Outbox,
+    session_id: &str,
+) -> Result<String> {
+    let mut calls = HashMap::new();
+    run_prompt_with(state, selection, approval, prompt, |event| {
+        update(out, session_id, event, &mut calls);
+    })
+    .await
+}
+
 /// Every catalog provider AX cannot drive, with the reason. Clients render
 /// these as unsupported rather than offering a credential dialog that would
 /// silently do nothing.
@@ -928,11 +944,8 @@ pub async fn run(cli: &Cli, data_dir: PathBuf, skills_dir: PathBuf) -> Result<()
                             permissions: state.permissions.clone(),
                             session_id: task_session.clone(),
                         });
-                        let mut calls = HashMap::new();
                         let before=crate::worktree_changes::snapshot(&task_cwd);
-                        let outcome=run_prompt_with(&mut state, &selection, approval, &prompt, |event| {
-                            update(&task_out, &task_session, event, &mut calls);
-                        })
+                        let outcome=run_session_prompt(&mut state, &selection, approval, &prompt, &task_out, &task_session)
                         .await;
                         let files = match (before, crate::worktree_changes::snapshot(&task_cwd)) {
                             (Ok(before), Ok(after)) => crate::worktree_changes::changed(&before, after),
