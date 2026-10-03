@@ -39,5 +39,7 @@ Issues / compatibility:
 Version / commit follow-up:
 - Bumped AX from 0.3.2 to 0.3.3 in Cargo.toml and all AX-owned package entries in Cargo.lock.
 - Added docs/release-notes/0.3.3.md; cargo check --workspace: PASS.
-- No Windows release build, push, tag or GitHub release performed.
-- Committed together with the version update; commit SHA is recorded in Git history.
+- Windows x64 release build: PASS; release executable smoke check: PASS.
+- Local archive `release/v0.3.3/ax-x86_64-pc-windows-msvc.zip` created and SHA256 verified.
+- Release notes and local release index prepared. Tag push will trigger GitHub release and configured GitCode mirror.
+- Source/version commit: 68b859d8fdef8fcebb7241aabbdfb3ce68618374; release-note follow-up commit pending.
