@@ -5,6 +5,8 @@ A fast, lightweight AI agent for the terminal, built in Rust.
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue)](Cargo.toml)
 [![Rust 1.92+](https://img.shields.io/badge/rust-1.92+-orange)](https://www.rust-lang.org)
 
+**English** | [简体中文](README.zh-CN.md)
+
 AX is a small, native terminal agent. It starts fast, streams responses, and
 keeps sessions, memory, credentials and model config on your machine — no
 service to sign up for, no remote telemetry.
@@ -243,4 +245,4 @@ or MCP servers. MCP JSON accepts the common `mcpServers` format.
 
 ## Local coding benchmark
 
-See [benchmark/README.md](benchmark/README.md) for the fixed three-task AX vs Codex runner, isolation requirements and measured results. The included run was blocked by gateway 403 responses before coding and does not establish a performance ranking.
+See `benchmark/README.md` for the fixed three-task AX vs Codex runner, isolation requirements and measured results. The included run was blocked by gateway 403 responses before coding and does not establish a performance ranking.
