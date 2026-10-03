@@ -9,6 +9,11 @@ AX is a small, native terminal agent. It starts fast, streams responses, and
 keeps sessions, memory, credentials and model config on your machine — no
 service to sign up for, no remote telemetry.
 
+AX is the agent; [AX Crew](https://github.com/Axium-Labs/AXCrew) is the control
+plane built alongside it — connect, control and orchestrate AX agents running
+on your laptop, servers, GPU boxes and cloud VMs. See
+[ACP and Crew integration](docs/acp-crew.md).
+
 - **Rust native** — one binary, no runtime, no Node, no Docker.
 - **Fast startup** — providers, skills, MCP servers and memory load on demand.
 - **Standard skills and focused tools** — Agent Skills `SKILL.md` packages with lazy instructions and optional resources, read-only web search/fetch that batches concurrent queries and page fetches and deduplicates their results, LSP through configurable MCP servers, and native image input on supported vision models.
