@@ -53,7 +53,9 @@ classifies durable preferences/facts as **Memory**, repeatable workflows as
 **Skill**, and one-off/weak evidence as **Ignore**. Intent starts as the task
 text; semantic intent and correction attribution happen during this analysis,
 not through another per-turn request. REFINE corrections must quote actual
-user text and are attached to the matching Experience records in the ledger.
+user text and are attached to the matching Experience records in the bounded runtime buffer. Raw observations
+remain immutable in JSONL; correction counts and Skill evidence IDs remain in
+lifecycle metadata.
 
 The analyzer proposes JSON actions; it cannot choose paths or call tools.
 AX creates and validates standard packages using the existing Skill crate's
@@ -102,14 +104,61 @@ and Skills even when multiple projects share a custom data directory:
 
 ```text
 config.json           # optional overrides; missing fields use defaults
-ledger.json           # bounded recent evidence, scheduling state, Skill metadata
-experiences.jsonl     # append-only observations
+ledger.json           # versioned control state, byte cursors, Skill metadata
+experiences.jsonl     # sole authoritative store of complete Experiences
 decisions.jsonl       # action results and lifecycle transitions
 writer.lock           # OS file lock; automatically released on process death
 candidate/<name>/SKILL.md
 live/<name>/SKILL.md   # trial and active only
 archived/<name>/SKILL.md
 ```
+
+`experiences.jsonl` is the source of truth. Recording validates scope and secret
+screening, appends the complete unchanged `Experience`, and syncs it before
+checkpointing control state. The version-2 ledger contains `version`, `epoch`,
+`skills`, `pending`, `last_analysis`, `observed_cursor`, and `processed_cursor`;
+it contains no Experience bodies or recent-evidence copies. `observed_cursor`
+checkpoints usage telemetry with its counters; `processed_cursor` checkpoints
+successful analysis consumption. Both are JSONL byte boundaries.
+
+The worker retains an Engine across commands. On its first use after restart,
+it streams JSONL once to rebuild an in-memory ID/offset index and bounded recent
+buffer. The index holds IDs and offsets, not Experience bodies, and grows with
+the number of unique observations. Subsequent commands index only appended
+bytes. Analysis seeks to the next pending bounded batch, retaining earlier
+context where space permits. Provider context fitting cannot drop the earliest
+pending observation and advance past it; excluded new observations remain
+pending. A backlog larger than `max_experiences` is consumed across eligible
+batches under the existing cooldown, rather than silently dropping old work.
+
+The analysis cursor advances only after response validation, action application
+or audited policy rejection, and maintenance succeed. Timeouts, malformed
+responses, failed audit/file/Memory writes or failed cursor checkpointing retain
+pending work. Attempt time still persists before the provider request, preserving
+the cooldown on failure. Replaying a JSONL-only append recovers telemetry once;
+duplicate IDs are suppressed even outside the recent buffer and across restart.
+As before, separate Skill files, Memory, audit and ledger writes do not form a
+single transaction: a crash after an action but before cursor checkpointing may
+retry analysis. Lifecycle ownership/digest gates and Memory optimistic writes
+still protect their destinations; this is at-least-once analysis, not an
+exactly-once cross-store transaction.
+
+Legacy ledgers are migrated while the worker holds `writer.lock`. Existing JSONL
+IDs are preserved without another append; legacy-only observations are appended.
+JSONL wins if an old recent copy differs. The old pending suffix is mapped to a
+byte cursor, including JSONL-only appends whose old checkpoint failed. Skill
+metadata, usage counters, epoch and cooldown survive. Migration first checkpoints the original byte boundaries in a temporary
+`experience_migration` control field, then atomically saves the version-2 ledger
+without `experiences` or that temporary field. Interrupted migration retries by
+ID using the original boundaries. A missing previously consumed legacy copy
+appended after pending records can be conservatively analyzed again; existing
+pending work is never skipped.
+Derived per-Experience corrections previously present only in ledger copies are
+not copied over authoritative raw observations; lifecycle correction counters
+remain preserved. Do not run an older AX writer against a migrated store: it
+expects the removed `experiences` field. Truncated streams, malformed records,
+non-boundary cursors and torn final lines fail closed without rewriting raw data;
+restore the stream from backup before resuming learning.
 
 Metadata is separate from SKILL.md: `source`, `created_at`, `last_used_at`,
 `use_count`, `success_count`, `failure_count`, `corrections`, `confidence`,
@@ -180,6 +229,10 @@ The unit/integration suite covers ownership guards, standard format, routing
 states, trial promotion, correction/retrial counters, merge compression,
 archive/delete ordering, memory provenance, cooldown, disabled operation,
 credential screening, context fitting, model-call frequency and failed analysis.
+Persistence regressions in `test/evolution/` additionally cover legacy migration,
+JSONL-only append recovery, incremental byte reads, bounded backlog batches,
+window-independent deduplication, failed cursor/audit checkpoints, restart
+consumption, and torn/truncated streams.
 
 Legacy `similarity`, `create_score`, `trial_score`, `active_score`,
 `retire_score`, `half_life_secs`, and `weights` remain accepted for existing

@@ -269,3 +269,18 @@ Each child is replayed once with the same `child-session:call-id` identity used
 by live events. Arguments, completed results and unfinished calls remain visible
 after cancellation and reconnect, even after workspace cleanup. Child prompts
 and internal assistant text remain private to the child transcript.
+
+## Evolution storage boundary
+
+Sessions, Experiences and decisions are authoritative append-only JSONL streams.
+Memory and queryable indexes use SQLite. Evolution control state uses a versioned
+JSON ledger; Skills remain standard `SKILL.md` packages. Evolution adds no database
+or crate dependency.
+
+Within each project Evolution root, `experiences.jsonl` holds complete observations;
+`ledger.json` contains lifecycle metadata, scheduling/aggregate counters and separate
+byte cursors for observed telemetry and successful analysis. Recent evidence exists
+only in a bounded memory buffer. An ID/offset index is rebuilt from JSONL once on
+worker initialization and extended incrementally thereafter. Legacy ledger copies
+are reconciled by ID before publishing version 2. See [Evolution](evolution.md) for
+migration, failure recovery, and the restriction on older AX writers.

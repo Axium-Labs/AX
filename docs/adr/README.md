@@ -62,3 +62,5 @@ What becomes easier, what becomes harder, and what we accepted.
 - [0014: Advisory execution policy](0014-advisory-execution-policy.md) — observation and recovery never gate safe tool execution.
 
 - [0015: Shared child composition](0015-shared-child-composition.md) — frontend parity, explicit complete task inputs and unexecuted-plan replacement.
+
+- [0017 — Authoritative Experience JSONL](0017-evolution-jsonl-authority.md) — Evolution control checkpoints, incremental consumption and legacy migration.

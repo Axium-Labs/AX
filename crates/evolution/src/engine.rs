@@ -4,14 +4,28 @@
 //! ownership, digests, territory guards and the audit trail cannot be bypassed
 //! by a new action variant.
 
-use std::{collections::BTreeMap, fs, io::Write, path::PathBuf};
+use std::{
+    collections::{BTreeMap, HashMap},
+    fs,
+    io::Write,
+    path::PathBuf,
+};
 
-use anyhow::{Result, ensure};
+use anyhow::{Context, Result, ensure};
 
 use crate::{
     Action, Config, Experience, Ledger, Metadata, State, policy,
     storage::{atomic, digest, now, plain, screen},
 };
+
+/// Temporary migration control, removed when version 2 is published.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct MigrationCheckpoint {
+    original_end: u64,
+    known_end: u64,
+    processed: u64,
+    consume_all: bool,
+}
 
 pub struct Engine {
     pub root: PathBuf,
@@ -19,6 +33,11 @@ pub struct Engine {
     pub project: String,
     pub config: Config,
     pub ledger: Ledger,
+    /// Bounded runtime evidence, never serialized into the control ledger.
+    pub recent: Vec<Experience>,
+    records: Vec<(String, u64, u64)>,
+    ids: HashMap<String, usize>,
+    indexed_end: u64,
 }
 
 impl Engine {
@@ -37,19 +56,306 @@ impl Engine {
         };
         config.validate()?;
         plain(&root.join("ledger.json"))?;
-        let ledger = if root.join("ledger.json").exists() {
+        let value: serde_json::Value = if root.join("ledger.json").exists() {
             serde_json::from_slice(&fs::read(root.join("ledger.json"))?)?
         } else {
-            Ledger::default()
+            serde_json::json!({"version": 2})
         };
-        Ok(Self {
+        let ledger: Ledger = serde_json::from_value(value.clone())?;
+        ensure!(ledger.version <= 2, "unsupported evolution ledger version");
+        let mut engine = Self {
             root,
             database,
             project,
             config,
             ledger,
-        })
+            recent: Vec::new(),
+            records: Vec::new(),
+            ids: HashMap::new(),
+            indexed_end: 0,
+        };
+        engine.load_records()?;
+        engine.migrate(&value)?;
+        engine.observe()?;
+        Ok(engine)
     }
+    /// Read only bytes appended since this Engine last indexed the stream.
+    fn load_records(&mut self) -> Result<()> {
+        let path = self.root.join("experiences.jsonl");
+        let rows = crate::storage::read_experiences(&path, self.indexed_end)?;
+        for row in rows {
+            let (experience, start, end) = row?;
+            ensure!(
+                experience.project == self.project,
+                "wrong project in experience stream"
+            );
+            if !self.ids.contains_key(&experience.id) {
+                self.ids.insert(experience.id.clone(), self.records.len());
+                self.records.push((experience.id.clone(), start, end));
+                self.recent.push(experience);
+                self.trim_recent();
+            }
+            self.indexed_end = end;
+        }
+        ensure!(
+            self.ledger.observed_cursor <= self.indexed_end
+                && self.ledger.processed_cursor <= self.ledger.observed_cursor,
+            "experience stream is shorter than its checkpoint"
+        );
+        // Validate the persisted analysis boundary without reading old records.
+        crate::storage::read_experiences(&path, self.ledger.processed_cursor)?;
+        Ok(())
+    }
+
+    fn trim_recent(&mut self) {
+        let excess = self
+            .recent
+            .len()
+            .saturating_sub(self.config.max_experiences);
+        self.recent.drain(..excess);
+    }
+
+    fn migrate(&mut self, value: &serde_json::Value) -> Result<()> {
+        if self.ledger.version == 2 && value.get("experiences").is_none() {
+            return Ok(());
+        }
+        let legacy: Vec<Experience> = value
+            .get("experiences")
+            .map(|v| serde_json::from_value(v.clone()))
+            .transpose()?
+            .unwrap_or_default();
+        for experience in &legacy {
+            ensure!(
+                experience.project == self.project,
+                "wrong project in legacy ledger"
+            );
+        }
+        let checkpoint: MigrationCheckpoint = if let Some(saved) = value.get("experience_migration")
+        {
+            serde_json::from_value(saved.clone())?
+        } else {
+            let original_end = self.indexed_end;
+            let known_end = legacy
+                .iter()
+                .filter_map(|e| self.ids.get(&e.id))
+                .map(|i| self.records[*i].2)
+                .max()
+                .unwrap_or(0);
+            let old_count = self
+                .records
+                .partition_point(|(_, _, end)| *end <= known_end);
+            let missing = legacy
+                .iter()
+                .filter(|e| !self.ids.contains_key(&e.id))
+                .count();
+            let pending = self.ledger.pending.min(old_count + missing);
+            // Missing legacy copies are appended at the tail. When old pending work
+            // exists, conservatively replay from the earliest possible old record.
+            let missing_pending = legacy
+                .iter()
+                .rev()
+                .take(pending)
+                .filter(|e| !self.ids.contains_key(&e.id))
+                .count();
+            let first = old_count.saturating_sub(pending.saturating_sub(missing_pending));
+            let processed = self
+                .records
+                .get(first)
+                .map_or(known_end, |(_, start, _)| *start);
+            let checkpoint = MigrationCheckpoint {
+                original_end,
+                known_end,
+                processed,
+                consume_all: pending == 0 && known_end == original_end,
+            };
+            // Publish only control offsets before the first legacy-only append.
+            // A retry must use the original pending boundary, not infer it from
+            // a stream that already contains part of this migration's appends.
+            let mut checkpointed = value.clone();
+            checkpointed["experience_migration"] = serde_json::to_value(&checkpoint)?;
+            atomic(
+                &self.root.join("ledger.json"),
+                &serde_json::to_vec_pretty(&checkpointed)?,
+            )?;
+            checkpoint
+        };
+        for experience in &legacy {
+            ensure!(
+                experience.project == self.project,
+                "wrong project in legacy ledger"
+            );
+            if !self.ids.contains_key(&experience.id) {
+                crate::storage::append_experience(
+                    &self.root.join("experiences.jsonl"),
+                    experience,
+                )?;
+                self.load_records()?;
+            }
+        }
+        // Records appended before an old ledger checkpoint failed are absent
+        // from its recent list. Recover their telemetry rather than marking
+        // them observed or analyzed during migration.
+        let mut next = self.ledger.clone();
+        for row in crate::storage::read_experiences_range(
+            &self.root.join("experiences.jsonl"),
+            checkpoint.known_end,
+            checkpoint.original_end,
+        )? {
+            let (experience, start, _) = row?;
+            if self.records[self.ids[&experience.id]].1 == start
+                && !legacy.iter().any(|e| e.id == experience.id)
+            {
+                Self::usage(&mut next, &experience);
+            }
+        }
+        next.processed_cursor = if checkpoint.consume_all {
+            self.indexed_end
+        } else {
+            checkpoint.processed
+        };
+        next.observed_cursor = self.indexed_end;
+        next.version = 2;
+        self.ledger = next;
+        self.save()
+    }
+
+    fn usage(ledger: &mut Ledger, experience: &Experience) {
+        for name in &experience.skills_used {
+            if let Some(meta) = ledger.skills.get_mut(name) {
+                if meta.source != "evolved" || !matches!(meta.state, State::Trial | State::Active) {
+                    continue;
+                }
+                meta.last_used_at = experience.at;
+                meta.use_count += 1;
+                if experience.success && experience.errors.is_empty() {
+                    meta.success_count += 1;
+                } else {
+                    meta.failure_count += 1;
+                }
+            }
+        }
+    }
+
+    /// Checkpoint telemetry independently of analysis, atomically with its cursor.
+    pub(crate) fn observe(&mut self) -> Result<()> {
+        let mut next = self.ledger.clone();
+        for row in crate::storage::read_experiences(
+            &self.root.join("experiences.jsonl"),
+            next.observed_cursor,
+        )? {
+            let (experience, start, end) = row?;
+            ensure!(
+                experience.project == self.project,
+                "wrong project in experience stream"
+            );
+            // Preexisting duplicate IDs remain in the immutable stream, but
+            // only their first occurrence contributes usage or pending work.
+            if self.records[self.ids[&experience.id]].1 == start {
+                Self::usage(&mut next, &experience);
+            }
+            next.observed_cursor = end;
+        }
+        next.pending = self.records.len()
+            - self
+                .records
+                .partition_point(|(_, _, end)| *end <= next.processed_cursor);
+        atomic(
+            &self.root.join("ledger.json"),
+            &serde_json::to_vec_pretty(&next)?,
+        )?;
+        self.ledger = next;
+        Ok(())
+    }
+
+    /// Restore control changes from another writer; retain the stream index normally.
+    pub(crate) fn refresh(&mut self) -> Result<()> {
+        plain(&self.root.join("ledger.json"))?;
+        let ledger: Ledger = serde_json::from_slice(&fs::read(self.root.join("ledger.json"))?)?;
+        ensure!(ledger.version == 2, "unsupported evolution ledger version");
+        self.ledger = ledger;
+        let path = self.root.join("config.json");
+        plain(&path)?;
+        self.config = if path.exists() {
+            serde_json::from_slice(&fs::read(path)?)?
+        } else {
+            Config::default()
+        };
+        self.config.validate()?;
+        self.load_records()?;
+        self.trim_recent();
+        self.observe()
+    }
+
+    /// Select the next bounded batch by byte cursor, retaining earlier context.
+    pub(crate) fn prepare_analysis(&mut self, budget: usize) -> Result<(String, u64)> {
+        let first = self
+            .records
+            .partition_point(|(_, _, end)| *end <= self.ledger.processed_cursor);
+        ensure!(first < self.records.len(), "no pending experiences");
+        let end = (first + self.config.max_experiences).min(self.records.len());
+        let start = end.saturating_sub(self.config.max_experiences);
+        let mut selected = Vec::new();
+        for row in crate::storage::read_experiences_range(
+            &self.root.join("experiences.jsonl"),
+            self.records[start].1,
+            self.records[end - 1].2,
+        )? {
+            let (mut experience, offset, _) = row?;
+            if self.records[self.ids[&experience.id]].1 != offset {
+                continue;
+            }
+            if let Some(previous) = self.recent.iter().find(|e| e.id == experience.id) {
+                experience
+                    .user_corrections
+                    .clone_from(&previous.user_corrections);
+            }
+            selected.push(experience);
+        }
+        self.recent = selected;
+        let mut input: serde_json::Value =
+            serde_json::from_str(&self.bounded_analysis_input(budget)?)?;
+        // bounded_analysis_input must never discard the earliest pending record.
+        // If context fitting removed it, reduce the batch from its newest end.
+        while !input["experiences"]
+            .as_array()
+            .expect("experiences")
+            .iter()
+            .any(|e| e["id"].as_str() == Some(self.records[first].0.as_str()))
+        {
+            ensure!(
+                self.recent.len() > 1,
+                "pending experience exceeds provider context capacity"
+            );
+            self.recent.pop();
+            input = serde_json::from_str(&self.bounded_analysis_input(budget)?)?;
+        }
+        let last = input["experiences"]
+            .as_array()
+            .expect("experiences")
+            .last()
+            .expect("evidence")["id"]
+            .as_str()
+            .expect("id");
+        let cursor = self.records[self.ids[last]].2;
+        Ok((serde_json::to_string(&input)?, cursor))
+    }
+
+    pub(crate) fn complete_analysis(&mut self, cursor: u64) -> Result<()> {
+        ensure!(
+            cursor >= self.ledger.processed_cursor && cursor <= self.ledger.observed_cursor,
+            "invalid analysis cursor"
+        );
+        let previous = self.ledger.clone();
+        self.ledger.processed_cursor = cursor;
+        self.ledger.pending =
+            self.records.len() - self.records.partition_point(|(_, _, end)| *end <= cursor);
+        if let Err(error) = self.save() {
+            self.ledger = previous;
+            return Err(error);
+        }
+        Ok(())
+    }
+
     pub fn save(&self) -> Result<()> {
         atomic(
             &self.root.join("ledger.json"),
@@ -70,14 +376,12 @@ impl Engine {
         )?;
         Ok(())
     }
+    #[allow(clippy::needless_pass_by_value)] // Keep the owned observation handoff API.
     pub fn record(&mut self, experience: Experience) -> Result<()> {
         ensure!(experience.project == self.project, "wrong project");
-        if self
-            .ledger
-            .experiences
-            .iter()
-            .any(|e| e.id == experience.id)
-        {
+        self.load_records()?;
+        self.observe()?;
+        if self.ids.contains_key(&experience.id) {
             return Ok(());
         }
         // Do not propagate recognized credential material into learning artifacts.
@@ -88,33 +392,9 @@ impl Engine {
         for text in experience.errors.iter().chain(&experience.user_corrections) {
             screen(text)?;
         }
-        let path = self.root.join("experiences.jsonl");
-        plain(&path)?;
-        let mut file = fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)?;
-        writeln!(file, "{}", serde_json::to_string(&experience)?)?;
-        for name in &experience.skills_used {
-            if let Some(meta) = self.ledger.skills.get_mut(name) {
-                if meta.source != "evolved" || !matches!(meta.state, State::Trial | State::Active) {
-                    continue;
-                }
-                meta.last_used_at = experience.at;
-                meta.use_count += 1;
-                if experience.success && experience.errors.is_empty() {
-                    meta.success_count += 1;
-                } else {
-                    meta.failure_count += 1;
-                }
-            }
-        }
-        self.ledger.experiences.push(experience);
-        if self.ledger.experiences.len() > self.config.max_experiences {
-            self.ledger.experiences.remove(0);
-        }
-        self.ledger.pending += 1;
-        self.save()
+        crate::storage::append_experience(&self.root.join("experiences.jsonl"), &experience)?;
+        self.load_records()?;
+        self.observe()
     }
     #[must_use]
     pub fn due(&self, ended: bool, time: u64) -> bool {
@@ -166,8 +446,7 @@ impl Engine {
         );
         ids.iter()
             .map(|id| {
-                self.ledger
-                    .experiences
+                self.recent
                     .iter()
                     .find(|e| &e.id == id && e.project == self.project)
                     .ok_or_else(|| anyhow::anyhow!("unknown evidence"))
@@ -389,7 +668,7 @@ impl Engine {
                 meta.epoch = self.ledger.epoch;
                 // Attribute semantic corrections only during low-frequency analysis.
                 for quote in corrections {
-                    for experience in &mut self.ledger.experiences {
+                    for experience in &mut self.recent {
                         if meta.evidence.contains(&experience.id)
                             && experience.task.contains(&quote)
                             && !experience.user_corrections.contains(&quote)
@@ -500,31 +779,35 @@ impl Engine {
                     "missing user provenance"
                 );
                 memory::validate_fact(&key, &value)?;
-                let store = memory::MemoryStore::open(&self.database)?;
+                let store = memory::MemoryStore::open(&self.database)
+                    .context(crate::storage::PersistenceFailure)?;
                 let scope = memory::MemoryScope::Project;
                 let existing = store
-                    .scoped_memories(scope, &self.project)?
+                    .scoped_memories(scope, &self.project)
+                    .context(crate::storage::PersistenceFailure)?
                     .into_iter()
                     .find(|m| m.key == key);
                 ensure!(
                     existing.as_ref().is_none_or(|m| m.source == "evolved"),
                     "user memory protected"
                 );
-                store.change_fact(
-                    &memory::MemoryRecord {
-                        key,
-                        value,
-                        scope,
-                        owner: self.project.clone(),
-                        source: "evolved".into(),
-                        updated_at: 0,
-                        memory_type: memory::MemoryType::Experience,
-                        always_include: false,
-                        ..Default::default()
-                    },
-                    existing.as_ref().map(|m| m.value.as_str()),
-                    false,
-                )?;
+                store
+                    .change_fact(
+                        &memory::MemoryRecord {
+                            key,
+                            value,
+                            scope,
+                            owner: self.project.clone(),
+                            source: "evolved".into(),
+                            updated_at: 0,
+                            memory_type: memory::MemoryType::Experience,
+                            always_include: false,
+                            ..Default::default()
+                        },
+                        existing.as_ref().map(|m| m.value.as_str()),
+                        false,
+                    )
+                    .context(crate::storage::PersistenceFailure)?;
             }
             Action::Ignore => {}
         }
@@ -538,7 +821,7 @@ impl Engine {
             }
         }
         Ok(serde_json::to_string(
-            &serde_json::json!({"experiences": self.ledger.experiences, "metadata": self.ledger.skills, "packages": packages, "config": self.config}),
+            &serde_json::json!({"experiences": self.recent, "metadata": self.ledger.skills, "packages": packages, "config": self.config}),
         )?)
     }
 

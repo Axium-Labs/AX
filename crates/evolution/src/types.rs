@@ -68,9 +68,14 @@ pub struct Metadata {
     pub trial_success_baseline: u64,
 }
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Ledger {
+    pub version: u32,
+    /// Byte position after the last successfully analyzed record.
+    pub processed_cursor: u64,
+    /// Byte position whose usage telemetry has been checkpointed.
+    pub observed_cursor: u64,
     pub skills: BTreeMap<String, Metadata>,
-    pub experiences: Vec<Experience>,
     pub pending: usize,
     pub last_analysis: u64,
     pub epoch: u64,

@@ -87,6 +87,7 @@ pub fn start(
     let runtime = tokio::runtime::Handle::current();
     std::thread::spawn(move || {
         let mut stopped = false;
+        let mut cached_engine = None;
         loop {
             // Once a shutdown is requested the queued work is drained and this
             // thread exits on its own, so a surviving `RecordSink` clone cannot
@@ -106,6 +107,7 @@ pub fn start(
                 &protected_names,
                 &runtime,
                 Some(command),
+                &mut cached_engine,
             );
             match result {
                 Ok(true) => {
@@ -129,6 +131,7 @@ pub fn start(
                 &protected_names,
                 &runtime,
                 None,
+                &mut cached_engine,
             )
         {
             eprintln!("Evolution: {error:#}");
@@ -168,6 +171,7 @@ Use the latest user correction as the authoritative preference when evidence con
 Return [] if no durable learning is justified.
 ";
 
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)] // Keep the locked analysis boundary together.
 fn process(
     root: &std::path::Path,
     database: &std::path::Path,
@@ -176,12 +180,12 @@ fn process(
     protected: &[String],
     runtime: &tokio::runtime::Handle,
     command: Option<Command>,
+    cached: &mut Option<Engine>,
 ) -> Result<bool> {
-    // open() verifies territory before a lock file can be created there.
-    let initial = Engine::open(root.into(), database.into(), project.into())?;
-    if !initial.config.enabled {
-        return Ok(false);
+    for path in root.ancestors() {
+        crate::storage::plain(path)?;
     }
+    fs::create_dir_all(root)?;
     let lock_path = root.join("writer.lock");
     crate::storage::plain(&lock_path)?;
     let lock = fs::OpenOptions::new()
@@ -191,7 +195,15 @@ fn process(
         .write(true)
         .open(lock_path)?;
     lock.lock()?; // Blocking happens exclusively on this worker thread; OS releases crash locks.
-    let mut engine = Engine::open(root.into(), database.into(), project.into())?;
+    if let Some(engine) = cached {
+        engine.refresh()?;
+    } else {
+        *cached = Some(Engine::open(root.into(), database.into(), project.into())?);
+    }
+    let engine = cached.as_mut().expect("initialized engine");
+    if !engine.config.enabled {
+        return Ok(false);
+    }
     let ended = !matches!(command, Some(Command::Record(_)));
     if let Some(Command::Record(experience)) = command {
         engine.record(*experience)?;
@@ -213,7 +225,7 @@ fn process(
                 .unwrap_or(model::DEFAULT_OUTPUT_RESERVE_TOKENS),
         )
         .saturating_sub(CREATOR.len() + CONTRACT.len());
-    let input = engine.bounded_analysis_input(budget)?;
+    let (input, cursor) = engine.prepare_analysis(budget)?;
     let response = runtime.block_on(async {
         tokio::time::timeout(
             std::time::Duration::from_secs(engine.config.analysis_timeout_secs),
@@ -272,13 +284,19 @@ fn process(
         match engine.apply(action, time) {
             Ok(()) => engine.audit(label, "applied")?,
             Err(error) => {
+                if error.is::<crate::storage::PersistenceFailure>()
+                    || error
+                        .chain()
+                        .any(<dyn std::error::Error>::is::<std::io::Error>)
+                {
+                    return Err(error);
+                }
                 engine.audit(label, &format!("rejected: {error}"))?;
                 eprintln!("Evolution action rejected: {error:#}");
             }
         }
     }
     engine.maintain(time)?;
-    engine.ledger.pending = 0;
-    engine.save()?;
+    engine.complete_analysis(cursor)?;
     Ok(true)
 }

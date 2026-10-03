@@ -518,8 +518,8 @@ mod tests {
         state.evolution_finish().await;
         let engine =
             ::evolution::Engine::open(root, engine.database, state.project_id.clone()).unwrap();
-        assert_eq!(engine.ledger.experiences.len(), 1);
-        assert!(!engine.ledger.experiences[0].success);
-        assert!(engine.ledger.experiences[0].errors[0].contains("interrupted"));
+        assert_eq!(engine.recent.len(), 1);
+        assert!(!engine.recent[0].success);
+        assert!(engine.recent[0].errors[0].contains("interrupted"));
     }
 }

@@ -75,7 +75,7 @@ fn recording_is_bounded_durable_and_deduplicated() {
         f.engine.record(experience(i)).unwrap();
     }
     f.engine.record(experience(5)).unwrap();
-    assert_eq!(f.engine.ledger.experiences.len(), 3);
+    assert_eq!(f.engine.recent.len(), 3);
     assert_eq!(f.engine.ledger.pending, 6);
     assert_eq!(
         fs::read_to_string(f.engine.root.join("experiences.jsonl"))
@@ -108,14 +108,14 @@ fn one_off_low_confidence_failed_and_cross_project_evidence_cannot_create() {
     wrong.project = "other".into();
     assert!(f.engine.record(wrong).is_err());
     let ids = f.stable();
-    for e in &mut f.engine.ledger.experiences {
+    for e in &mut f.engine.recent {
         e.success = false;
     }
     // Failed outcomes can justify an explicit model proposal for a corrective lesson.
     f.engine
         .apply(create("failure-lesson", ids.clone()), 100_000)
         .unwrap();
-    for e in &mut f.engine.ledger.experiences {
+    for e in &mut f.engine.recent {
         e.success = true;
     }
     assert!(f.engine.evidence_gate(&ids, 0.0, 100_000).unwrap() < f.engine.config.create_score);
@@ -235,7 +235,7 @@ fn refinement_records_corrections_and_retrials_without_resetting_lifetime_counts
     assert_eq!(meta.use_count, 6);
     assert_eq!(meta.corrections, 1);
     assert!(
-        f.engine.ledger.experiences[0]
+        f.engine.recent[0]
             .user_corrections
             .contains(&"verify the binary".into())
     );
@@ -548,7 +548,7 @@ async fn worker_records_without_model_calls_then_analyzes_at_session_end() {
         State::Candidate
     );
     assert_eq!(engine.ledger.pending, 0);
-    assert_eq!(engine.ledger.experiences.len(), 6);
+    assert_eq!(engine.recent.len(), 6);
 }
 
 #[tokio::test]
@@ -587,7 +587,8 @@ async fn malformed_and_timeout_analysis_keep_evidence_and_obey_cooldown() {
         )
         .unwrap();
         assert_eq!(engine.ledger.pending, 1);
-        assert_eq!(engine.ledger.experiences.len(), 1);
+        assert_eq!(engine.ledger.processed_cursor, 0);
+        assert_eq!(engine.recent.len(), 1);
         assert!(!engine.due(true, now()));
         assert!(engine.ledger.skills.is_empty());
     }
@@ -652,3 +653,6 @@ fn symlinks_never_become_mutation_territory() {
             .is_err()
     );
 }
+
+#[path = "persistence.rs"]
+mod persistence;
