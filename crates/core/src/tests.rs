@@ -68,6 +68,7 @@ async fn failed_patch_recovers_with_local_read_patch_and_minimal_check() {
     ));
     tokio::fs::write(&path, "old\nkeep\n").await.unwrap();
     let call = |id: &str, name: &str, input: Value| ModelResponse {
+        provider_metadata: None,
         usage: None,
         content: String::new(),
         tool_calls: vec![ToolCall {
@@ -104,6 +105,7 @@ async fn failed_patch_recovers_with_local_read_patch_and_minimal_check() {
                 serde_json::json!({"operation":"read","path":path,"start_line":1,"end_line":1}),
             ),
             ModelResponse {
+                provider_metadata: None,
                 usage: None,
                 content: "done".into(),
                 tool_calls: vec![],
@@ -160,6 +162,7 @@ async fn checkpoint_failure_stops_before_tool_execution_and_keeps_recoverable_hi
     let provider = ScriptedProvider {
         model: "scripted".into(),
         responses: Mutex::new(VecDeque::from([ModelResponse {
+            provider_metadata: None,
             usage: None,
             content: String::new(),
             tool_calls: vec![ToolCall {
@@ -205,6 +208,7 @@ async fn each_model_and_tool_message_is_checkpointed_in_order() {
         model: "scripted".into(),
         responses: Mutex::new(VecDeque::from([
             ModelResponse {
+                provider_metadata: None,
                 usage: None,
                 content: String::new(),
                 tool_calls: vec![ToolCall {
@@ -218,6 +222,7 @@ async fn each_model_and_tool_message_is_checkpointed_in_order() {
                 finish_reason: None,
             },
             ModelResponse {
+                provider_metadata: None,
                 usage: None,
                 content: "done".into(),
                 tool_calls: vec![],
@@ -267,6 +272,7 @@ impl ModelProvider for EchoProvider {
 
     async fn complete(&self, request: ModelRequest) -> Result<ModelResponse, ModelError> {
         Ok(ModelResponse {
+            provider_metadata: None,
             usage: None,
             content: request
                 .messages
@@ -311,6 +317,7 @@ async fn loops_through_tool_result_to_final_answer() {
         model: "scripted".to_owned(),
         responses: Mutex::new(VecDeque::from([
             ModelResponse {
+                provider_metadata: None,
                 usage: None,
                 content: String::new(),
                 tool_calls: vec![ToolCall {
@@ -324,6 +331,7 @@ async fn loops_through_tool_result_to_final_answer() {
                 finish_reason: Some("tool_calls".to_owned()),
             },
             ModelResponse {
+                provider_metadata: None,
                 usage: None,
                 content: "done".to_owned(),
                 tool_calls: Vec::new(),
@@ -368,6 +376,7 @@ async fn compresses_old_context_without_truncating_recent_messages() {
     let provider = ScriptedProvider {
         model: "scripted".to_owned(),
         responses: Mutex::new(VecDeque::from([ModelResponse {
+            provider_metadata: None,
             usage: None,
             content: r#"{"state":[{"type":"goal","content":"goal and decisions preserved","importance":0.9}]}"#.to_owned(),
             tool_calls: Vec::new(),
@@ -456,6 +465,7 @@ async fn compacted_context_stays_within_final_request_budget() {
     let provider = ScriptedProvider {
         model: "scripted".to_owned(),
         responses: Mutex::new(VecDeque::from([ModelResponse {
+            provider_metadata: None,
             usage: None,
             content:
                 r#"{"state":[{"type":"progress","content":"short summary","importance":0.8}]}"#
@@ -519,6 +529,7 @@ impl ModelProvider for RecordingProvider {
             .is_some_and(|m| m.content.starts_with("Compress the older conversation"))
         {
             return Ok(ModelResponse {
+                provider_metadata: None,
                 usage: None,
                 content: r#"{"state":[{"type":"goal","content":"finish","importance":0.9}]}"#
                     .into(),
@@ -586,18 +597,21 @@ async fn compresses_between_tool_calls_and_preserves_raw_turn() {
     let provider = Arc::new(RecordingProvider {
         replies: Mutex::new(VecDeque::from([
             ModelResponse {
+                provider_metadata: None,
                 usage: None,
                 content: String::new(),
                 tool_calls: vec![test_call("a", true)],
                 finish_reason: None,
             },
             ModelResponse {
+                provider_metadata: None,
                 usage: None,
                 content: String::new(),
                 tool_calls: vec![test_call("b", false)],
                 finish_reason: None,
             },
             ModelResponse {
+                provider_metadata: None,
                 usage: None,
                 content: "done".into(),
                 tool_calls: vec![],
@@ -642,7 +656,7 @@ async fn compresses_between_tool_calls_and_preserves_raw_turn() {
 #[tokio::test]
 async fn semantic_state_keeps_early_constraints_and_failures_without_summary_recursion() {
     let provider = ScriptedProvider { model: "scripted".into(), responses: Mutex::new(VecDeque::from([
-        ModelResponse { usage: None, content: r#"{"state":[{"type":"constraint","content":"Do not change the public API","importance":1.0},{"type":"failure","content":"Approach A failed because of a parser stack overflow","importance":0.95}]}"#.into(), tool_calls: vec![], finish_reason: None }
+        ModelResponse { provider_metadata: None, usage: None, content: r#"{"state":[{"type":"constraint","content":"Do not change the public API","importance":1.0},{"type":"failure","content":"Approach A failed because of a parser stack overflow","importance":0.95}]}"#.into(), tool_calls: vec![], finish_reason: None }
     ])) };
     let mut kernel = AgentKernel::new(
         Arc::new(provider),
@@ -739,7 +753,7 @@ fn structured_summary_uses_importance_over_keywords_and_type() {
 #[tokio::test]
 async fn semantic_model_can_preserve_constraint_without_keyword() {
     let provider = ScriptedProvider { model: "scripted".into(), responses: Mutex::new(VecDeque::from([
-        ModelResponse { usage: None, content: r#"{"state":[{"type":"constraint","content":"All deliverables use British English","importance":0.98}]}"#.into(), tool_calls: vec![], finish_reason: None }
+        ModelResponse { provider_metadata: None, usage: None, content: r#"{"state":[{"type":"constraint","content":"All deliverables use British English","importance":0.98}]}"#.into(), tool_calls: vec![], finish_reason: None }
     ])) };
     let mut kernel = AgentKernel::new(
         Arc::new(provider),
@@ -769,6 +783,7 @@ async fn malformed_structured_output_keeps_original_context() {
     let provider = ScriptedProvider {
         model: "scripted".into(),
         responses: Mutex::new(VecDeque::from([ModelResponse {
+            provider_metadata: None,
             usage: None,
             content: "{broken JSON".into(),
             tool_calls: vec![],
@@ -840,6 +855,7 @@ async fn tool_budget_stops_before_execution_and_keeps_valid_transcript() {
     let provider = ScriptedProvider {
         model: "test".into(),
         responses: Mutex::new(VecDeque::from([ModelResponse {
+            provider_metadata: None,
             usage: None,
             content: String::new(),
             tool_calls: vec![

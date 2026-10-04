@@ -273,6 +273,7 @@ fn provider_catalog(codex_auth: Option<&PathBuf>) -> Vec<Value> {
                 model::ProviderAuthKind::Ambient => "ambient",
             },
             "unsupported_reason":model::provider_unsupported_reason(spec.id),
+            "configuration_reason":model::provider_configuration_reason(spec.id),
             "source":if !configured { None } else if stored.iter().any(|id| id == spec.id) { Some("AX") } else { Some("environment") },
             "model_source": if models.is_empty() { "none" } else if crate::bootstrap::ax_models_dir().join(format!("{}.json", spec.id)).is_file() { "cache" } else { "fallback" },
             "models":models})

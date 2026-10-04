@@ -29,7 +29,7 @@ pub fn estimate_tokens(messages: &[Message]) -> usize {
     messages
         .iter()
         .map(|message| {
-            estimate_text_tokens(&message.content)
+            let visible = estimate_text_tokens(&message.content)
                 + message
                     .parts
                     .iter()
@@ -45,7 +45,16 @@ pub fn estimate_tokens(messages: &[Message]) -> usize {
                         estimate_text_tokens(&call.function.name)
                             + estimate_text_tokens(&call.function.arguments)
                     })
-                    .sum::<usize>()
+                    .sum::<usize>();
+            // Signed native blocks include thinking that is absent from the
+            // visible transcript. They replace visible assistant content on
+            // replay, so account for the larger representation, not both.
+            let native = message
+                .provider_metadata
+                .as_ref()
+                .and_then(|data| data.get("content"))
+                .map_or(0, |content| estimate_text_tokens(&content.to_string()));
+            visible.max(native)
                 + message
                     .tool_call_id
                     .as_ref()
@@ -54,6 +63,10 @@ pub fn estimate_tokens(messages: &[Message]) -> usize {
         })
         .sum()
 }
+
+#[cfg(test)]
+#[path = "../../../test/providers/context.rs"]
+mod native_context_tests;
 
 pub(crate) fn estimate_text_tokens(text: &str) -> usize {
     let (ascii, non_ascii) = text.chars().fold((0_usize, 0_usize), |counts, character| {

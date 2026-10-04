@@ -17,3 +17,10 @@ When web research is needed:
 6. Prefer primary, official, and authoritative sources.
 7. Avoid repeating equivalent searches.
 8. Stop searching once enough evidence is available to answer accurately.
+
+If `web search` fails, report the provider/network error and prefer fixing provider
+configuration or retrying later. Do not automatically bypass the Search Provider
+layer with shell scripts, Python urllib, curl, or another engine scraper.
+When the user explicitly requests an alternative search method or network
+diagnostics, follow that request subject to the applicable tool permissions.
+Use `web fetch` for HTTP content from already known source URLs.

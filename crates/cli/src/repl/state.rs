@@ -754,6 +754,7 @@ pub(crate) fn restore_message(stored: &StoredMessage) -> Message {
         return message;
     }
     Message {
+        provider_metadata: None,
         usage: None,
         role: match stored.role {
             MessageRole::User => Role::User,
@@ -843,6 +844,7 @@ mod file_context_tests {
             _: ModelRequest,
         ) -> std::result::Result<ModelResponse, ModelError> {
             Ok(ModelResponse {
+                provider_metadata: None,
                 usage: None,
                 content: String::new(),
                 tool_calls: Vec::new(),

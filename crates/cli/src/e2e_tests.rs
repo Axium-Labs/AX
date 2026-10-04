@@ -33,6 +33,7 @@ const ROOT_TEXT: &str = "This repository is AX; keep changes minimal and explain
 
 fn text(content: &str) -> ModelResponse {
     ModelResponse {
+        provider_metadata: None,
         content: content.to_owned(),
         tool_calls: Vec::new(),
         usage: None,
@@ -42,6 +43,7 @@ fn text(content: &str) -> ModelResponse {
 
 fn call(id: &str, name: &str, input: serde_json::Value) -> ModelResponse {
     ModelResponse {
+        provider_metadata: None,
         content: String::new(),
         tool_calls: vec![ToolCall {
             id: id.to_owned(),

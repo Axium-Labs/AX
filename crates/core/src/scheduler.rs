@@ -1210,6 +1210,7 @@ mod tests {
                             .is_object()
                     );
                     Ok(ModelResponse {
+                        provider_metadata: None,
                         usage: None,
                         content: String::new(),
                         tool_calls: vec![
@@ -1226,6 +1227,7 @@ mod tests {
                         .collect();
                     assert_eq!(results, ["slow", "fast"]);
                     Ok(ModelResponse {
+                        provider_metadata: None,
                         usage: None,
                         content: "done".into(),
                         tool_calls: Vec::new(),

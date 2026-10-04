@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 const DEFAULT_MAX_RESULTS: usize = 200;
 const MAX_MAX_RESULTS: usize = 2_000;
 
-const DESCRIPTION: &str = "Find files and directories by name, path or extension without reading their contents. Use it when you do not know where a file lives; read the returned paths directly afterwards. `pattern` accepts globs such as `**/*.jsonl`, `src/**/*.ts` or `*.toml` (a bare name pattern matches at any depth). Supports include/exclude globs, depth and result limits. Generated directories (.git, target, node_modules, .venv, dist, build, caches) are skipped automatically. Returns workspace-relative paths. Prefer this over a recursive shell scan (Get-ChildItem -Recurse, find, rg --files); use shell only when no discovery tool can express the request.";
+const DESCRIPTION: &str = "Find files and directories by name, path or extension without reading their contents. Use it when you do not know where a file lives; read the returned paths directly afterwards. `pattern` accepts globs such as `**/*.jsonl`, `src/**/*.ts` or `*.toml` (a bare name pattern matches at any depth). Supports include/exclude globs, depth and result limits. Generated directories (.git, target, node_modules, .venv, dist, build, caches) are skipped automatically. Returns workspace-relative paths. Prefer this over a recursive shell scan (Get-ChildItem -Recurse, find, rg --files); shell discovery is also appropriate when explicitly requested, dedicated tools are unavailable, or native filters/pipelines are needed.";
 
 /// One tool, two accepted names. `find_files` and `glob` share this
 /// implementation, schema and traversal so the model can pick either name

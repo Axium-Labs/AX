@@ -28,7 +28,7 @@ const MAX_CONTEXT_LINES: usize = 10;
 const MAX_LINE_CHARS: usize = 500;
 const MAX_CONTEXT_CHARS: usize = 200;
 
-const DESCRIPTION: &str = "Search file contents for literal text, symbols or a regular expression. This is the grep tool: it never enumerates paths by name (use find_files/glob for that) and never reads a file you already located (use filesystem read). `mode` is `literal` (default) or `regex`; matching is per line. Narrow the scan with `path`, `include` and `exclude` before widening it. `output_mode` is `content` (default) or `files_with_matches`. No match is a successful empty result, not a failure — do not retry the same query over the same scope. Generated directories (.git, target, node_modules, .venv, dist, build, caches) are skipped automatically.";
+const DESCRIPTION: &str = "Search file contents for literal text, symbols or a regular expression. This is the grep tool: use find_files/glob for path-name discovery and filesystem read for full file context. Searching a known file is appropriate for targeted regex, symbol or usage analysis. `mode` is `literal` (default) or `regex`; matching is per line. Narrow the scan with `path`, `include` and `exclude` before widening it. `output_mode` is `content` (default) or `files_with_matches`. No match is a successful empty result, not a failure. Avoid repeating an unchanged query without new evidence; changed files, revised patterns/scopes or explicit user-requested verification can justify another search. Generated directories (.git, target, node_modules, .venv, dist, build, caches) are skipped automatically.";
 
 /// Literal text or a regular expression.
 #[derive(Clone, Copy, Deserialize, Default, PartialEq, Eq)]

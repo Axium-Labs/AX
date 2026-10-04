@@ -26,6 +26,7 @@ pub enum ProviderProtocol {
     Google,
     Bedrock,
     Managed,
+    PiMessages,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -68,7 +69,7 @@ pub static PROVIDERS: &[ProviderSpec] = &[
     ProviderSpec {
         id: "amazon-bedrock",
         name: "Amazon Bedrock",
-        environment: None,
+        environment: Some("AWS_BEARER_TOKEN_BEDROCK"),
         auth: ProviderAuthKind::Ambient,
         protocol: ProviderProtocol::Bedrock,
     },
@@ -185,7 +186,7 @@ pub static PROVIDERS: &[ProviderSpec] = &[
         "QWEN_TOKEN_PLAN_API_KEY",
         OpenAiCompatible
     ),
-    key!("radius", "Radius", "RADIUS_API_KEY", OpenAiCompatible),
+    key!("radius", "Radius", "RADIUS_API_KEY", PiMessages),
     key!("together", "Together", "TOGETHER_API_KEY", OpenAiCompatible),
     key!(
         "vercel-ai-gateway",
@@ -227,27 +228,17 @@ pub fn provider(id: &str) -> Option<&'static ProviderSpec> {
     PROVIDERS.iter().find(|provider| provider.id == id)
 }
 
-/// Pi provider base URLs for adapters whose public API follows the `OpenAI`
-/// compatibility shape. AX uses these only to perform authenticated live
-/// discovery; model ids still come from each provider's `/models` response.
-///
-/// Every entry here is the catalog's own endpoint for that provider, minus the
-/// `/chat/completions` suffix, and each one has been checked against the live
-/// host: a supported path answers 401/405 without a key, never 404.
-///
-/// `cloudflare-workers-ai` is account-scoped, so its path is stored with the
-/// catalog's own `${CLOUDFLARE_ACCOUNT_ID}` placeholder and expanded at read
-/// time. While that variable is unset the provider stays unsupported rather
-/// than resolving to a URL that cannot work. Three catalog entries still have
-/// no base URL at all — `azure-openai-responses` (per-resource endpoint),
-/// `cloudflare-ai-gateway` (account *and* gateway in the path) and `radius`
-/// (no models in the catalog) — see [`provider_unsupported_reason`].
+/// OpenAI-compatible base URLs. Account placeholders are expanded locally.
+/// Missing endpoint configuration does not mean the runtime adapter is absent.
 #[must_use]
 pub fn provider_base_url(id: &str) -> Option<String> {
     let template = match id {
         "ant-ling" => "https://api.ant-ling.com/v1",
         "baseten" => "https://inference.baseten.co/v1",
         "cerebras" => "https://api.cerebras.ai/v1",
+        "cloudflare-ai-gateway" => {
+            "https://gateway.ai.cloudflare.com/v1/${CLOUDFLARE_ACCOUNT_ID}/${CLOUDFLARE_GATEWAY_ID}/compat"
+        }
         "cloudflare-workers-ai" => {
             "https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/ai/v1"
         }
@@ -288,7 +279,7 @@ pub fn provider_base_url(id: &str) -> Option<String> {
 
 /// Substitutes every `${VAR}` in an endpoint template. Returns `None` when a
 /// referenced variable is unset or empty, so an account-scoped provider reads
-/// as unsupported instead of as a broken URL.
+/// as missing configuration instead of yielding a broken URL.
 fn expand_environment(template: &str) -> Option<String> {
     let mut expanded = String::with_capacity(template.len());
     let mut rest = template;
@@ -307,8 +298,8 @@ fn expand_environment(template: &str) -> Option<String> {
 
 /// The one definition of "AX can drive this provider".
 ///
-/// A provider qualifies when its wire protocol has a runtime adapter *and* AX
-/// can form a request URL for it. The CLI filter and the Crew status surface
+/// A provider qualifies when its wire protocol has a runtime adapter.
+/// Missing account/resource fields are reported separately as configuration errors. The CLI filter and the Crew status surface
 /// both read this, so a catalog entry can never look usable in one place and
 /// unsupported in another.
 #[must_use]
@@ -319,8 +310,13 @@ pub fn provider_supported(id: &str) -> bool {
     provider(id).is_some_and(|spec| {
         matches!(
             spec.protocol,
-            ProviderProtocol::OpenAiCompatible | ProviderProtocol::OpenAiResponses
-        ) && (matches!(spec.id, "openai" | "openai-codex") || provider_base_url(spec.id).is_some())
+            ProviderProtocol::OpenAiCompatible
+                | ProviderProtocol::OpenAiResponses
+                | ProviderProtocol::Anthropic
+                | ProviderProtocol::Google
+                | ProviderProtocol::Bedrock
+                | ProviderProtocol::PiMessages
+        )
     })
 }
 
@@ -333,23 +329,36 @@ pub fn provider_unsupported_reason(id: &str) -> Option<&'static str> {
         return None;
     }
     Some(match id {
-        "azure-openai-responses" => {
-            "endpoint is per Azure resource, and AX has no resource configuration"
-        }
-        "cloudflare-ai-gateway" => "endpoint needs an account id and a gateway name in the path",
-        "radius" => "no endpoint and no models in the catalog",
-        "amazon-bedrock" | "anthropic" | "google" | "google-vertex" => {
-            "protocol has no runtime adapter in AX"
-        }
         "github-copilot" => "hosted OAuth only, with no runtime adapter in AX",
-        "cloudflare-workers-ai" => "CLOUDFLARE_ACCOUNT_ID is not set",
-        _ => "no OpenAI-compatible base URL in the catalog",
+        _ => "unknown provider or no runtime adapter in AX",
     })
 }
 
 #[must_use]
 pub fn provider_chat_endpoint(id: &str) -> Option<String> {
     provider_base_url(id).map(|base| format!("{}/chat/completions", base.trim_end_matches('/')))
+}
+
+/// Missing non-secret endpoint fields, separate from adapter support.
+#[must_use]
+pub fn provider_configuration_reason(id: &str) -> Option<&'static str> {
+    let present = |name| std::env::var(name).is_ok_and(|v| !v.trim().is_empty());
+    match id {
+        "cloudflare-workers-ai" if !present("CLOUDFLARE_ACCOUNT_ID") => {
+            Some("CLOUDFLARE_ACCOUNT_ID is not set")
+        }
+        "cloudflare-ai-gateway"
+            if !present("CLOUDFLARE_ACCOUNT_ID") || !present("CLOUDFLARE_GATEWAY_ID") =>
+        {
+            Some("Cloudflare Gateway requires CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_GATEWAY_ID")
+        }
+        "azure-openai-responses"
+            if !present("AZURE_OPENAI_BASE_URL") && !present("AZURE_OPENAI_RESOURCE_NAME") =>
+        {
+            Some("Azure requires AZURE_OPENAI_BASE_URL or AZURE_OPENAI_RESOURCE_NAME")
+        }
+        _ => None,
+    }
 }
 
 /// `DeepSeek`'s provider defaults, kept outside the shared wire adapter.
@@ -465,23 +474,10 @@ pub(crate) fn compatible_model_info(id: String, provider: &str, endpoint: &str) 
     }
 }
 
-/// Providers for which pi exposes an account/subscription OAuth login in
-/// addition to (or instead of) an API-key login.
+/// Account login flows implemented by AX (not merely advertised by pi).
 #[must_use]
 pub fn provider_supports_oauth(id: &str) -> bool {
-    matches!(
-        id,
-        "anthropic"
-            | "github-copilot"
-            | "kimi-coding"
-            | "meta"
-            | "openai-codex"
-            | "workbuddy"
-            | "workbuddy-cn"
-            | "openrouter"
-            | "radius"
-            | "xai"
-    )
+    matches!(id, "openai-codex" | "workbuddy" | "workbuddy-cn")
 }
 
 /// Offline bootstrap catalog shipped with AX. These entries are not proof of access.
@@ -656,17 +652,17 @@ mod tests {
         }
     }
 
-    /// An account-scoped endpoint must read as unsupported while its variable is
-    /// missing, rather than resolving to a URL containing a literal `${...}`.
+    /// Missing account fields prevent URL construction, but do not hide an
+    /// implemented adapter from credential setup.
     #[test]
     fn account_scoped_endpoints_require_their_variable() {
         if std::env::var("CLOUDFLARE_ACCOUNT_ID").is_ok_and(|value| !value.is_empty()) {
             return;
         }
         assert_eq!(provider_base_url("cloudflare-workers-ai"), None);
-        assert!(!provider_supported("cloudflare-workers-ai"));
+        assert!(provider_supported("cloudflare-workers-ai"));
         assert_eq!(
-            provider_unsupported_reason("cloudflare-workers-ai"),
+            provider_configuration_reason("cloudflare-workers-ai"),
             Some("CLOUDFLARE_ACCOUNT_ID is not set")
         );
     }
@@ -702,14 +698,6 @@ mod tests {
                     "{} is supported",
                     spec.id
                 );
-                assert!(
-                    matches!(
-                        spec.id,
-                        "openai" | "openai-codex" | "workbuddy" | "workbuddy-cn"
-                    ) || provider_chat_endpoint(spec.id).is_some(),
-                    "{} is supported but has no endpoint",
-                    spec.id
-                );
             } else {
                 let reason = provider_unsupported_reason(spec.id)
                     .unwrap_or_else(|| panic!("{} is unsupported with no reason", spec.id));
@@ -718,7 +706,7 @@ mod tests {
         }
         assert_eq!(
             supported,
-            PROVIDERS.len() - 9 + account_scoped_available(),
+            PROVIDERS.len() - 1,
             "the unsupported set changed; update provider_unsupported_reason"
         );
     }
@@ -744,11 +732,5 @@ mod tests {
             let info = compatible_model_info(id.to_owned(), "xiaomi", ENDPOINT);
             assert!(info.supports_tools, "{id} should stay tool-capable");
         }
-    }
-
-    /// `cloudflare-workers-ai` joins the supported set only once its account
-    /// variable is present, so the expected count depends on the environment.
-    fn account_scoped_available() -> usize {
-        usize::from(std::env::var("CLOUDFLARE_ACCOUNT_ID").is_ok_and(|value| !value.is_empty()))
     }
 }

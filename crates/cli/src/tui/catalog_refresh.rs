@@ -20,8 +20,8 @@ use std::{
 };
 
 use model::{
-    AuthStorage, ModelCatalog, ModelInfo, ModelRegistry, OpenAiCompatibleConfig,
-    OpenAiCompatibleProvider, OpenAiConfig, OpenAiProvider, ProviderProtocol,
+    AuthStorage, ModelCatalog, ModelInfo, ModelRegistry, OpenAiCompatibleProvider, OpenAiConfig,
+    OpenAiProvider,
 };
 
 /// Overall deadline for a full catalog refresh, mirroring pi's 15s timeout.
@@ -201,8 +201,8 @@ pub async fn refresh_provider(
                 .await,
         );
     }
-    let provider = compatible_provider(&auth, provider_id)?;
-    Some(registry.discover(&provider).await)
+    let provider = catalog_provider(&auth, provider_id)?;
+    Some(registry.discover(provider.as_ref()).await)
 }
 
 /// Providers AX considers configured for the picker. Delegates to
@@ -260,10 +260,10 @@ pub(crate) fn cached_snapshot(data_dir: &Path, codex_auth: Option<&PathBuf>) -> 
         .iter()
         .filter(|provider| !matches!(provider.as_str(), "deepseek" | "openai" | "openai-codex"))
     {
-        let Some(provider) = compatible_provider(&auth, provider_id) else {
+        let Some(provider) = catalog_provider(&auth, provider_id) else {
             continue;
         };
-        models.extend(registry.cached(&provider, "cached snapshot").models);
+        models.extend(registry.cached(provider.as_ref(), "cached snapshot").models);
     }
     for id in ["workbuddy", "workbuddy-cn"] {
         if configured.iter().any(|configured_id| configured_id == id)
@@ -348,10 +348,10 @@ async fn run_refresh(data_dir: &Path, codex_auth: Option<PathBuf>) -> CatalogRef
     let compatible_futures = configured
         .iter()
         .filter(|provider| !matches!(provider.as_str(), "deepseek" | "openai" | "openai-codex"))
-        .filter_map(|provider_id| compatible_provider(&auth, provider_id))
+        .filter_map(|provider_id| catalog_provider(&auth, provider_id))
         .map(|provider| async move {
             ModelRegistry::new(crate::bootstrap::ax_models_dir())
-                .discover(&provider)
+                .discover(provider.as_ref())
                 .await
         });
     let compatible = futures_util::future::join_all(compatible_futures).await;
@@ -418,24 +418,61 @@ fn workbuddy_provider(
     .ok()
 }
 
-fn compatible_provider(auth: &AuthStorage, provider_id: &str) -> Option<OpenAiCompatibleProvider> {
-    let spec = model::provider(provider_id)?;
-    if spec.protocol != ProviderProtocol::OpenAiCompatible {
+fn catalog_provider(
+    auth: &AuthStorage,
+    provider_id: &str,
+) -> Option<Arc<dyn model::ModelProvider>> {
+    if matches!(provider_id, "workbuddy" | "workbuddy-cn")
+        || !model::provider_supported(provider_id)
+    {
         return None;
     }
-    let environment = spec.environment?;
-    let key = auth
-        .resolve_api_key(provider_id, environment)
-        .ok()
-        .flatten()?;
-    let endpoint = model::provider_chat_endpoint(provider_id)?;
-    Some(OpenAiCompatibleProvider::new(OpenAiCompatibleConfig::new(
+    let selection = crate::model_selection::selection_for_provider_id(
         provider_id,
-        "catalog-only".to_owned(),
-        key,
-        endpoint,
-        128_000,
-    )))
+        Some("catalog-only".into()),
+        None,
+        None,
+    )
+    .ok()?;
+    Some(
+        crate::runtime::build_provider(&selection, auth.path()).unwrap_or_else(|error| {
+            Arc::new(CatalogConfigurationError {
+                provider: provider_id.into(),
+                error: error.to_string(),
+            })
+        }),
+    )
+}
+
+/// Missing resource fields must be surfaced as a catalog warning, not silently
+/// dropped from /model or reported as "no adapter" after credential saving.
+struct CatalogConfigurationError {
+    provider: String,
+    error: String,
+}
+#[async_trait::async_trait]
+impl model::ModelProvider for CatalogConfigurationError {
+    fn name(&self) -> &str {
+        &self.provider
+    }
+    fn model_id(&self) -> &'static str {
+        "catalog-only"
+    }
+    fn context_window(&self) -> usize {
+        128_000
+    }
+    async fn complete(
+        &self,
+        _: model::ModelRequest,
+    ) -> Result<model::ModelResponse, model::ModelError> {
+        Err(model::ModelError::Configuration(self.error.clone()))
+    }
+    async fn list_models(&self) -> Result<Vec<ModelInfo>, model::ModelError> {
+        Err(model::ModelError::Configuration(self.error.clone()))
+    }
+    fn fallback_models(&self) -> Vec<ModelInfo> {
+        model::builtin_models(&self.provider)
+    }
 }
 
 fn sort_models(models: &mut Vec<ModelInfo>) {

@@ -51,6 +51,7 @@ impl ModelProvider for Flaky {
             std::future::pending::<()>().await;
         }
         Ok(model::ModelResponse {
+            provider_metadata: None,
             content: "done".into(),
             tool_calls: vec![],
             usage: None,

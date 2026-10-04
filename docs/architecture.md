@@ -89,6 +89,13 @@ starts and cannot override an explicit Deny. The `telemetry` submodule
 provides in-process, no-sensitive-data latency metrics (`Timer`/`snapshot`)
 for the `/status` panel.
 
+Web search is query concurrency → a lazy reusable `SearchRouter` → independently
+bounded Bocha/Brave/SearXNG adapters and the final keyless DuckDuckGo fallback.
+The router owns latency/failure history, temporary circuits, bounded hedging and
+cancellation; protocol adapters only normalize responses. Search has separate
+transport timeout configuration; known-URL fetch keeps its existing semantics.
+See [tools.md](tools.md#web).
+
 ### `runtime-core`
 
 Internal layout: `kernel/` (state, construction, goal lifecycle),
@@ -511,3 +518,13 @@ for backend requirements, lifecycle capabilities and platform limitations.
 
 Current coding execution policy, task-level Git workspaces, optional stop verification
 and artifact staging/export are described in [coding-harness.md](coding-harness.md).
+
+### Native provider dispatch
+
+`model::provider_adapter` constructs Chat Completions, Azure Responses or native
+Anthropic/Gemini/Vertex/Bedrock/Radius adapters. CLI inference and catalog refresh
+share the same construction path. Native modules own protocol translation and
+authentication; AWS/Google credential discovery remains lazy. Optional assistant
+`provider_metadata` preserves signed native blocks through session checkpoints
+and context budgeting without adding model calls. See [providers](providers.md)
+and [ADR 0020](adr/0020-native-model-providers.md).

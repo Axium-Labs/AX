@@ -20,6 +20,7 @@ fn git_test(path: &Path, args: &[&str]) -> String {
 }
 fn call(name: &str, input: Value) -> ModelResponse {
     ModelResponse {
+        provider_metadata: None,
         content: String::new(),
         tool_calls: vec![ToolCall {
             id: name.into(),
@@ -138,6 +139,7 @@ impl ModelProvider for Provider {
             ));
         }
         Ok(ModelResponse {
+            provider_metadata: None,
             content: "finished".into(),
             tool_calls: vec![],
             usage: None,
@@ -317,6 +319,7 @@ impl ModelProvider for NoGitProvider {
             ));
         }
         Ok(ModelResponse {
+            provider_metadata: None,
             content: "done".into(),
             tool_calls: vec![],
             usage: None,

@@ -531,6 +531,7 @@ fn builtin_search_tool(server: &TestServer, key: Option<&str>) -> WebTool {
         brave_api_key: key.map(str::to_owned),
         brave_url: format!("http://{}/brave", server.address),
         duckduckgo_url: format!("http://{}/duck", server.address),
+        ..tool::SearchConfig::default()
     })
 }
 
@@ -545,7 +546,7 @@ async fn search_with_brave_key_prefers_brave() {
     }, Duration::ZERO).await;
     let value = payload(
         &builtin_search_tool(&server, Some("fixture-key"))
-            .execute(json!({"operation":"search","query":"ax"}))
+            .execute(json!({"operation":"search","query":"ax","limit":1}))
             .await
             .unwrap(),
     );

@@ -41,6 +41,7 @@ impl ModelProvider for ReviewProvider {
                 .any(|m| m.content.starts_with("[ax-completion-review]"))
         );
         let response = ModelResponse {
+            provider_metadata: None,
             content: "direct final".into(),
             tool_calls: vec![],
             usage: None,
@@ -303,6 +304,7 @@ impl ModelProvider for SetupProvider {
             None
         };
         Ok(ModelResponse {
+            provider_metadata: None,
             content: "fallback complete".into(),
             tool_calls: tool
                 .into_iter()
@@ -450,6 +452,7 @@ impl ModelProvider for SummaryReviewProvider {
                 .contains("never custom result.json status labels")
         );
         Ok(ModelResponse {
+            provider_metadata: None,
             content: String::new(),
             tool_calls: vec![],
             usage: None,

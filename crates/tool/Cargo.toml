@@ -38,3 +38,7 @@ unsafe_code = "allow"
 [lints.clippy]
 all = "warn"
 pedantic = "warn"
+
+[[test]]
+name = "search_router"
+path = "../../test/web/search_router.rs"

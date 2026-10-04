@@ -249,9 +249,9 @@ fn classify_command(
 
 fn shell_description() -> &'static str {
     if cfg!(windows) {
-        "Run commands using Windows PowerShell 5.1 (powershell.exe), platform=windows. Fallback only: use find_files/glob for filename discovery, search for text or symbols, and filesystem read/list for known paths. Do not use recursive scans (Get-ChildItem -Recurse, find, rg --files) when a discovery tool can express the request. Use PowerShell syntax: no bash heredocs (python - <<'PY'), && or ||. Use a PowerShell here-string piped to python, or python -c; run dependent commands separately. Shell execution requires approval."
+        "Run commands using Windows PowerShell 5.1 (powershell.exe), platform=windows. Use shell for builds, tests, Git operations and command-line workflows. Prefer find_files/glob for routine filename discovery, search for text or symbols, and filesystem read/list for known paths. Shell scans are appropriate when explicitly requested, dedicated tools are unavailable, or native filters/pipelines are needed. Use PowerShell syntax: no bash heredocs (python - <<'PY'), && or ||. Use a PowerShell here-string piped to python, or python -c; run dependent commands separately. Shell execution requires approval."
     } else {
-        "Run commands using POSIX sh, platform=unix. Fallback only: use find_files/glob for filename discovery, search for text or symbols, and filesystem read/list for known paths. Do not use recursive scans (find, rg --files) when a discovery tool can express the request. Shell execution requires approval."
+        "Run commands using POSIX sh, platform=unix. Use shell for builds, tests, Git operations and command-line workflows. Prefer find_files/glob for routine filename discovery, search for text or symbols, and filesystem read/list for known paths. Shell scans are appropriate when explicitly requested, dedicated tools are unavailable, or native filters/pipelines are needed. Shell execution requires approval."
     }
 }
 

@@ -12,7 +12,11 @@ use std::{collections::HashMap, error::Error, sync::Arc, time::Instant};
 
 mod network;
 mod providers;
-pub use providers::SearchConfig;
+mod router;
+pub use providers::{
+    BochaSearch, BraveSearch, DuckDuckGoSearch, ProviderTimeout, SearchConfig, SearxngSearch,
+};
+pub use router::{ProviderStats, SearchCandidate, SearchRouter};
 
 /// Diagnostic category; these labels never change request policy.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -306,6 +310,8 @@ pub struct WebTool {
     client: reqwest::Client,
     search: Option<Arc<dyn SearchProvider>>,
     search_config: SearchConfig,
+    search_client: Option<reqwest::Client>,
+    router: Arc<std::sync::OnceLock<Arc<SearchRouter>>>,
 }
 
 impl Default for WebTool {
@@ -326,6 +332,8 @@ impl WebTool {
             client: network::client(),
             search: None,
             search_config: SearchConfig::from_env(),
+            search_client: None,
+            router: Arc::default(),
         }
     }
 
@@ -337,12 +345,15 @@ impl WebTool {
 
     #[must_use]
     pub fn with_client(mut self, client: reqwest::Client) -> Self {
+        self.search_client = Some(client.clone());
+        self.router = Arc::default();
         self.client = client;
         self
     }
 
     #[must_use]
     pub fn with_search_config(mut self, config: SearchConfig) -> Self {
+        self.router = Arc::default();
         self.search_config = config;
         self.search = None;
         self
@@ -355,11 +366,15 @@ impl WebTool {
         limit: usize,
         target: usize,
     ) -> Result<String, ToolError> {
-        let provider = self.search.clone().unwrap_or_else(|| {
-            Arc::new(providers::BuiltinSearch {
-                client: self.client.clone(),
-                config: self.search_config.clone(),
-            })
+        let provider: Arc<dyn SearchProvider> = self.search.clone().unwrap_or_else(|| {
+            self.router
+                .get_or_init(|| {
+                    Arc::new(SearchRouter::configured(
+                        &self.search_config,
+                        self.search_client.as_ref(),
+                    ))
+                })
+                .clone()
         });
         let started = Instant::now();
         let requests = queries
@@ -418,7 +433,7 @@ impl WebTool {
             .collect();
         if failed == queries.len() {
             return Err(ToolError::Execution(format!(
-                "web search failed for every query: {}",
+                "web search failed for every query: {}. Report provider errors and prefer fixing configuration or retrying later. Do not automatically bypass search providers with shell/Python scraping. User-requested alternative search or network diagnostics are allowed subject to tool permissions. Use web fetch for known URLs.",
                 errors
                     .iter()
                     .map(|error| format!(
@@ -593,11 +608,11 @@ impl Tool for WebTool {
         "web"
     }
     fn description(&self) -> &'static str {
-        "Search the web or fetch HTTP(S) pages as clean Markdown/text. Read-only GET requests. \
+        "Search the web or fetch HTTP(S) pages as clean Markdown/text. Read-only search requests and page GETs. \
          search accepts 1-4 queries and runs them concurrently; fetch accepts 1-6 URLs and fetches \
          them concurrently. Prefer batching independent searches into one call. Prefer batching \
          independent page fetches into one call. Results are deduplicated by URL and partial \
-         failures do not cancel successful results."
+         failures do not cancel successful results. If search fails, report provider errors and prefer fixing configuration or retrying later. Do not automatically bypass search providers with shell/Python scraping. User-requested alternative search or network diagnostics are allowed subject to tool permissions. Use fetch for known URLs."
     }
     fn input_schema(&self) -> Value {
         json!({

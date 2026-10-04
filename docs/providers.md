@@ -36,13 +36,88 @@ provider metadata. OpenAI Responses and Codex retain their existing adapter.
 | OpenAI Codex | ChatGPT Codex Responses | OAuth login (device flow) or legacy `--codex-auth` path |
 | OpenAI-compatible vendors | Chat Completions endpoint from provider metadata | Provider API key (stored or environment variable) |
 
-Adding a local model means implementing `ModelProvider` — no agent-loop
-changes.
+## Native and resource-scoped providers
+
+AX now implements the following adapters. Provider support describes runtime
+capability, separately from credentials, resource fields and online access.
+Missing endpoint fields return configuration errors and catalog warnings;
+`_ax/models.catalog[].configuration_reason` exposes the missing fields without
+marking an implemented adapter unsupported.
+
+| Provider id | Wire API | Credentials and required configuration |
+|---|---|---|
+| `anthropic` | Anthropic Messages SSE | `ANTHROPIC_API_KEY` (or stored key); optional `ANTHROPIC_BASE_URL` |
+| `google` | Gemini `streamGenerateContent` SSE | `GEMINI_API_KEY` (or stored key); optional `GOOGLE_API_BASE_URL` |
+| `google-vertex` | Gemini on Vertex SSE | `GOOGLE_CLOUD_API_KEY` for express mode, or ADC plus `GOOGLE_CLOUD_PROJECT`/`GCLOUD_PROJECT`; optional `GOOGLE_CLOUD_LOCATION` (default `us-central1`, supports `global`) |
+| `amazon-bedrock` | Bedrock ConverseStream, AWS binary event frames | `AWS_BEARER_TOKEN_BEDROCK` plus region, or the AWS SDK credential chain; `AWS_REGION`/`AWS_DEFAULT_REGION` or profile region |
+| `azure-openai-responses` | Azure Responses | `AZURE_OPENAI_API_KEY` plus `AZURE_OPENAI_BASE_URL` or `AZURE_OPENAI_RESOURCE_NAME` |
+| `cloudflare-ai-gateway` | OpenAI-compatible gateway `/compat/chat/completions` | `CLOUDFLARE_API_KEY`, `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_GATEWAY_ID`; uses `cf-aig-authorization` |
+| `cloudflare-workers-ai` | Existing Chat Completions adapter | `CLOUDFLARE_API_KEY` plus `CLOUDFLARE_ACCOUNT_ID`; existing inference format unchanged |
+| `radius` | Pi Messages SSE (`/messages`) | `RADIUS_API_KEY`; optional `RADIUS_BASE_URL` (default `https://radius.pi.dev`); models and inference base discovered through `/v1/config` |
+
+`provider_adapter` is shared by runtime construction and catalog discovery;
+selection, child runtimes and TUI `/model` use the same protocol dispatch. The
+`compatible` CLI alias selects only Chat Completions providers. Concrete native
+ids work with `--provider anthropic`, `--provider google`, etc. For Radius with
+no cache, the interactive startup opens discovery/model selection; noninteractive
+use requires an explicit provider and model.
+
+Azure resource roots normalize to `/openai/v1/responses`; configured API bases
+and full Responses paths are also accepted. Model identity stays unchanged
+when `AZURE_OPENAI_DEPLOYMENT_NAME_MAP` maps `model-id=deployment-name` (comma
+separated). Azure uses `api-key`, never OpenAI's default bearer authentication.
+`AZURE_OPENAI_API_VERSION` optionally appends an API-version query; the default
+is the v1 endpoint. Existing OpenAI/Codex authentication and requests stay intact.
+
+Bedrock credentials are obtained lazily with the official AWS SDK chain:
+environment credentials/session tokens, profiles, credential processes, SSO,
+web identity, container credentials and instance identity. SigV4 uses the
+selected region and `bedrock` service; bearer tokens use the same ConverseStream
+adapter. Model ids may be foundation models, inference profiles or ARNs. The
+AWS dependency lock is compatible with AX's Rust 1.92 MSRV.
+
+Vertex ADC supports `gcloud auth application-default login` (authorized-user
+refresh tokens), service-account JSON via `GOOGLE_APPLICATION_CREDENTIALS`, and
+Google instance metadata identity. Tokens refresh before expiry; ADC quota
+projects or `GOOGLE_CLOUD_QUOTA_PROJECT` are sent as `x-goog-user-project`.
+External-account workload-federation ADC files are not implemented and return
+an explicit configuration error. ADC/provider CLI credentials are never copied
+into AX's credential store.
+
+Native adapters preserve assistant content blocks in optional
+`Message.provider_metadata`, including signed thinking and Gemini thought
+signatures. The core persists them through normal session checkpoints and
+budgets their replay size. Only the same provider/model reuses signed blocks.
+User text, images, tool schemas, parallel tool results, streamed text/thinking,
+usage and final tool arguments map to the neutral model contracts. Malformed,
+truncated or error streams fail; HTTP 429/5xx and Retry-After preserve the
+existing runtime retry classification. No additional model calls are used.
+
+Anthropic and Gemini catalogs support pagination; Radius has a dynamic catalog.
+Vertex and Bedrock use cached/bundled models without pretending offline metadata
+is authenticated live discovery. Azure and Cloudflare preserve discovery
+failures as warnings and fall back to existing catalogs. Actual model permissions,
+region availability and balance are confirmed only by inference.
+
+AX account OAuth login is available for Codex and WorkBuddy only. Other enabled
+API-key providers no longer offer a nonfunctional OAuth choice. Anthropic and
+Radius API-key integration does not imply support for their browser/subscription
+OAuth flows. Vertex currently covers Google Gemini publisher models; Bedrock
+covers models supporting ConverseStream, not arbitrary InvokeModel-only APIs.
+
+Reference: [pi provider adapters](https://github.com/earendil-works/pi/tree/200387122ca450d6387f033949423114a270b96c/packages/ai/src/providers),
+[pi wire APIs](https://github.com/earendil-works/pi/tree/200387122ca450d6387f033949423114a270b96c/packages/ai/src/api),
+[Bedrock ConverseStream](https://docs.aws.amazon.com/bedrock/latest/APIReference/API_runtime_ConverseStream.html).
+
+Adding a local model means implementing `ModelProvider` and registering its
+adapter; the agent loop remains provider-neutral.
 
 `ModelProvider::capabilities()` reports `vision` and `tool_calling`. OpenAI
 Responses maps image content parts to `input_image`; AX enables this for known
 vision-capable GPT model families (`gpt-4o`, `gpt-4.1`, `gpt-5`, `gpt-6`).
-DeepSeek and generic OpenAI-compatible providers remain text-only until their
+Anthropic, Gemini and Vertex map inline images to their native wire formats;
+Bedrock enables images for Claude model families. DeepSeek and generic
+OpenAI-compatible providers remain text-only until their
 specific image wire format and model capability are established. Session
 metadata preserves image parts separately from the plain-text transcript.
 
@@ -126,7 +201,7 @@ timeout.
 
 | Concern | Code |
 |---|---|
-| Provider abstraction, providers | `crates/model/src/lib.rs`, `crates/model/src/providers.rs`, `openai_compatible.rs`, `openai.rs`, `codex_device.rs` |
+| Provider abstraction, providers | `crates/model/src/lib.rs`, `crates/model/src/providers.rs`, `adapter.rs`, `native/`, `openai_compatible.rs`, `openai.rs`, `codex_device.rs` |
 | Auth storage | `crates/model/src/auth.rs` |
 | Model catalog | `crates/model/src/registry.rs` |
 | User config | `crates/cli/src/config.rs` |
@@ -155,7 +230,8 @@ Saving an API key discovers that provider; explicit refresh refreshes every
 configured, supported provider, including providers with existing caches. Only
 tool-capable models are offered. UI labels distinguish saved credentials and
 local catalog models from successful online discovery; discovery is not an
-inference test. Unsupported protocols remain explicitly disabled.
+inference test. The remaining unsupported GitHub Copilot adapter is explicitly disabled;
+resource configuration errors are reported separately from support.
 
 Endpoint references: [MiniMax OpenAI SDK](https://platform.minimax.io/docs/api-reference/text-openai-api)
 and [Fireworks Chat Completions](https://docs.fireworks.ai/api-reference/post-chatcompletions).

@@ -16,6 +16,7 @@ struct Provider {
 }
 fn answer(content: &str) -> ModelResponse {
     ModelResponse {
+        provider_metadata: None,
         content: content.into(),
         tool_calls: vec![],
         usage: None,
@@ -57,6 +58,7 @@ impl ModelProvider for Provider {
                 return Ok(answer("parent final"));
             }
             return Ok(ModelResponse {
+                provider_metadata: None,
                 tool_calls: (0..5)
                     .map(|i| {
                         call(
@@ -78,6 +80,7 @@ impl ModelProvider for Provider {
         }
         if input.contains("attempt-denied") && !has_results {
             return Ok(ModelResponse {
+                provider_metadata: None,
                 tool_calls: vec![call("denied", "write", &json!({}))],
                 ..answer("")
             });

@@ -66,3 +66,7 @@ What becomes easier, what becomes harder, and what we accepted.
 - [0017 — Authoritative Experience JSONL](0017-evolution-jsonl-authority.md) — Evolution control checkpoints, incremental consumption and legacy migration.
 
 - [0018 — Continuation-driven completion](0018-continuation-driven-completion.md) — no mandatory final reviewer; optional Stop Guards.
+
+- [0019 — Search provider routing](0019-search-provider-routing.md) — provider-specific transport, reachability/latency routing, circuits and bounded hedging.
+
+- [0020 — Native model providers](0020-native-model-providers.md) — native protocols/authentication, shared dispatch, signed replay and separate resource configuration status.

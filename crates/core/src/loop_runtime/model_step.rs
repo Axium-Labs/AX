@@ -132,6 +132,7 @@ impl AgentKernel {
             self.raw_turn_messages.push(marker);
         }
         let mut assistant = Message::assistant(content.clone(), tool_calls.clone());
+        assistant.provider_metadata = response.provider_metadata;
         assistant.usage = response.usage.map(|reported| {
             serde_json::json!({"provider": self.provider.name(), "model": self.provider.model_id(), "reported": reported})
         });

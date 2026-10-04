@@ -37,6 +37,9 @@ pub(crate) fn credentialed_providers(codex_auth: Option<&PathBuf>) -> Vec<String
         push_unique(&mut credentialed, &id);
     }
     for spec in PROVIDERS {
+        if model::ambient_credentials_configured(spec.id) {
+            push_unique(&mut credentialed, spec.id);
+        }
         if let Some(environment) = spec.environment
             && std::env::var(environment).is_ok_and(|value| !value.is_empty())
         {
@@ -76,8 +79,8 @@ mod tests {
         assert!(is_supported_provider("groq"));
         assert!(is_supported_provider("workbuddy"));
         assert!(is_supported_provider("workbuddy-cn"));
-        assert!(!is_supported_provider("anthropic"));
-        assert!(!is_supported_provider("amazon-bedrock"));
+        assert!(is_supported_provider("anthropic"));
+        assert!(is_supported_provider("amazon-bedrock"));
         assert!(!is_supported_provider("does-not-exist"));
     }
 

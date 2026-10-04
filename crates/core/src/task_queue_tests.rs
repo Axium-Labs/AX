@@ -69,6 +69,7 @@ impl ModelProvider for QueueProvider {
 }
 fn text(content: &str) -> Result<ModelResponse, ModelError> {
     Ok(ModelResponse {
+        provider_metadata: None,
         content: content.into(),
         tool_calls: vec![],
         usage: None,
@@ -77,6 +78,7 @@ fn text(content: &str) -> Result<ModelResponse, ModelError> {
 }
 fn call(id: &str, name: &str, input: Value) -> Result<ModelResponse, ModelError> {
     Ok(ModelResponse {
+        provider_metadata: None,
         content: String::new(),
         tool_calls: vec![ToolCall {
             id: id.into(),

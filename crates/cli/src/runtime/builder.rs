@@ -13,8 +13,8 @@ use std::{
 use anyhow::{Result, anyhow};
 use mcp::McpToolProxy;
 use model::{
-    AuthStorage, HedgeConfig, HedgingProvider, Message, ModelProvider, OpenAiCompatibleConfig,
-    OpenAiCompatibleProvider, OpenAiConfig, OpenAiProvider,
+    AuthStorage, HedgeConfig, HedgingProvider, Message, ModelProvider, OpenAiCompatibleProvider,
+    OpenAiConfig, OpenAiProvider,
 };
 use runtime_core::{AgentKernel, ApprovalPolicy};
 use tool::{FilesystemTool, ShellTool, ToolRegistry};
@@ -289,33 +289,29 @@ pub(crate) fn build_provider(
             provider.set_limits(selection.max_output_tokens, selection.reasoning_effort);
             Arc::new(provider)
         }
-        ProviderKind::Compatible => {
-            let spec = model::provider(&selection.provider_id).ok_or_else(|| {
-                anyhow!(
-                    "unknown OpenAI-compatible provider: {}",
-                    selection.provider_id
-                )
-            })?;
-            let environment = spec
-                .environment
-                .ok_or_else(|| anyhow!("{} does not use a direct API key", spec.name))?;
-            let key = auth
-                .resolve_api_key(spec.id, environment)?
-                .ok_or_else(|| anyhow!("{} is not configured; run /login", spec.name))?;
-            let endpoint = selection
-                .endpoint
-                .clone()
-                .ok_or_else(|| anyhow!("{} catalog did not provide an API endpoint", spec.name))?;
-            let mut config = OpenAiCompatibleConfig::new(
+        ProviderKind::Compatible | ProviderKind::Native => {
+            let spec = model::provider(&selection.provider_id)
+                .ok_or_else(|| anyhow!("unknown provider: {}", selection.provider_id))?;
+            if let Some(reason) = model::provider_configuration_reason(spec.id) {
+                return Err(anyhow!("{reason}"));
+            }
+            let key = match spec.environment {
+                Some(environment) => auth.resolve_api_key(spec.id, environment)?,
+                None => None,
+            };
+            let mut config = model::NativeConfig::new(
                 spec.id,
                 selection.model.clone(),
                 key,
-                endpoint,
                 selection.context_capacity(),
             );
+            // Native catalog endpoints are protocol bases; compatible ones are
+            // full Chat Completions URLs. Built-in vendor routing wins.
+            config.base_url =
+                model::provider_chat_endpoint(spec.id).or_else(|| selection.endpoint.clone());
             config.max_output_tokens = selection.max_output_tokens;
             config.reasoning_effort = selection.reasoning_effort;
-            Arc::new(OpenAiCompatibleProvider::new(config))
+            model::provider_adapter(config)?
         }
     };
     Ok(provider)

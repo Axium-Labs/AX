@@ -69,6 +69,7 @@ fn input(count: usize) -> String {
 
 fn text(content: &str) -> ModelResponse {
     ModelResponse {
+        provider_metadata: None,
         content: content.into(),
         tool_calls: vec![],
         usage: None,
@@ -78,6 +79,7 @@ fn text(content: &str) -> ModelResponse {
 
 fn call(id: &str, name: &str, input: serde_json::Value) -> ModelResponse {
     ModelResponse {
+        provider_metadata: None,
         content: String::new(),
         tool_calls: vec![ToolCall {
             id: id.into(),

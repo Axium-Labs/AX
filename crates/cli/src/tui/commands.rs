@@ -37,10 +37,7 @@ use super::bottom_pane::{
 use super::catalog_refresh;
 use super::{App, BottomPane, TranscriptKind};
 use crate::config::{AxConfig, InferenceMode};
-use crate::{
-    model_selection::{ModelSelection, ProviderKind},
-    repl::ReplState,
-};
+use crate::{model_selection::ModelSelection, repl::ReplState};
 use tool::PermissionDecision;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -782,31 +779,19 @@ fn apply_model_info(
     model: ModelInfo,
     effort: Option<ReasoningEffort>,
 ) {
-    let provider =
-        match model.provider.as_str() {
-            "deepseek" => ProviderKind::Deepseek,
-            "openai" => ProviderKind::Openai,
-            "codex" | "openai-codex" => ProviderKind::Codex,
-            "workbuddy" | "workbuddy-cn" => ProviderKind::Workbuddy,
-            provider
-                if model::provider(provider).is_some_and(|spec| {
-                    spec.protocol == model::ProviderProtocol::OpenAiCompatible
-                }) =>
-            {
-                ProviderKind::Compatible
-            }
-            provider => {
-                app.push(TranscriptKind::Info, format!(
-                "{provider} is discoverable, but its native protocol adapter is not enabled yet"
-            ));
-                return;
-            }
-        };
+    let provider = match crate::model_selection::provider_kind_for(&model.provider) {
+        Ok(provider) => provider,
+        Err(error) => {
+            app.push(TranscriptKind::Info, error.to_string());
+            return;
+        }
+    };
     selection.provider = provider;
     selection.provider_id.clone_from(&model.provider);
     selection.endpoint.clone_from(&model.endpoint);
     selection.model = model.id;
     selection.context_window = Some(model.context_window);
+    selection.max_output_tokens = model.max_output_tokens;
     selection.reasoning_effort = effort.or(model.default_reasoning_effort);
     selection.supports_tools = model.supports_tools;
     state.invalidate_runtime();

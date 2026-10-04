@@ -96,13 +96,14 @@ async fn run() {
                     message.content
                 );
                 return Ok(model::ModelResponse {
+                    provider_metadata: None,
                     content: "completed".into(),
                     tool_calls: vec![],
                     usage: None,
                     finish_reason: None,
                 });
             }
-            Ok(model::ModelResponse { content:String::new(), usage:None, finish_reason:None,
+            Ok(model::ModelResponse { provider_metadata: None, content:String::new(), usage:None, finish_reason:None,
                 tool_calls:vec![model::ToolCall { id:"development".into(), kind:"function".into(), function:model::FunctionCall { name:"shell".into(), arguments:json!({"command":"set -e; test -d .git; git status --porcelain; git -c user.name=AX -c user.email=ax@example.invalid commit --allow-empty -qm child; printf done > child-output; if cat ../state/child.sqlite3; then exit 99; fi; echo SANDBOX_OK"}).to_string() } }] })
         }
     }

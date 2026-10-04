@@ -518,6 +518,7 @@ mod tests {
             }
             if self.tool_call_only {
                 return Ok(ModelResponse {
+                    provider_metadata: None,
                     usage: None,
                     content: String::new(),
                     tool_calls: vec![crate::ToolCall {
@@ -535,6 +536,7 @@ mod tests {
                 on_delta(delta.clone());
             }
             Ok(ModelResponse {
+                provider_metadata: None,
                 usage: None,
                 content: self.deltas.concat(),
                 tool_calls: Vec::new(),

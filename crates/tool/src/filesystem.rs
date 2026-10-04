@@ -40,16 +40,16 @@ impl Tool for FilesystemTool {
     }
 
     fn description(&self) -> &str {
-        "Read or list a path you already know. `read` returns a small 1-based start_line/end_line range (omit the range only when you need the whole file); `list` shows exactly one directory level. This is not a discovery tool: when you do not know where a file is use find_files/glob, and when you are looking for text or a symbol use search. Once search returns candidate paths, read them directly instead of searching the same scope again. Batch independent reads in one round. Use patch for existing file edits; writes require approval."
+        "Read, list or write a known path. `read` accepts a 1-based start_line/end_line range when sufficient; omit the range for full file context. `list` shows exactly one directory level and is not a discovery tool: prefer find_files/glob for unknown locations and search for text or symbols. After discovery, prefer direct reads for context; targeted searches within known files remain useful. Batch independent reads when possible. Prefer patch for localized edits; write creates or replaces a whole file and is appropriate for requested full-file rewrites or generated artifacts. Inspect existing content before replacing it; writes require approval."
     }
 
     fn input_schema(&self) -> Value {
         json!({
             "type": "object",
             "properties": {
-                "operation": { "type": "string", "enum": ["read", "list", "write"], "description": "`read` a file (optionally a 1-based line range), `list` one directory level, or `write` a new file (requires approval)." },
+                "operation": { "type": "string", "enum": ["read", "list", "write"], "description": "`read` a file (optionally a 1-based line range), `list` one directory level, or `write` create or replace an entire file (requires approval)." },
                 "path": { "type": "string", "description": "Path relative to the workspace root." },
-                "content": { "type": "string" },
+                "content": { "type": "string", "description": "Complete new file content for write; replaces existing content rather than appending." },
                 "start_line": { "type":"integer", "minimum":1 },
                 "end_line": { "type":"integer", "minimum":1 }
             },

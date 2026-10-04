@@ -505,6 +505,7 @@ impl model::ModelProvider for Analyzer {
             tokio::time::sleep(std::time::Duration::from_secs(5)).await;
         }
         Ok(model::ModelResponse {
+            provider_metadata: None,
             content: self.response.clone(),
             tool_calls: vec![],
             finish_reason: Some("stop".into()),

@@ -97,6 +97,9 @@ pub fn resolve_model_selection(cli: &Cli) -> Result<ModelResolution> {
     // picker or the login flow in the TUI, or error in non-interactive modes.
     match configured.len() {
         1 => {
+            if configured[0] == "radius" && local_catalog_models("radius").is_empty() {
+                return Ok(ModelResolution::Multiple(configured));
+            }
             let mut selection =
                 selection_for_provider_id(&configured[0], None, None, cli.codex_auth.clone())?;
             apply_cli_overrides(&mut selection, cli)?;
@@ -116,7 +119,7 @@ pub fn require_resolved(cli: &Cli) -> Result<ModelSelection> {
     match resolve_model_selection(cli)? {
         ModelResolution::Resolved(selection) => Ok(selection),
         ModelResolution::Multiple(providers) => Err(anyhow!(
-            "Multiple model providers are configured ({}). Pass --provider <name> or run 'ax tui' to select one.",
+            "A model selection is needed for configured providers ({}). Pass --provider <name> --model <id> or run 'ax tui' to discover and select one.",
             providers.join(", ")
         )),
         ModelResolution::None => Err(anyhow!(
@@ -243,15 +246,18 @@ fn selection_for_kind(
         ProviderKind::Openai => "openai".to_owned(),
         ProviderKind::Codex => "openai-codex".to_owned(),
         ProviderKind::Workbuddy => "workbuddy".to_owned(),
+        ProviderKind::Native => return Err(anyhow!("select a native provider by its catalog id")),
         ProviderKind::Compatible => {
             let configured = detect_configured_providers(codex_auth.as_ref());
             let compatible = configured
                 .iter()
                 .filter(|id| {
-                    !matches!(
-                        id.as_str(),
-                        "deepseek" | "openai" | "openai-codex" | "workbuddy" | "workbuddy-cn"
-                    )
+                    provider(id)
+                        .is_some_and(|spec| spec.protocol == ProviderProtocol::OpenAiCompatible)
+                        && !matches!(
+                            id.as_str(),
+                            "deepseek" | "openai" | "openai-codex" | "workbuddy" | "workbuddy-cn"
+                        )
                 })
                 .cloned()
                 .collect::<Vec<_>>();
@@ -394,7 +400,7 @@ fn selection_from_info(info: &ModelInfo) -> Result<ModelSelection> {
     })
 }
 
-fn provider_kind_for(provider_id: &str) -> Result<ProviderKind> {
+pub(crate) fn provider_kind_for(provider_id: &str) -> Result<ProviderKind> {
     match provider_id {
         "deepseek" => Ok(ProviderKind::Deepseek),
         "openai" => Ok(ProviderKind::Openai),
@@ -405,6 +411,7 @@ fn provider_kind_for(provider_id: &str) -> Result<ProviderKind> {
         {
             Ok(ProviderKind::Compatible)
         }
+        id if model::provider_supported(id) => Ok(ProviderKind::Native),
         id => Err(anyhow!(
             "'{id}' has no enabled adapter in this AX build; use the TUI /model picker"
         )),
@@ -722,6 +729,8 @@ pub(crate) enum ProviderKind {
     Codex,
     Workbuddy,
     Compatible,
+    #[value(skip)]
+    Native,
 }
 #[derive(Clone, Debug)]
 pub(crate) struct ModelSelection {
@@ -742,8 +751,15 @@ impl ModelSelection {
             None => match self.provider {
                 ProviderKind::Deepseek => 64_000,
                 ProviderKind::Workbuddy => 128_000,
-                ProviderKind::Openai | ProviderKind::Codex | ProviderKind::Compatible => 200_000,
+                ProviderKind::Openai
+                | ProviderKind::Codex
+                | ProviderKind::Compatible
+                | ProviderKind::Native => 200_000,
             },
         }
     }
 }
+
+#[cfg(test)]
+#[path = "../../../test/providers/selection.rs"]
+mod native_provider_tests;

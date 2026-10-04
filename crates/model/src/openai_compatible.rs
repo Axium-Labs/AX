@@ -16,6 +16,7 @@ use crate::{
 pub struct OpenAiCompatibleConfig {
     pub provider_id: String,
     pub api_key: String,
+    pub api_key_header: String,
     pub model: String,
     pub endpoint: String,
     pub context_window: usize,
@@ -35,6 +36,7 @@ impl OpenAiCompatibleConfig {
         Self {
             provider_id: provider_id.into(),
             api_key,
+            api_key_header: "authorization".into(),
             model,
             endpoint,
             context_window,
@@ -50,7 +52,8 @@ pub struct OpenAiCompatibleProvider {
 }
 
 impl OpenAiCompatibleProvider {
-    pub(crate) fn with_client(config: OpenAiCompatibleConfig, client: reqwest::Client) -> Self {
+    #[must_use]
+    pub fn with_client(config: OpenAiCompatibleConfig, client: reqwest::Client) -> Self {
         Self { client, config }
     }
 
@@ -66,7 +69,10 @@ impl OpenAiCompatibleProvider {
         let response = ensure_success(
             self.client
                 .post(&self.config.endpoint)
-                .bearer_auth(&self.config.api_key)
+                .header(
+                    &self.config.api_key_header,
+                    format!("Bearer {}", self.config.api_key),
+                )
                 .json(&ChatRequest {
                     model: &self.config.model,
                     messages: chat_messages(&request.messages),
@@ -86,6 +92,7 @@ impl OpenAiCompatibleProvider {
             ModelError::InvalidResponse("response contains no choices".to_owned())
         })?;
         Ok(ModelResponse {
+            provider_metadata: None,
             usage: response.usage,
             content: choice.message.content.unwrap_or_default(),
             tool_calls: choice.message.tool_calls,
@@ -103,7 +110,10 @@ impl OpenAiCompatibleProvider {
         let send = |include_usage: bool| {
             self.client
                 .post(&self.config.endpoint)
-                .bearer_auth(&self.config.api_key)
+                .header(
+                    &self.config.api_key_header,
+                    format!("Bearer {}", self.config.api_key),
+                )
                 .json(&ChatRequest {
                     model: &self.config.model,
                     messages: chat_messages(&request.messages),
@@ -207,6 +217,7 @@ impl OpenAiCompatibleProvider {
             self.note_first_delta(&first_delta, &content, &tool_calls, started);
         }
         Ok(ModelResponse {
+            provider_metadata: None,
             usage,
             content,
             tool_calls: tool_calls
@@ -428,7 +439,10 @@ impl ModelProvider for OpenAiCompatibleProvider {
             self.client
                 .get(endpoint)
                 .timeout(Duration::from_secs(10))
-                .bearer_auth(&self.config.api_key)
+                .header(
+                    &self.config.api_key_header,
+                    format!("Bearer {}", self.config.api_key),
+                )
                 .send()
                 .await?,
         )

@@ -46,6 +46,17 @@ allowed-tools: filesystem search shell
 Inspect the full diff and report actionable regressions.
 ```
 
+## Bundled code review scope
+
+The bundled `code-review` skill follows the user's requested scope. Diff/commit/PR
+reviews default to actionable newly introduced regressions; an explicitly broader
+review may include pre-existing issues, labeled separately. Whole-project audits
+inspect the requested modules and interactions without limiting findings to a
+recent diff. Style/convention review uses the standards requested by the user.
+Evidence, concrete impact and file/line references remain required. Review is
+read-only unless fixes are requested. Scope guidance does not add runtime filters
+or grant tool permissions.
+
 ## Discovery
 
 AX indexes skills on first routing or `/skills`, reading only YAML frontmatter

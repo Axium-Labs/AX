@@ -40,6 +40,27 @@ pub(super) fn client() -> reqwest::Client {
         .clone()
 }
 
+/// Search uses independently configured clients; fetch transport is unchanged.
+pub(super) fn search_client_builder() -> reqwest::ClientBuilder {
+    reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::limited(5))
+        .pool_idle_timeout(Duration::from_secs(90))
+        .pool_max_idle_per_host(6)
+        .tcp_keepalive(Duration::from_secs(30))
+        .dns_resolver(Arc::new(CachedDns::default()))
+        .connector_layer(ConnectTimingLayer)
+        .user_agent(concat!("AX/", env!("CARGO_PKG_VERSION")))
+}
+/// Routing replaces retries for search, including POST. No detached tasks.
+pub(super) async fn search_request(
+    request: reqwest::RequestBuilder,
+    url: &str,
+    text_only: bool,
+) -> Result<Body, FetchError> {
+    let _timer = telemetry::Timer::new("web.http.total");
+    get_once(request, url, text_only).await
+}
+
 type DnsEntry = Arc<OnceCell<(Instant, Vec<SocketAddr>)>>;
 
 #[derive(Default)]

@@ -33,6 +33,7 @@ mod child_deadline;
 #[allow(clippy::needless_pass_by_value)] // Mirrors the production call shape.
 fn plain(content: &str) -> ModelResponse {
     ModelResponse {
+        provider_metadata: None,
         usage: None,
         content: content.to_owned(),
         tool_calls: Vec::new(),
@@ -43,6 +44,7 @@ fn plain(content: &str) -> ModelResponse {
 #[allow(clippy::needless_pass_by_value)] // Mirrors the production call shape.
 fn call(id: &str, name: &str, input: Value) -> ModelResponse {
     ModelResponse {
+        provider_metadata: None,
         usage: Some(json!({"prompt_tokens": 10, "completion_tokens": 4})),
         content: String::new(),
         tool_calls: vec![ToolCall {

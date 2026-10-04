@@ -19,8 +19,9 @@ mod search;
 pub use find::FindFilesTool;
 mod web;
 pub use web::{
-    FetchError, FetchErrorKind, MAX_FETCH_URLS, MAX_PAGE_CHARS, MAX_QUERIES, MAX_TOTAL_CHARS,
-    SearchConfig, SearchProvider, SearchResult, WebTool,
+    BochaSearch, BraveSearch, DuckDuckGoSearch, FetchError, FetchErrorKind, MAX_FETCH_URLS,
+    MAX_PAGE_CHARS, MAX_QUERIES, MAX_TOTAL_CHARS, ProviderStats, ProviderTimeout, SearchCandidate,
+    SearchConfig, SearchProvider, SearchResult, SearchRouter, SearxngSearch, WebTool,
 };
 mod view_image;
 pub use patch::PatchTool;
@@ -326,7 +327,12 @@ mod tests {
                 .contains("not a discovery tool")
         );
         assert!(FilesystemTool.description().contains("find_files"));
-        assert!(ShellTool.description().contains("Fallback only"));
+        assert!(ShellTool.description().contains("Prefer find_files/glob"));
+        assert!(
+            ShellTool
+                .description()
+                .contains("Shell scans are appropriate when explicitly requested")
+        );
     }
 
     #[test]

@@ -40,7 +40,7 @@ permissions from tool-name strings (e.g. `mcp__`/`::`).
 
 | Tool | Purpose | Capability |
 |---|---|---|
-| `shell` | Run a shell command; last-resort fallback | `Shell` / `Process` |
+| `shell` | Run builds, tests, Git operations and command-line workflows | `Shell` / `Process` |
 | `filesystem` | Read/list/write a path you already know | `FilesystemRead` / `FilesystemWrite` |
 | `find_files` / `glob` | Discover files and directories by name, path or extension; never reads content | `FilesystemRead` |
 | `patch` | Structured multi-hunk edits; any failing hunk aborts the whole write | `FilesystemWrite` |
@@ -96,21 +96,32 @@ is involved.
 
 ### Tool use and result protocol
 
-The CLI supplies a strategy without changing permissions or the dependency DAG.
-The model selects the tool from the descriptions: a known path is read or listed
-directly, an unknown location is resolved with `find_files`/`glob`, and text,
-symbols or regexes go to `search`. Known independent search/read calls must be
-emitted in one response. After discovery returns candidates, they are read
-directly rather than searched again. Recursive shell scans are the last
-fallback. Failure recovery uses minimal diagnostics, a local repair and the
-smallest relevant check before required full tests.
+Tool descriptions supply default preferences without changing permissions or the
+dependency DAG. Prefer direct reads/lists for known paths, `find_files`/`glob` for
+unknown locations, and `search` for text, symbols or regexes. A known file may
+still need a targeted regex/symbol/usage search. An empty result is a successful
+observation; avoid identical searches without new evidence, but changed files,
+revised patterns/scopes or explicit user verification can justify another search.
+Identical discovery calls within one round retain the existing result reuse.
+
+Use shell for builds, tests, Git operations and command-line workflows. Prefer
+dedicated tools for routine discovery; shell scans are appropriate when explicitly
+requested, dedicated tools are unavailable, or native filters/pipelines are needed.
+These preferences do not add tool-selection gates. Known independent reads/searches
+can be batched when useful. Failure recovery uses relevant diagnostics, a local
+repair and appropriate checks. Platform syntax checks and tool permissions apply.
 
 `patch` addresses original 1-based coordinates with `start_line`, `delete_count`,
-`new_text` and optional `expected_lines`. All hunks validate before writing,
-preserve CRLF, and report conflict locations with local context. Repeated text
-is supported; unique `old_text` matching is no longer the edit API. Missing paths
-return nearby candidates without a recursive search. Use `filesystem.write`
-for new files.
+`new_text` and optional `expected_lines`. Read enough relevant context before
+editing, including surrounding functions and callers when needed. All hunks
+validate before writing, preserve CRLF, and report conflict locations with local
+context. Repeated text is supported; unique `old_text` matching is no longer the
+edit API. Missing paths return nearby candidates without a recursive search.
+Prefer `patch` for localized edits. `filesystem.write` creates or replaces the
+entire file, which suits requested full-file rewrites and generated artifacts;
+inspect existing content before replacing it. It does not append and still uses
+the existing write permission path. `filesystem.read` supports line ranges when
+sufficient and full-file reads when context requires them.
 
 Text results are stored as lossless `ToolResult` envelopes: `status`
 (`success`/`error`), `summary`, `diagnostics`, `raw_output`, `truncated`. Model
@@ -163,23 +174,65 @@ tracking parameters dropped, trailing slash trimmed) and deduplicated by URL.
 The first occurrence keeps its position in query order, so the highest-ranked
 copy of a URL is the one returned, and each record carries the
 `matched_queries` that surfaced it. Records are
-`title`/`url`/`snippet`/`source`/`matched_queries`. Without any API key, the
-default adapter uses DuckDuckGo HTML search. Configuring `BRAVE_SEARCH_API_KEY`
-selects Brave as the preferred provider; failures or empty Brave responses
-fall back to DuckDuckGo. Embedders can still supply another `SearchProvider`,
-or override built-in endpoints with `SearchConfig`. HTML results are parsed
-with the HTML DOM parser, tracking redirects are unwrapped, and advertisements
-and non-HTTP(S) links are excluded. Challenges are reported as errors rather
-than fabricated results. Search never fetches destination page bodies.
+`title`/`url`/`snippet`/`source`/`matched_queries`. A lazy, reusable
+`SearchRouter` implements the unchanged `SearchProvider` trait. Configured
+Bocha (`BOCHA_SEARCH_API_KEY`), Brave (`BRAVE_SEARCH_API_KEY`), and SearXNG
+(`AX_SEARCH_SEARXNG_URL`) form the candidate list; DuckDuckGo HTML is the
+last keyless fallback. SearXNG accepts an instance base URL or `/search`
+endpoint and requires JSON enabled in `search.formats`.
 
-The shared HTTP client retains a connection pool, HTTP Keep-Alive, 30-second
-TCP keepalive, and a bounded 60-second DNS cache using the system resolver.
-Concurrent lookups for the same name are coalesced. The default per-attempt
-connect/read/total timeouts are 2/3/8 seconds. An injected client retains its
-own transport settings. Only timeout, 429 and 5xx responses are retried, with
-one retry after 100 ms; 401/403/404 are never retried. A retry failure is returned
-with its complete error chain. Proxy settings and TLS verification still use
-reqwest defaults.
+The concurrency hierarchy is queries → router → provider fallback/hedging.
+Configured candidates rank by consecutive failures then EWMA observed latency;
+initial ties use configuration order (Bocha, Brave, SearXNG), without country
+routing. DuckDuckGo always ranks last. One candidate starts first; after 500 ms
+without a sufficient response another starts, with at most two requests in
+flight per query. Errors, empty or short results advance the candidate list
+immediately. Completed responses are merged using the same canonical URL
+deduplication as the query layer, then limited. Reaching the requested distinct
+result count drops every remaining provider future, including body reads.
+Cancellation is counted separately from failure. Remote work already received
+cannot be undone, including provider billing.
+
+DNS/connection failures, timeouts, HTTP errors (including 429/5xx), invalid API
+responses and challenges fall back without transport retries. Three consecutive
+errors open a provider circuit for 30 seconds. Later calls may try that provider
+after cooldown; success closes its circuit. Candidates opened by another query
+are rechecked before launch. State and connection pools survive calls and clones
+of the same WebTool, and reset on configuration/client replacement; they are
+in-memory, with no proactive probes or durable cross-process history. A successful
+short/empty search remains valid if all candidates finish; all errors/open circuits
+return a tool error. Provider latency/success/failure/cancellation/circuit metrics
+are `web.search.provider.<name>.*`; embedders can inspect `SearchRouter::stats()`.
+
+Each provider owns an HTTP client with separate connect/read/total settings,
+defaulting to 5/10/15 seconds. Environment overrides (positive milliseconds):
+`AX_SEARCH_<PROVIDER>_CONNECT_TIMEOUT_MS`,
+`AX_SEARCH_<PROVIDER>_READ_TIMEOUT_MS`, and `AX_SEARCH_<PROVIDER>_TIMEOUT_MS`,
+where PROVIDER is `BOCHA`, `BRAVE`, `SEARXNG`, or `DUCKDUCKGO`.
+`SearchConfig` also exposes endpoints, timeouts, hedge delay and circuit settings.
+Injected clients keep their own connect/read settings; the router still bounds
+attempts by each provider's total timeout. Embedders may supply independent
+adapters or a router through `with_search_provider`. Search does not fetch
+destination page bodies, add model requests, or compute embeddings. Bocha uses
+a read-only JSON POST; other search adapters use GET. HTML parsing unwraps
+DuckDuckGo redirects and excludes ads/non-HTTP(S) links; challenges are errors.
+Protocol references: [Bocha](https://open.bochaai.com/),
+[Brave](https://api-dashboard.search.brave.com/api-reference/web/search/get),
+[SearXNG](https://docs.searxng.org/dev/search_api.html).
+
+On search failure, the tool description, error and bundled web-research skill
+instruct the agent to report/configure/retry rather than automatically search via
+shell + Python urllib, curl, or another engine scraper. This is model-facing
+routing guidance, not a global shell ban. Explicit user requests for alternative
+search methods or network diagnostics are allowed, subject to applicable tool
+permissions. `web fetch` remains the known-URL HTTP content retrieval operation.
+
+Fetch retains its shared pooled client, Keep-Alive, 30-second TCP keepalive and
+bounded 60-second coalescing DNS cache. Its per-attempt connect/read/total
+timeouts remain 2/3/8 seconds, with one 100 ms retry only for timeout/429/5xx;
+401/403/404 are not retried. Injected clients retain their transport settings.
+Search clients share these pooling/DNS mechanisms but not the aggressive fetch
+timeouts or retry policy. Proxy/TLS behavior remains reqwest's defaults.
 
 Fetch sends only GET, follows up to five redirects,
 rejects non-text content, limits each body to 2 MB, and removes comments and

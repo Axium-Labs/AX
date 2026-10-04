@@ -6,9 +6,11 @@ pub use retry::{ErrorClass, RetryPolicy};
 /// output size. Kept in the provider crate so every caller that has to guess a
 /// reply reserve guesses the same number instead of drifting apart.
 pub const DEFAULT_OUTPUT_RESERVE_TOKENS: usize = 8_000;
+mod adapter;
 mod auth;
 mod codex_device;
 mod hedge;
+mod native;
 mod openai;
 mod openai_compatible;
 mod providers;
@@ -21,7 +23,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
 
+pub use adapter::{
+    ambient_credentials_configured, azure_endpoint, provider_adapter, provider_adapter_with_client,
+};
 pub use hedge::{HedgeConfig, HedgingProvider};
+pub use native::{NativeConfig, NativeProvider};
 pub use openai_compatible::{OpenAiCompatibleConfig, OpenAiCompatibleProvider};
 pub use providers::DEEPSEEK_FALLBACK_MODEL;
 pub use providers::deepseek_compatible_config;
@@ -32,8 +38,8 @@ pub type DeepSeekProvider = OpenAiCompatibleProvider;
 pub use openai::{FALLBACK_MODEL as OPENAI_FALLBACK_MODEL, OpenAiConfig, OpenAiProvider};
 pub use providers::{
     PROVIDERS, ProviderAuthKind, ProviderProtocol, ProviderSpec, builtin_models, provider,
-    provider_base_url, provider_chat_endpoint, provider_supported, provider_supports_oauth,
-    provider_unsupported_reason,
+    provider_base_url, provider_chat_endpoint, provider_configuration_reason, provider_supported,
+    provider_supports_oauth, provider_unsupported_reason,
 };
 pub use registry::{CatalogSource, ModelCatalog, ModelRegistry};
 
@@ -120,6 +126,9 @@ pub enum Role {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Message {
+    /// Native signed thinking/tool blocks, persisted for protocol-correct replay.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_metadata: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usage: Option<Value>,
     pub role: Role,
@@ -136,6 +145,7 @@ impl Message {
     #[must_use]
     pub fn system(content: impl Into<String>) -> Self {
         Self {
+            provider_metadata: None,
             usage: None,
             role: Role::System,
             content: content.into(),
@@ -148,6 +158,7 @@ impl Message {
     #[must_use]
     pub fn user(content: impl Into<String>) -> Self {
         Self {
+            provider_metadata: None,
             usage: None,
             role: Role::User,
             content: content.into(),
@@ -160,6 +171,7 @@ impl Message {
     #[must_use]
     pub fn assistant(content: impl Into<String>, tool_calls: Vec<ToolCall>) -> Self {
         Self {
+            provider_metadata: None,
             usage: None,
             role: Role::Assistant,
             content: content.into(),
@@ -172,6 +184,7 @@ impl Message {
     #[must_use]
     pub fn tool(call_id: impl Into<String>, content: impl Into<String>) -> Self {
         Self {
+            provider_metadata: None,
             usage: None,
             role: Role::Tool,
             content: content.into(),
@@ -232,6 +245,7 @@ pub struct ModelRequest {
 
 #[derive(Clone, Debug)]
 pub struct ModelResponse {
+    pub provider_metadata: Option<Value>,
     pub usage: Option<Value>,
     pub content: String,
     pub tool_calls: Vec<ToolCall>,
@@ -243,6 +257,7 @@ impl Default for ModelResponse {
     /// degenerate outcome that is still preferable to a synthetic error.
     fn default() -> Self {
         Self {
+            provider_metadata: None,
             usage: None,
             content: String::new(),
             tool_calls: Vec::new(),

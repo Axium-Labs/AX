@@ -9,6 +9,7 @@ use std::sync::{
 
 fn response(text: &str, calls: Vec<ToolCall>) -> ModelResponse {
     ModelResponse {
+        provider_metadata: None,
         content: text.into(),
         tool_calls: calls,
         usage: None,

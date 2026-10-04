@@ -33,6 +33,8 @@ enum CredentialSource {
 
 #[derive(Clone, Debug)]
 pub struct OpenAiConfig {
+    provider_id: String,
+    request_model: Option<String>,
     pub model: String,
     pub endpoint: String,
     pub context_window: usize,
@@ -47,6 +49,8 @@ impl OpenAiConfig {
     #[must_use]
     pub fn from_api_key(model: Option<String>, api_key: String) -> Self {
         Self {
+            provider_id: "openai".into(),
+            request_model: None,
             model: model.unwrap_or_else(|| FALLBACK_MODEL.to_owned()),
             endpoint: std::env::var("OPENAI_API_URL").unwrap_or_else(|_| API_ENDPOINT.to_owned()),
             context_window: 200_000,
@@ -67,6 +71,8 @@ impl OpenAiConfig {
         let api_key = std::env::var("OPENAI_API_KEY")
             .map_err(|_| ModelError::Configuration("OPENAI_API_KEY is not set".to_owned()))?;
         Ok(Self {
+            provider_id: "openai".into(),
+            request_model: None,
             model: model.unwrap_or_else(|| FALLBACK_MODEL.to_owned()),
             endpoint: std::env::var("OPENAI_API_URL").unwrap_or_else(|_| API_ENDPOINT.to_owned()),
             context_window: 200_000,
@@ -111,6 +117,8 @@ impl OpenAiConfig {
             CODEX_ENDPOINT
         };
         Ok(Self {
+            provider_id: "openai-codex".into(),
+            request_model: None,
             model: model.unwrap_or_else(|| FALLBACK_MODEL.to_owned()),
             endpoint: std::env::var("CODEX_API_URL")
                 .unwrap_or_else(|_| default_endpoint.to_owned()),
@@ -128,6 +136,8 @@ impl OpenAiConfig {
     pub fn from_oauth(model: Option<String>, access: String, account_id: Option<String>) -> Self {
         let account_id = account_id.or_else(|| crate::account_id_from_token(&access));
         Self {
+            provider_id: "openai-codex".into(),
+            request_model: None,
             model: model.unwrap_or_else(|| FALLBACK_MODEL.to_owned()),
             endpoint: std::env::var("CODEX_API_URL").unwrap_or_else(|_| CODEX_ENDPOINT.to_owned()),
             context_window: 200_000,
@@ -137,6 +147,30 @@ impl OpenAiConfig {
             codex_catalog_path: None,
             is_codex: true,
         }
+    }
+
+    /// Reuses Responses with Azure's resource endpoint and API-key header.
+    /// The model id remains stable even when Azure uses a deployment alias.
+    /// # Errors
+    /// Returns an error for an invalid resource URL.
+    pub fn from_azure(
+        model: String,
+        api_key: String,
+        endpoint: String,
+        deployment: Option<String>,
+    ) -> Result<Self, ModelError> {
+        let url =
+            reqwest::Url::parse(&endpoint).map_err(|e| ModelError::Configuration(e.to_string()))?;
+        if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
+            return Err(ModelError::Configuration(
+                "Azure endpoint must be an HTTP URL".into(),
+            ));
+        }
+        let mut config = Self::from_api_key(Some(model), api_key);
+        config.provider_id = "azure-openai-responses".into();
+        config.endpoint = endpoint;
+        config.request_model = deployment;
+        Ok(config)
     }
 }
 
@@ -148,10 +182,12 @@ pub struct OpenAiProvider {
 impl OpenAiProvider {
     #[must_use]
     pub fn new(config: OpenAiConfig) -> Self {
-        Self {
-            client: reqwest::Client::new(),
-            config,
-        }
+        Self::with_client(config, reqwest::Client::new())
+    }
+
+    #[must_use]
+    pub fn with_client(config: OpenAiConfig, client: reqwest::Client) -> Self {
+        Self { client, config }
     }
 
     fn auth_headers(&self) -> Result<HeaderMap, ModelError> {
@@ -169,6 +205,15 @@ impl OpenAiProvider {
             },
         };
         let mut headers = HeaderMap::new();
+        if self.config.provider_id == "azure-openai-responses" {
+            headers.insert(
+                "api-key",
+                HeaderValue::from_str(&credentials.token).map_err(|_| {
+                    ModelError::Configuration("invalid Azure API-key header".into())
+                })?,
+            );
+            return Ok(headers);
+        }
         let authorization = HeaderValue::from_str(&format!("Bearer {}", credentials.token))
             .map_err(|error| ModelError::Configuration(error.to_string()))?;
         headers.insert(AUTHORIZATION, authorization);
@@ -237,6 +282,8 @@ struct ResponsesRequest<'a> {
     store: bool,
     stream: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
+    max_output_tokens: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     reasoning: Option<Value>,
 }
 
@@ -261,11 +308,7 @@ impl ModelProvider for OpenAiProvider {
         }
     }
     fn name(&self) -> &str {
-        if self.config.is_codex {
-            "openai-codex"
-        } else {
-            "openai"
-        }
+        &self.config.provider_id
     }
 
     fn model_id(&self) -> &str {
@@ -320,7 +363,7 @@ impl ModelProvider for OpenAiProvider {
     }
 
     async fn list_models(&self) -> Result<Vec<ModelInfo>, ModelError> {
-        if self.config.model == "catalog-only" {
+        if self.config.model == "catalog-only" && self.config.is_codex {
             return self.load_codex_catalog();
         }
         match self.fetch_models().await {
@@ -331,6 +374,9 @@ impl ModelProvider for OpenAiProvider {
     }
 
     fn fallback_models(&self) -> Vec<ModelInfo> {
+        if self.name() == "azure-openai-responses" {
+            return crate::builtin_models(self.name());
+        }
         // Catalogs are access-specific. Do not advertise guessed model ids:
         // callers fall back to the last successful dynamic cache instead.
         let ids: &[&str] = &[];
@@ -362,10 +408,17 @@ impl ModelProvider for OpenAiProvider {
 impl OpenAiProvider {
     async fn complete_inner(&self, request: ModelRequest) -> Result<ModelResponse, ModelError> {
         let payload = ResponsesRequest {
-            model: &self.config.model,
+            model: self
+                .config
+                .request_model
+                .as_deref()
+                .unwrap_or(&self.config.model),
             input: response_input(&request.messages),
             tools: response_tools(&request.tools),
             store: false,
+            max_output_tokens: (self.name() == "azure-openai-responses")
+                .then_some(self.config.max_output_tokens)
+                .flatten(),
             stream: false,
             reasoning: self
                 .config
@@ -404,10 +457,17 @@ impl OpenAiProvider {
         started: Instant,
     ) -> Result<ModelResponse, ModelError> {
         let payload = ResponsesRequest {
-            model: &self.config.model,
+            model: self
+                .config
+                .request_model
+                .as_deref()
+                .unwrap_or(&self.config.model),
             input: response_input(&request.messages),
             tools: response_tools(&request.tools),
             store: false,
+            max_output_tokens: (self.name() == "azure-openai-responses")
+                .then_some(self.config.max_output_tokens)
+                .flatten(),
             stream: true,
             reasoning: self
                 .config
@@ -464,13 +524,16 @@ impl OpenAiProvider {
     }
 
     async fn fetch_models(&self) -> Result<Vec<ModelInfo>, ModelError> {
-        let endpoint = self
-            .config
-            .endpoint
-            .trim_end_matches("/responses")
-            .trim_end_matches('/')
-            .to_owned()
-            + "/models";
+        let mut endpoint = reqwest::Url::parse(&self.config.endpoint)
+            .map_err(|e| ModelError::Configuration(e.to_string()))?;
+        let path = format!(
+            "{}/models",
+            endpoint
+                .path()
+                .trim_end_matches("/responses")
+                .trim_end_matches('/')
+        );
+        endpoint.set_path(&path);
         let mut request = self
             .client
             .get(endpoint)
@@ -589,6 +652,7 @@ impl StreamedResponse {
             ));
         }
         Ok(ModelResponse {
+            provider_metadata: None,
             usage: self.usage,
             content: self.content,
             tool_calls: self
@@ -819,6 +883,7 @@ fn parse_response(response: ResponsesResponse) -> Result<ModelResponse, ModelErr
         ));
     }
     Ok(ModelResponse {
+        provider_metadata: None,
         usage: response.usage,
         content: content.join("\n"),
         tool_calls,
