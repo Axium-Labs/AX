@@ -144,6 +144,7 @@ impl ChildHost for Host {
             return Err(AgentError::Persistence("provision failed".into()));
         }
         let run = ChildRun {
+            workspace_root: None,
             goal_id: format!("goal-{n}"),
             session_id: format!("session-{n}"),
             cwd: std::env::temp_dir(),

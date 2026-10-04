@@ -62,6 +62,17 @@ impl ModelProvider for DataProvider {
         100_000
     }
     async fn complete(&self, request: ModelRequest) -> Result<ModelResponse, ModelError> {
+        if request
+            .messages
+            .iter()
+            .any(|message| message.content.starts_with("[ax-completion-review]"))
+        {
+            return Ok(call(
+                "review",
+                "completion_check",
+                &json!({"state":"complete","reason":"scripted fixture deliverables complete"}),
+            ));
+        }
         self.requests.lock().unwrap().push(request.clone());
         if self.requirements_only {
             assert!(
@@ -287,7 +298,7 @@ impl Fixture {
             assert!(!child.cwd.exists());
         }
         let requests = self.provider.requests.lock().unwrap();
-        let starts = requests
+        let mut starts = requests
             .iter()
             .filter(|r| {
                 r.messages
@@ -304,14 +315,16 @@ impl Fixture {
                     .clone()
             })
             .collect::<Vec<_>>();
+        let mut expected = queue
+            .tasks
+            .iter()
+            .map(|task| task.input.clone())
+            .collect::<Vec<_>>();
+        starts.sort();
+        expected.sort();
         assert_eq!(
-            starts,
-            queue
-                .tasks
-                .iter()
-                .map(|t| t.input.clone())
-                .collect::<Vec<_>>(),
-            "children execute sequentially without finish controls"
+            starts, expected,
+            "all independent children execute without finish controls"
         );
         assert_eq!(
             requests
@@ -321,8 +334,15 @@ impl Fixture {
                     .iter()
                     .any(|m| m.content.starts_with("[ax-child-runtime]")))
                 .count(),
-            3,
-            "read, explicit dynamic plan, final summary"
+            if fs::read_to_string(&self.provider.dataset)
+                .unwrap()
+                .contains("ax_work_items")
+            {
+                2
+            } else {
+                3
+            },
+            "typed inventory skips the manual plan round"
         );
     }
     fn cleanup(self) {
@@ -407,10 +427,13 @@ async fn benchmark_numbered_rules_fields_and_bullets_never_create_executable_tas
                 .as_ref()
                 .unwrap()
                 .task_queue()
-                .is_none()
+                .is_none_or(|queue| queue.tasks.is_empty())
         );
         assert!(!fixture.state.data_dir.join("child-runs").exists());
         assert_eq!(fixture.provider.requests.lock().unwrap().len(), 1);
         fixture.cleanup();
     }
 }
+
+#[path = "../../../../test/harness/frontend.rs"]
+mod harness_frontend_tests;

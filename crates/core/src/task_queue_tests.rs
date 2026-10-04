@@ -554,24 +554,26 @@ async fn new_user_goal_supersedes_persisted_active_seventy_six_task_queue() {
 }
 
 #[tokio::test]
-async fn global_blocker_final_text_is_generated_once_and_survives_reconnect() {
+async fn pending_work_text_cannot_end_goal_and_explicit_block_survives_reconnect() {
     let original = large_queue();
     let goal_id = original.goal_id.clone();
-    let provider = provider(
-        (0..76)
-            .map(|_| text("Global blocker: controller environment unavailable"))
-            .collect(),
-    );
+    let provider = provider(vec![
+        text("Missing runner; stopping"),
+        call(
+            "block",
+            "task_queue",
+            serde_json::json!({"action":"block","reason":"all repository access denied"}),
+        ),
+    ]);
     let mut runtime = kernel(provider.clone()).with_messages(vec![original.snapshot()]);
     let mut saved = vec![];
-    let mut events = vec![];
     let result = runtime
         .run_goal_turn_checkpointed(
             "same goal",
             GoalTurn::Resume {
                 goal_id: goal_id.clone(),
             },
-            |e| events.push(e),
+            |_| {},
             |m| {
                 saved = m.to_vec();
                 Ok(())
@@ -579,41 +581,19 @@ async fn global_blocker_final_text_is_generated_once_and_survives_reconnect() {
         )
         .await
         .unwrap();
-    assert_eq!(provider.requests.lock().unwrap().len(), 1);
-    assert_eq!(
-        events
-            .iter()
-            .filter(|e| matches!(e, AgentEvent::ContentDelta { .. }))
-            .count(),
-        1
-    );
-    assert_eq!(
-        events
-            .iter()
-            .filter(|e| matches!(e, AgentEvent::TurnFinished))
-            .count(),
-        1
-    );
-    let queue = runtime.task_queue().unwrap();
-    assert_eq!(queue.state, QueueState::Blocked);
-    assert!(
-        queue
-            .tasks
-            .iter()
-            .all(|t| matches!(t.status, TaskStatus::Running | TaskStatus::Pending))
-    );
+    assert_eq!(provider.requests.lock().unwrap().len(), 2);
+    assert_eq!(runtime.task_queue().unwrap().state, QueueState::Blocked);
     let mut resumed = kernel(provider.clone()).with_messages(saved);
     assert_eq!(
         resumed
-            .run_goal_turn("resume again", GoalTurn::Resume { goal_id }, |_| panic!(
-                "must not re-emit a final"
+            .run_goal_turn("resume", GoalTurn::Resume { goal_id }, |_| panic!(
+                "terminal state must not emit again"
             ))
             .await
             .unwrap(),
         result
     );
-    assert_eq!(provider.requests.lock().unwrap().len(), 1);
-    assert_eq!(provider.responses.lock().unwrap().len(), 75);
+    assert_eq!(provider.requests.lock().unwrap().len(), 2);
 }
 
 #[tokio::test]

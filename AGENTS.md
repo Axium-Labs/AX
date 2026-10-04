@@ -32,6 +32,7 @@ docs/
 crates/
 ├── cli/                 # composition root (args, TUI, sessions, wiring)
 ├── core/                # runtime-core (agent loop, context, budget)
+├── evolution/           # low-frequency Experience learning and evolved Skills
 ├── lexical/             # shared language-independent lexical features
 ├── memory/              # SQLite + JSONL storage, scoped facts, resume
 ├── mcp/                 # MCP client, transports, gateway

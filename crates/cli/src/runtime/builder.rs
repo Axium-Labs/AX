@@ -32,6 +32,7 @@ pub(crate) fn tools(mcp_tools: &[McpToolProxy]) -> ToolRegistry {
     // Every local tool is bound to the same workspace root, so the main agent
     // and a forked child differ only by that binding, never by implementation.
     for local in [
+        Arc::new(tool::TaskSourceTool::new(root.clone())) as Arc<dyn tool::Tool>,
         Arc::new(ShellTool) as Arc<dyn tool::Tool>,
         Arc::new(FilesystemTool),
         Arc::new(tool::PatchTool),
@@ -130,8 +131,9 @@ impl Runtime {
             messages.insert(0, Message::system(policy));
         }
         let config = AxConfig::load()?;
-        let mut kernel =
-            AgentKernel::new(self.provider, self.tools, approval).with_messages(messages);
+        let mut kernel = AgentKernel::new(self.provider, self.tools, approval)
+            .with_coding_harness()
+            .with_messages(messages);
         for (name, child) in config.child_models {
             let child_selection = model_selection::selection_for_provider_id(
                 &child.provider,

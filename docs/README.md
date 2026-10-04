@@ -8,6 +8,8 @@ design decisions that shaped the code are recorded as ADRs in
 
 | Document | Topic |
 |---|---|
+| [coding-harness.md](coding-harness.md) | Persistent coding execution, concrete task sources, workspace specs and durable artifacts |
+| [coding-harness-validation.md](coding-harness-validation.md) | Root causes, regression coverage and original testax whole-prompt acceptance evidence |
 | [architecture.md](architecture.md) | System architecture: crate responsibilities, agent loop, cold-start path |
 | [acp-crew.md](acp-crew.md) | ACP adapter and AX Crew device bridge |
 | [memory.md](memory.md) | Memory: scopes, project identity, retrieval, persistence |
@@ -23,8 +25,10 @@ design decisions that shaped the code are recorded as ADRs in
 | [evolution.md](evolution.md) | Low-frequency Experience learning and evolved Skill lifecycle |
 | [providers.md](providers.md) | Models, providers, authentication |
 | [development.md](development.md) | Building, testing, extending and releasing AX |
+| [release-notes/0.3.4.md](release-notes/0.3.4.md) | AX 0.3.4 coding harness and workspace artifacts |
 | [release-notes/0.3.1.md](release-notes/0.3.1.md) | AX 0.3.1 liveness fix and validation |
 | [release-notes/0.3.2.md](release-notes/0.3.2.md) | AX 0.3.2 frontend child parity and explicit task inputs |
+| [releases/0.2.5.md](releases/0.2.5.md) | AX 0.2.5 release snapshot |
 | [adr/README.md](adr/README.md) | Architecture Decision Records (index) |
 
 ## TUI features

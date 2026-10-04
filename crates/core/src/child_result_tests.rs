@@ -88,8 +88,8 @@ fn model_summary_is_compact_while_the_full_receipt_keeps_everything() {
     result.diagnostics = vec!["shell: exit 101".into()];
     result.diff_stat = DiffStat {
         files: 1,
-        insertions: 12,
-        deletions: 2,
+        insertions: Some(12),
+        deletions: Some(2),
     };
     result.continuation_hint = Some("retry with the index name fixed".into());
 
@@ -166,8 +166,8 @@ fn read_tool_serves_each_aspect_and_lists_when_no_id_is_given() {
     }];
     result.diff_stat = DiffStat {
         files: 2,
-        insertions: 9,
-        deletions: 1,
+        insertions: Some(9),
+        deletions: Some(1),
     };
     result.validation = vec![Validation {
         command: "cargo fmt --check".into(),

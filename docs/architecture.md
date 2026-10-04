@@ -240,7 +240,7 @@ user task
   → retrieve memory and checkpoint user input
   → context pressure check / layered compression
   → model streaming request
-  → final text ──────────────→ persist and finish
+  → proposed final ─────────→ pending guard / completion review → persist and finish
   → tool calls
       → goal-bound step/scope admission
       → permission check
@@ -279,7 +279,8 @@ Step-by-step guidance lives in [development.md](development.md).
 ## Lightweight long-task orchestration
 
 The existing Agent Loop and tool-round DAG remain the execution mechanisms. A
-small Task Queue stores only explicit model-created tasks through `task_queue`;
+small Task Queue stores concrete model-created tasks through `task_queue` or typed
+`ax_work_items` tool observations;
 numbered/bulleted formatting is a hint and never creates a queue.
 There is no separate planner call or fixed orchestration system prompt.
 `task_queue start` accepts full input strings or `{title, input}` objects. Titles
@@ -315,7 +316,7 @@ authentication, persistence and exhausted provider retries block the goal.
 Queue states are active/summarizing/suspended/completed/blocked/cancelled/superseded.
 Explicit global `block`/`cancel` controls and typed `ToolError::GlobalBlocked`
 stop queue consumption immediately. A text-only response never advances a task:
-with unfinished tasks it terminates the goal as blocked; after terminal tasks it
+with unfinished tasks it keeps the goal active; after terminal tasks it
 completes the summary. The terminal response is checkpointed before output and
 cached for reconnect without another model call or repeated response events.
 Worker forks strip controller queue state and retain only parent goal identity,
@@ -358,7 +359,7 @@ files, diff statistics, diagnostics, validation, artifacts, failure reason,
 continuation hint, metrics). The controller model only receives the compact
 `model_summary()` projection; the full record is durable and is read back with
 the `child_result` control tool, so recovering detail never means re-running a
-child. The controller makes a single text-only summary request after all children
+child. The controller enters summary/reporting after all children
 are terminal. A receipt recovered from an earlier process short-circuits
 provisioning, so a resumed session never re-runs a completed child. See
 [ADR 0016](adr/0016-parallel-children-and-instructions.md).
@@ -502,3 +503,6 @@ Bound tools retain a manager and reuse a persistent Linux namespace broker; chil
 registries bind their own workspace. Permission remains independent. See
 [security.md](security.md) and [ADR 0013](adr/0013-workspace-runtime-sandbox.md)
 for backend requirements, lifecycle capabilities and platform limitations.
+
+Current coding execution policy, task-level Git workspaces, final completion review
+and artifact staging/export are described in [coding-harness.md](coding-harness.md).

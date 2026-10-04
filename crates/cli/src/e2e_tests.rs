@@ -115,6 +115,17 @@ impl ModelProvider for Provider {
     }
 
     async fn complete(&self, request: ModelRequest) -> Result<ModelResponse, ModelError> {
+        if request
+            .messages
+            .iter()
+            .any(|message| message.content.starts_with("[ax-completion-review]"))
+        {
+            return Ok(call(
+                "review",
+                "completion_check",
+                json!({"state":"complete","reason":"scripted fixture deliverables complete"}),
+            ));
+        }
         self.requests.lock().unwrap().push(request.clone());
         let child = request
             .messages

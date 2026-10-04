@@ -94,6 +94,7 @@ async fn run() {
             .is_err()
     );
     let context = tool::RunContext {
+        workspace_root: root.clone(),
         cwd: root.clone(),
         state_dir: fixture.join("state"),
         session_id: "child".into(),

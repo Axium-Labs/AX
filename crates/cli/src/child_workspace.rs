@@ -241,6 +241,34 @@ pub(super) fn gc(root: &Path, policy: Policy) -> io::Result<()> {
         };
         let terminal = matches!(manifest.status.as_str(), "completed" | "failed" | "expired");
         if terminal || now().saturating_sub(manifest.touched) >= policy.ttl_secs {
+            if manifest.cwd.is_dir() && !state.join("result.json").is_file() {
+                let mut result = runtime_core::ChildResult::failed(
+                    "expired",
+                    "expired",
+                    runtime_core::ChildStatus::Failed,
+                    "unleased child workspace expired",
+                );
+                let saved = std::fs::read(state.join("output-dir.json"))
+                    .ok()
+                    .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok());
+                let output = saved
+                    .as_ref()
+                    .and_then(|saved| saved["directory"].as_str().or_else(|| saved.as_str()))
+                    .map(PathBuf::from);
+                let source = saved
+                    .as_ref()
+                    .and_then(|saved| saved["source"].as_str())
+                    .map_or_else(|| root.to_path_buf(), PathBuf::from);
+                if let Some(path) = &output {
+                    super::validate_output(&source, path).map_err(io::Error::other)?;
+                }
+                if let Err(error) =
+                    super::freeze_artifacts(&manifest.cwd, &state, output.as_deref(), &mut result)
+                {
+                    eprintln!("child artifact preservation deferred: {error}");
+                    continue;
+                }
+            }
             if let Err(error) = cleanup(&state) {
                 // A locked/corrupt old workspace must not fail every new child.
                 eprintln!("child workspace GC deferred: {error}");
@@ -435,6 +463,161 @@ fn copy_files(
 }
 
 /// Only untracked files are copied for Git; tracked content comes from HEAD + patch.
+// The cache lock spans clone/fetch, exact checkout and quota admission.
+#[allow(clippy::too_many_lines)]
+pub(super) fn provision_spec(
+    source: &Path,
+    destination: &Path,
+    root: &Path,
+    excluded: &[PathBuf],
+    state: &Path,
+    policy: Policy,
+    spec: &runtime_core::task_queue::WorkspaceSpec,
+) -> io::Result<()> {
+    use runtime_core::task_queue::WorkspaceMode;
+    use std::hash::{Hash, Hasher};
+    match spec.mode {
+        WorkspaceMode::Inherit => provision(source, destination, root, excluded, state, policy),
+        WorkspaceMode::Empty => {
+            std::fs::create_dir_all(destination)?;
+            Ok(())
+        }
+        WorkspaceMode::Git => {
+            // Lifecycle commands run under the configured sandbox with an
+            // explicit managed-cache capability; never fall back to host mode.
+            let _admission = admission(root);
+            let url = spec
+                .repo_url
+                .as_deref()
+                .ok_or_else(|| io::Error::other("missing repo_url"))?;
+            if url.starts_with('-') {
+                return Err(io::Error::other("invalid repo_url"));
+            }
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            url.hash(&mut hasher);
+            let cache_root = root.join("git-cache");
+            std::fs::create_dir_all(&cache_root)?;
+            let cache = cache_root.join(format!("{:016x}.git", hasher.finish()));
+            if cache
+                .symlink_metadata()
+                .is_ok_and(|m| m.file_type().is_symlink())
+            {
+                return Err(io::Error::other("repository cache must not be a symlink"));
+            }
+            let mut sandbox_policy =
+                sandbox::SandboxManager::policy_for_workspace(root.to_path_buf())
+                    .map_err(io::Error::other)?;
+            sandbox_policy.mode = super::service_sandbox_mode();
+            sandbox_policy.runtime_mounts.push(sandbox::RuntimeMount {
+                path: root.to_path_buf(),
+                read_only: false,
+            });
+            let manager =
+                sandbox::SandboxManager::prepare(&sandbox_policy).map_err(io::Error::other)?;
+            let run = |cwd: &Path, args: Vec<String>| -> io::Result<std::process::Output> {
+                let mut command = sandbox::CommandSpec::new("git");
+                command.args = vec![
+                    "-c".into(),
+                    "core.hooksPath=/dev/null".into(),
+                    "-c".into(),
+                    "core.fsmonitor=false".into(),
+                    "-C".into(),
+                    cwd.to_string_lossy().into_owned(),
+                ];
+                command.args.extend(args);
+                let output = manager.output_blocking(command).map_err(io::Error::other)?;
+                if !output.status.success() {
+                    return Err(io::Error::other(format!(
+                        "git workspace preparation: {}",
+                        String::from_utf8_lossy(&output.stderr)
+                    )));
+                }
+                Ok(output)
+            };
+            if cache.is_dir() {
+                let configured = run(
+                    &cache,
+                    vec!["config".into(), "--get".into(), "remote.origin.url".into()],
+                )?;
+                if String::from_utf8_lossy(&configured.stdout).trim() != url {
+                    return Err(io::Error::other("repository cache identity mismatch"));
+                }
+            } else {
+                run(
+                    root,
+                    vec![
+                        "clone".into(),
+                        "--bare".into(),
+                        "--filter=blob:none".into(),
+                        "--no-tags".into(),
+                        url.into(),
+                        cache.to_string_lossy().into_owned(),
+                    ],
+                )?;
+            }
+            let revision = spec.revision.as_deref().unwrap_or("HEAD");
+            if revision.starts_with('-') {
+                return Err(io::Error::other("invalid revision"));
+            }
+            let resolve = || {
+                run(
+                    &cache,
+                    vec![
+                        "rev-parse".into(),
+                        "--verify".into(),
+                        format!("{revision}^{{commit}}"),
+                    ],
+                )
+            };
+            let commit = if let Ok(commit) = resolve() {
+                commit
+            } else {
+                run(
+                    &cache,
+                    vec!["fetch".into(), "origin".into(), revision.into()],
+                )?;
+                resolve()?
+            };
+            let commit = String::from_utf8_lossy(&commit.stdout).trim().to_owned();
+            let confined = super::service_sandbox_mode() != sandbox::SandboxMode::Off;
+            if confined {
+                // Standalone object store in confined children; an external
+                // shared Git directory must not grant sibling write access.
+                run(
+                    root,
+                    vec![
+                        "clone".into(),
+                        "--no-checkout".into(),
+                        "--no-hardlinks".into(),
+                        cache.to_string_lossy().into_owned(),
+                        destination.to_string_lossy().into_owned(),
+                    ],
+                )?;
+                run(
+                    destination,
+                    vec!["checkout".into(), "--detach".into(), commit],
+                )?;
+            } else {
+                let mut manifest = read_manifest(state)?;
+                manifest.repository = Some(cache.clone());
+                write_manifest(state, &manifest)?;
+                run(
+                    &cache,
+                    vec![
+                        "worktree".into(),
+                        "add".into(),
+                        "--detach".into(),
+                        destination.to_string_lossy().into_owned(),
+                        commit,
+                    ],
+                )?;
+            }
+            invalidate_usage_cache(root);
+            check_quota(root, destination, policy)
+        }
+    }
+}
+
 pub(super) fn provision(
     source: &Path,
     destination: &Path,

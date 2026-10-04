@@ -104,6 +104,7 @@ fn forked_children_share_the_controller_registry_but_not_its_scope() {
     ));
     let kernel = AgentKernel::new(Arc::new(MockProvider), registry, Arc::new(crate::AllowAll));
     let run = ChildRun {
+        workspace_root: None,
         goal_id: "child-1".into(),
         session_id: "child-1".into(),
         cwd: std::env::temp_dir(),

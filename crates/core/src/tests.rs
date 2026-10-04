@@ -349,7 +349,16 @@ async fn loops_through_tool_result_to_final_answer() {
             .count(),
         4
     );
-    assert_eq!(kernel.messages()[2].role, Role::Tool);
+    assert_eq!(
+        kernel
+            .messages()
+            .iter()
+            .filter(|m| m.role != Role::System)
+            .nth(2)
+            .unwrap()
+            .role,
+        Role::Tool
+    );
 }
 
 #[tokio::test]
@@ -912,5 +921,13 @@ async fn turn_timeout_is_enforced_while_model_is_waiting() {
         kernel.run_turn("wait", |_| {}).await,
         Err(AgentError::Timeout(_))
     ));
-    assert_eq!(kernel.messages()[0].content, "wait");
+    assert_eq!(
+        kernel
+            .messages()
+            .iter()
+            .find(|m| m.role == Role::User)
+            .unwrap()
+            .content,
+        "wait"
+    );
 }

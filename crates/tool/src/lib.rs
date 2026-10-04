@@ -1,4 +1,8 @@
 //! Tool contracts, registry, and lightweight built-in tools.
+pub mod environment;
+mod task_source;
+pub use environment::EnvironmentContext;
+pub use task_source::TaskSourceTool;
 
 mod filesystem;
 mod sandboxed;

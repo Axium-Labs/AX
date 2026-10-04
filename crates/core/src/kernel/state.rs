@@ -21,6 +21,7 @@ use crate::{
 };
 
 pub struct AgentKernel {
+    pub(crate) coding_harness: bool,
     pub(crate) provider: Arc<dyn ModelProvider>,
     pub(crate) retry_policy: model::RetryPolicy,
     pub(crate) permission_profiles: Vec<tool::PermissionProfile>,

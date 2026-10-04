@@ -567,7 +567,7 @@ async fn child_timeout_ends_only_that_child() {
             .failure_reason
             .as_ref()
             .unwrap()
-            .contains("turn timeout")
+            .contains("child execution timeout")
     );
     assert_eq!(queue.tasks[1].status, TaskStatus::Completed);
     assert_eq!(
@@ -787,6 +787,7 @@ async fn child_workspace_excludes_controller_store_and_binds_relative_file_paths
     assert!(!child.run.cwd.join("memory.sqlite3").exists());
     assert!(!child.run.cwd.join("sessions").exists());
     let context = tool::RunContext {
+        workspace_root: child.run.cwd.clone(),
         cwd: child.run.cwd.clone(),
         state_dir: child.run.state_dir.clone().unwrap(),
         session_id: child.run.session_id.clone(),

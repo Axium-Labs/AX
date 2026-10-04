@@ -38,6 +38,9 @@ impl Tool for SkillInvocation {
     fn capability(&self, _: &Value) -> Capability {
         Capability::FilesystemRead
     }
+    fn runtime_owned_resources(&self) -> bool {
+        true
+    }
     fn resources(&self, input: &Value) -> Vec<tool::ResourceAccess> {
         input["name"]
             .as_str()

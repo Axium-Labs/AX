@@ -4,7 +4,7 @@
 //! The step owns no loop control: it either returns the recorded response or a
 //! structural error.
 
-use model::{Message, ModelError, ModelRequest, ToolCall, ToolSpec};
+use model::{Message, ModelRequest, ToolCall, ToolSpec};
 
 use crate::{
     AgentError, AgentEvent, AgentKernel, QueueState, context::request_context, execution,
@@ -77,7 +77,7 @@ impl AgentKernel {
             .as_ref()
             .is_some_and(|q| q.active() && !q.tasks.is_empty());
         let on_delta = |delta: String| {
-            if !queue_active {
+            if !queue_active && !self.coding_harness {
                 (emit.lock().unwrap())(AgentEvent::ContentDelta { delta });
             }
         };
@@ -89,103 +89,33 @@ impl AgentKernel {
         if let Some(queue) = self
             .task_queue
             .as_ref()
-            .filter(|q| q.state == QueueState::Summarizing)
+            .filter(|q| matches!(q.state, QueueState::Summarizing | QueueState::Completed))
         {
             request_history.push(queue.summary_context());
+            if let Some(receipts) = self.current_receipts_context() {
+                request_history.push(receipts);
+            }
         }
         let request_messages = request_context(&request_history, self.context_budget())?;
-        let child_summary = self.child_host.is_some()
-            && self
-                .task_queue
-                .as_ref()
-                .is_some_and(|q| q.delegate && q.state == QueueState::Summarizing);
         let request = ModelRequest {
             messages: request_messages,
-            tools: if child_summary {
-                // Every child is terminal, so no work tool may run. Asking the
-                // user a planning question is not work and is the one thing a
-                // summary step can still need.
-                tool_specs
-                    .iter()
-                    .filter(|spec| spec.function.name == crate::user_input::TOOL_NAME)
-                    .cloned()
-                    .collect()
-            } else {
-                tool_specs.to_vec()
-            },
+            tools: tool_specs.to_vec(),
         };
-        let started = std::time::Instant::now();
-        let mut attempts = 0;
-        let response = loop {
-            attempts += 1;
-            let emitted = std::sync::atomic::AtomicBool::new(false);
-            let response = {
-                let mut delta = |text: String| {
-                    if !text.is_empty() {
-                        emitted.store(true, std::sync::atomic::Ordering::Relaxed);
-                    }
-                    on_delta(text);
-                };
-                let mut thinking = |text: String| {
-                    if !text.is_empty() {
-                        emitted.store(true, std::sync::atomic::Ordering::Relaxed);
-                    }
-                    on_thinking(text);
-                };
-                let request =
-                    self.provider
-                        .complete_stream(request.clone(), &mut delta, &mut thinking);
-                if attempts == 1 {
-                    request.await
-                } else {
-                    let remaining =
-                        std::time::Duration::from_millis(self.retry_policy.time_budget_ms)
-                            .saturating_sub(started.elapsed());
-                    tokio::time::timeout(remaining, request)
-                        .await
-                        .unwrap_or_else(|_| {
-                            Err(ModelError::Io(std::io::Error::new(
-                                std::io::ErrorKind::TimedOut,
-                                "provider retry time budget exhausted",
-                            )))
-                        })
-                }
-            };
-            match response {
-                Ok(response) => break response,
-                Err(error) => {
-                    // Replaying a partially streamed response would duplicate output.
-                    if emitted.load(std::sync::atomic::Ordering::Relaxed) {
-                        return Err(error.into());
-                    }
-                    let entropy = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .subsec_nanos();
-                    let Some(delay) = self.retry_policy.delay(
-                        &error,
-                        attempts,
-                        started.elapsed(),
-                        u64::from(entropy),
-                    ) else {
-                        return Err(error.into());
-                    };
-                    tokio::time::sleep(delay).await;
-                }
-            }
-        };
+        let response = self
+            .request_with_retry(request, on_delta, on_thinking)
+            .await?;
         drop(model_timer);
         let content = response.content;
         let tool_calls = response.tool_calls;
-        if child_summary
-            && !tool_calls.is_empty()
-            && !tool_calls
-                .iter()
-                .all(|call| call.function.name == crate::user_input::TOOL_NAME)
-        {
-            return Err(AgentError::GlobalBlocked(
-                "all children are terminal; controller summary cannot execute more tools".into(),
+        if self.coding_harness && tool_calls.is_empty() {
+            // Persist before the candidate: restart must not infer completion
+            // while the audit is still pending (including a crash in the audit).
+            let pending = Message::system(format!(
+                "{} Candidate final awaits completion review.",
+                crate::harness::PENDING
             ));
+            self.messages.push(pending.clone());
+            self.raw_turn_messages.push(pending);
         }
         let mut assistant = Message::assistant(content.clone(), tool_calls.clone());
         assistant.usage = response.usage.map(|reported| {

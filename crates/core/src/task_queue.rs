@@ -70,8 +70,32 @@ pub enum TaskStatus {
     Skipped,
 }
 
+/// Task-owned workspace prepared by the host before any child model request.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct WorkspaceSpec {
+    #[serde(default)]
+    pub mode: WorkspaceMode,
+    pub repo_url: Option<String>,
+    pub revision: Option<String>,
+    pub subdir: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkspaceMode {
+    #[default]
+    Inherit,
+    Git,
+    Empty,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct QueuedTask {
+    #[serde(default)]
+    pub workspace: WorkspaceSpec,
+    #[serde(default)]
+    pub output_dir: Option<String>,
     pub title: String,
     /// Complete task input; old string queues and checkpoints fall back to title.
     #[serde(default)]
@@ -135,6 +159,8 @@ impl TaskQueue {
             tasks: titles
                 .into_iter()
                 .map(|title| QueuedTask {
+                    workspace: WorkspaceSpec::default(),
+                    output_dir: None,
                     input: title.clone(),
                     execution_started: false,
                     title,
@@ -389,19 +415,22 @@ impl TaskQueue {
         queue
     }
     pub(crate) fn summary_context(&self) -> Message {
-        Message::system(format!("[ax-task-summary]\nSummarize all task outcomes and failures; execution is complete. {}", json!(self.tasks.iter().enumerate().map(|(i,t)| json!({"task":i+1,"status":t.status,"outcome":t.outcome,"failure_reason":t.failure_reason,"child":t.child})).collect::<Vec<_>>())))
+        Message::system(format!(
+            "[ax-task-summary]\nKnown execution items are terminal, including evidenced failures. Complete any remaining requested durable reports before final. Use child_result or child_result.json for authoritative current receipts when available: aggregate their terminal status, never custom result.json status labels. Read artifact-manifest.json to identify files exported by this run; files absent from it may be stale and must not supply current evaluation. Use measured metrics.json (wall_time_ms is the measured execution duration); absent measurements and unknown error/evaluation counts stay null, never zero. Verify reports and the final answer agree with this inventory. Check every requested per-item output for both completed and failed items. Produce missing requested report files from current receipts with explicit unknown/null values; listing missing deliverables is not completing them. Create cross-item reports in the controller; an isolated child needs complete report inputs and cannot infer access to sibling output directories. Do not confuse failed items with never-dispatched items. {}",
+            json!({"total_tasks":self.tasks.len(),"overall_goal":self.overall_goal,"tasks":self.tasks.iter().enumerate().map(|(i,t)| json!({"task":i+1,"task_id":format!("task-{}",i+1),"title":t.title,"status":t.status,"outcome":t.outcome,"failure_reason":t.failure_reason,"workspace":t.workspace,"output_dir":t.output_dir,"child":t.child})).collect::<Vec<_>>() })
+        ))
     }
 }
 
 pub(crate) fn spec() -> ToolSpec {
     ToolSpec { kind: "function", function: FunctionSpec {
         name: TOOL_NAME.into(),
-        description: "Create structured tasks only when you explicitly decide decomposition is useful. Lists are formatting hints, never authorization to split. Use alone in a round. execution=children delegates complete task inputs to isolated children; the runtime dispatches EVERY independent task at once, bounded by its own concurrency limit, and keeps dependent tasks waiting for their predecessor. dependencies are zero-based prior task indices. Declare resources (path or name, optional write flag) so two tasks that write the same thing never run at the same time. Finish the current task with completed/failed/skipped and an outcome. Consider recovery before failure; recovery is advisory. block/cancel stop the goal. Text-only responses never advance tasks.".into(),
+        description: "Do ordinary setup/data reads before creating a queue. Queue concrete user deliverables, never a discovery checklist. Prefer task_source work mapping for projected tables. Register concrete executable work once known; append newly discovered items without replacing executed work. Prefer execution=children for independent work. Lists of instructions are not tasks. workspace declares repo_url and exact revision; output_dir preserves child artifacts before cleanup. Use alone in a round. execution=children delegates complete task inputs to isolated children; the runtime dispatches EVERY independent task at once, bounded by its own concurrency limit, and keeps dependent tasks waiting for their predecessor. dependencies are zero-based prior task indices. Declare resources (path or name, optional write flag) so two tasks that write the same thing never run at the same time. Finish the current task with completed/failed/skipped and an outcome. Consider recovery before failure; recovery is advisory. cancel stops the goal; actual runtime global blockers are classified by the controller. Text-only responses never advance tasks.".into(),
         parameters: json!({"type":"object","properties":{
-            "action":{"type":"string","enum":["start","finish","block","cancel"]},
+            "action":{"type":"string","enum":["start","append","finish","block","cancel"]},
             "execution":{"type":"string","enum":["controller","children"]},"dependencies":{"type":"array","items":{"type":"array","items":{"type":"integer","minimum":0}}},
-            "overall_goal":{"type":"string"},"tasks":{"type":"array","minItems":2,"items":{"anyOf":[{"type":"string","description":"Complete independently executable task input, not a heading"},{"type":"object","properties":{"title":{"type":"string"},"input":{"type":"string","description":"Complete independently executable task input including necessary data/context"},"resources":{"type":"array","description":"Files or named resources this task touches","items":{"anyOf":[{"type":"string","description":"Path read by this task"},{"type":"object","properties":{"path":{"type":"string"},"name":{"type":"string"},"all":{"type":"boolean"},"write":{"type":"boolean","description":"True when the task modifies it"}},"additionalProperties":false}]}}},"required":["title","input"],"additionalProperties":false}]}},
-            "status":{"type":"string","enum":["completed","failed","skipped"]},"reason":{"type":"string"}
+            "overall_goal":{"type":"string"},"tasks":{"type":"array","minItems":2,"items":{"anyOf":[{"type":"string","description":"Complete independently executable task input, not a heading"},{"type":"object","properties":{"title":{"type":"string"},"input":{"type":"string","description":"Complete independently executable task input including necessary data/context"},"workspace":{"type":"object","properties":{"mode":{"type":"string","enum":["inherit","git","empty"]},"repo_url":{"type":"string"},"revision":{"type":"string"},"subdir":{"type":"string"}},"required":["mode"],"additionalProperties":false},"output_dir":{"type":"string"},"resources":{"type":"array","description":"Files or named resources this task touches","items":{"anyOf":[{"type":"string","description":"Path read by this task"},{"type":"object","properties":{"path":{"type":"string"},"name":{"type":"string"},"all":{"type":"boolean"},"write":{"type":"boolean","description":"True when the task modifies it"}},"additionalProperties":false}]}}},"required":["title","input"],"additionalProperties":false}]}},
+            "evidence_call_ids":{"type":"array","items":{"type":"string"}},"status":{"type":"string","enum":["completed","failed","skipped"]},"reason":{"type":"string"}
         },"required":["action"]}),
     }}
 }
@@ -452,6 +481,8 @@ fn parse_resources(value: &Value) -> Result<Vec<tool::ResourceAccess>, String> {
     Ok(parsed)
 }
 
+// One admission transaction retains task IDs, history and dependency offsets.
+#[allow(clippy::too_many_lines)]
 pub(crate) fn apply(
     queue: &mut Option<TaskQueue>,
     input: &Value,
@@ -459,12 +490,12 @@ pub(crate) fn apply(
     parent_goal_id: Option<&str>,
 ) -> Result<(), String> {
     match input["action"].as_str() {
-        Some("start") => {
-            if queue
-                .as_ref()
-                .is_some_and(|q| q.goal_id != goal_id || !q.active() || !q.unexecuted())
-            {
-                return Err("cannot replace a queue after task execution starts; continue it or start a new goal".into());
+        Some("start" | "append") => {
+            let append = input["action"] == "append";
+            if queue.as_ref().is_some_and(|q| {
+                q.goal_id != goal_id || !q.active() || (!append && !q.unexecuted())
+            }) {
+                return Err("cannot replace executed work; use action=append for newly discovered concrete items, finish current work or start a new goal".into());
             }
             let goal = input["overall_goal"]
                 .as_str()
@@ -480,11 +511,27 @@ pub(crate) fn apply(
                 .iter()
                 .map(|(title, _, _)| title.clone())
                 .collect::<Vec<_>>();
-            if titles.len() < 2 {
+            if titles.len() < if append { 1 } else { 2 } {
                 return Err("at least two tasks required".into());
             }
+            let offset = if append {
+                queue.as_ref().map_or(0, |queue| queue.tasks.len())
+            } else {
+                0
+            };
             let mut plan = TaskQueue::new(goal.into(), titles);
-            for (task, (_, input, resources)) in plan.tasks.iter_mut().zip(tasks) {
+            for ((task, (_, input, resources)), definition) in plan
+                .tasks
+                .iter_mut()
+                .zip(tasks)
+                .zip(input["tasks"].as_array().unwrap())
+            {
+                if let Some(workspace) = definition.get("workspace") {
+                    task.workspace = serde_json::from_value(workspace.clone())
+                        .map_err(|e| format!("invalid workspace: {e}"))?;
+                    validate_workspace(&task.workspace)?;
+                }
+                task.output_dir = definition["output_dir"].as_str().map(str::to_owned);
                 task.input = input;
                 task.resources = resources;
             }
@@ -501,7 +548,7 @@ pub(crate) fn apply(
                     || dependencies
                         .iter()
                         .enumerate()
-                        .any(|(i, deps)| deps.iter().any(|&d| d >= i))
+                        .any(|(i, deps)| deps.iter().any(|&d| d >= offset + i))
                 {
                     return Err("dependencies must refer to prior tasks".into());
                 }
@@ -511,7 +558,20 @@ pub(crate) fn apply(
             }
             goal_id.clone_into(&mut plan.goal_id);
             plan.parent_goal_id = parent_goal_id.map(str::to_owned);
-            *queue = Some(plan);
+            if append && let Some(existing) = queue.as_mut() {
+                for task in &mut plan.tasks {
+                    task.status = TaskStatus::Pending;
+                }
+                existing.tasks.extend(plan.tasks);
+                if input.get("execution").is_some() {
+                    existing.delegate = plan.delegate;
+                }
+                existing.state = QueueState::Active;
+                existing.summarized = false;
+                existing.advance();
+            } else {
+                *queue = Some(plan);
+            }
             Ok(())
         }
         Some("finish") => {
@@ -552,4 +612,30 @@ pub(crate) fn schema_tokens() -> usize {
     crate::token::estimate_text_tokens(&spec.function.name)
         + crate::token::estimate_text_tokens(&spec.function.description)
         + crate::token::estimate_text_tokens(&spec.function.parameters.to_string())
+}
+
+pub(crate) fn validate_workspace(spec: &WorkspaceSpec) -> Result<(), String> {
+    if spec.mode == WorkspaceMode::Git
+        && spec
+            .repo_url
+            .as_deref()
+            .is_none_or(|url| url.trim().is_empty() || url.starts_with('-'))
+    {
+        return Err("git workspace requires a non-option repo_url".into());
+    }
+    if let Some(subdir) = &spec.subdir {
+        let path = std::path::Path::new(subdir);
+        if path.is_absolute()
+            || path.components().any(|part| {
+                !matches!(
+                    part,
+                    std::path::Component::Normal(_) | std::path::Component::CurDir
+                )
+            })
+            || subdir.contains('\\') && subdir.split('\\').any(|part| part == "..")
+        {
+            return Err("workspace subdir must stay within workspace".into());
+        }
+    }
+    Ok(())
 }

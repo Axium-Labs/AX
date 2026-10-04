@@ -22,6 +22,7 @@ fn temp(label: &str) -> PathBuf {
 
 fn context(cwd: &Path) -> RunContext {
     RunContext {
+        workspace_root: cwd.to_path_buf(),
         cwd: cwd.to_path_buf(),
         state_dir: cwd.join(".ax"),
         session_id: "child-session".into(),

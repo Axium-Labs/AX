@@ -18,12 +18,22 @@ pub struct ChildRun {
     pub goal_id: String,
     pub session_id: String,
     pub cwd: PathBuf,
+    /// Lifecycle/sandbox root when execution starts in a repository subdirectory.
+    #[serde(default)]
+    pub workspace_root: Option<PathBuf>,
     pub memory_scope: String,
     /// Durable store outside the disposable workspace; None for legacy runs.
     #[serde(default)]
     pub state_dir: Option<PathBuf>,
     #[serde(default)]
     pub execution_budget: Option<crate::ExecutionBudget>,
+}
+
+impl ChildRun {
+    #[must_use]
+    pub fn workspace_root(&self) -> &std::path::Path {
+        self.workspace_root.as_deref().unwrap_or(&self.cwd)
+    }
 }
 
 /// Raw history and terminal receipts live in the child's own session.
@@ -51,6 +61,35 @@ pub struct PreparedChild {
 /// The composition root owns workspace/session/memory provisioning.
 #[async_trait]
 pub trait ChildHost: Send + Sync {
+    /// Persist a task-local setup failure even when no child session could be
+    /// created. A missing workspace must not make this receipt overwrite a sibling.
+    /// # Errors
+    /// Returns an error when the host cannot durably save the failure receipt.
+    fn persist_preparation_failure(
+        &self,
+        _task: &crate::task_queue::QueuedTask,
+        _result: &mut ChildResult,
+    ) -> Result<(), AgentError> {
+        Ok(())
+    }
+
+    async fn prepare_task(
+        &self,
+        controller: &AgentKernel,
+        task: &crate::task_queue::QueuedTask,
+    ) -> Result<PreparedChild, AgentError> {
+        if task.workspace != crate::task_queue::WorkspaceSpec::default()
+            || task.output_dir.is_some()
+        {
+            return Err(tool::ToolError::InvalidInput(
+                "host does not support task workspace/output specification".into(),
+            )
+            .into());
+        }
+        self.prepare(controller, task.task_input(), task.child.as_ref())
+            .await
+    }
+
     async fn prepare_with_policy(
         &self,
         controller: &AgentKernel,
@@ -77,11 +116,38 @@ pub trait ChildHost: Send + Sync {
 /// Recover a final receipt from durable history, including unresolved tool errors.
 #[must_use]
 pub fn terminal_result(messages: &[Message]) -> Option<ChildResult> {
+    terminal_result_reviewed(messages, false)
+}
+
+fn terminal_result_reviewed(messages: &[Message], reviewed: bool) -> Option<ChildResult> {
     let last = messages
         .iter()
         .rev()
         .find(|m| m.role != model::Role::System)?;
+    // Completion review acknowledgements are control history, not a replacement
+    // for the candidate final or evidence of repair. Recover the original final
+    // if a process stopped after accepting review but before saving the receipt.
+    if last.role == model::Role::Tool
+        && let Some(index) = messages.iter().rposition(|message| {
+            message.tool_calls.len() == 1
+                && message.tool_calls[0].id == last.tool_call_id.as_deref().unwrap_or_default()
+                && message.tool_calls[0].function.name == crate::harness::CHECK
+                && serde_json::from_str::<serde_json::Value>(
+                    &message.tool_calls[0].function.arguments,
+                )
+                .is_ok_and(|value| value["state"] == "complete")
+        })
+    {
+        return terminal_result_reviewed(&messages[..index], true);
+    }
     if last.role != model::Role::Assistant || !last.tool_calls.is_empty() {
+        return None;
+    }
+    if !reviewed
+        && messages
+            .iter()
+            .any(|message| message.content.starts_with(crate::harness::PENDING))
+    {
         return None;
     }
     let round = messages.iter().rposition(|m| !m.tool_calls.is_empty());
@@ -162,6 +228,7 @@ impl AgentKernel {
     pub fn fork_child(&self, run: ChildRun, input: &str, messages: Vec<Message>) -> Self {
         let context = tool::RunContext {
             cwd: run.cwd.clone(),
+            workspace_root: run.workspace_root().to_path_buf(),
             state_dir: run.state_dir.clone().unwrap_or_else(|| run.cwd.join(".ax")),
             session_id: run.session_id.clone(),
             memory_scope: run.memory_scope.clone(),
@@ -181,6 +248,7 @@ impl AgentKernel {
                 store.insert(id.clone(), result.raw_output);
             }
         }
+        kernel.execution_root = Some(run.workspace_root().to_path_buf());
         kernel.child_run = Some(run);
         kernel.child_host = None;
         kernel

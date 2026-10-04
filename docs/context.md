@@ -154,8 +154,8 @@ progress is reserved before optional history selection.
 
 The final summary request receives terminal statuses and concise outcomes once,
 after every task is completed, failed or skipped. Explicit task completion controls
-advance execution; a text-only answer with unfinished tasks blocks the goal and
-stops further model calls. Terminal response text is cached in durable state;
+advance execution; a text-only answer with unfinished tasks keeps the goal active and
+continues execution. Terminal response text is cached in durable state;
 resuming a blocked/completed/cancelled goal produces no duplicate output events.
 Full queue snapshots and archived goals are removed from model context.
 Worker contexts also remove the controller queue. Compaction uses the existing
@@ -170,7 +170,8 @@ child cannot accidentally orchestrate the controller queue. Parent progress
 remains compact; the summary includes child workspace/session/state references and
 concise results, without full child tool histories.
 
-`--child-timeout-secs` limits each isolated child independently; it defaults to
+`--child-timeout-secs` is a total model/tool execution deadline for each isolated
+child, unaffected by continued activity; it defaults to
 unlimited and never implicitly ends the controller. `--turn-timeout-secs` is an
 *idle* deadline: a turn that delegates spans the whole child batch and each child
 has its own budget, so the controller is cancelled only when nothing has

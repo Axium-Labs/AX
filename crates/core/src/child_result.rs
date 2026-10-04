@@ -62,6 +62,37 @@ impl ChildStatus {
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChildMetrics {
+    #[serde(default)]
+    pub time_to_first_tool_ms: Option<u64>,
+    #[serde(default)]
+    pub time_to_first_edit_ms: Option<u64>,
+    #[serde(default)]
+    pub time_to_first_successful_edit_ms: Option<u64>,
+    #[serde(default)]
+    pub input_tokens: Option<u64>,
+    #[serde(default)]
+    pub output_tokens: Option<u64>,
+    #[serde(default)]
+    pub cached_input_tokens: Option<u64>,
+    #[serde(default)]
+    pub search_calls: usize,
+    #[serde(default)]
+    pub read_calls: usize,
+    #[serde(default)]
+    pub patch_calls: usize,
+    #[serde(default)]
+    pub shell_calls: usize,
+    #[serde(default)]
+    pub repeated_searches: usize,
+    #[serde(default)]
+    pub repeated_reads: usize,
+    #[serde(default)]
+    pub parallel_tool_rounds: usize,
+    #[serde(default)]
+    pub max_parallel_tools: usize,
+    #[serde(default)]
+    pub patch_failures: usize,
+
     pub wall_time_ms: u64,
     pub model_rounds: usize,
     pub tool_calls: usize,
@@ -80,8 +111,8 @@ pub struct ChangedFile {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DiffStat {
     pub files: usize,
-    pub insertions: u64,
-    pub deletions: u64,
+    pub insertions: Option<u64>,
+    pub deletions: Option<u64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -101,6 +132,11 @@ pub struct Artifact {
 /// One child's complete receipt.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChildResult {
+    /// Runtime-only detailed trace; the host freezes it separately so compact
+    /// receipt checkpoints never copy the whole trace back into the controller.
+    #[serde(skip)]
+    pub trace: Vec<Value>,
+
     pub child_id: String,
     pub task_id: String,
     pub status: ChildStatus,
@@ -133,6 +169,7 @@ impl ChildResult {
         status: ChildStatus,
     ) -> Self {
         Self {
+            trace: Vec::new(),
             child_id: child_id.into(),
             task_id: task_id.into(),
             status,
@@ -378,6 +415,11 @@ pub(crate) fn apply_read(
 pub struct ChildObserver {
     started: Instant,
     pending: std::collections::HashMap<String, (String, Value)>,
+    trace: Vec<Value>,
+    pending_trace: std::collections::HashMap<String, usize>,
+    seen_searches: std::collections::HashSet<String>,
+    seen_reads: std::collections::HashSet<String>,
+    parallel_round: Option<usize>,
     summary: String,
     pub metrics: ChildMetrics,
     pub findings: Vec<String>,
@@ -402,6 +444,11 @@ impl ChildObserver {
         Self {
             started: Instant::now(),
             pending: std::collections::HashMap::new(),
+            trace: Vec::new(),
+            pending_trace: std::collections::HashMap::new(),
+            seen_searches: std::collections::HashSet::new(),
+            seen_reads: std::collections::HashSet::new(),
+            parallel_round: None,
             summary: String::new(),
             metrics: ChildMetrics::default(),
             findings: Vec::new(),
@@ -429,7 +476,7 @@ impl ChildObserver {
                 self.metrics.tool_calls += 1;
                 self.pending
                     .insert(id.clone(), (name.clone(), input.clone()));
-                self.note_write(name, input);
+                self.trace_start(id, name, input);
             }
             AgentEvent::ToolFinished {
                 id,
@@ -438,6 +485,7 @@ impl ChildObserver {
                 result,
                 ..
             } => {
+                self.trace_finish(id, *success, result);
                 if !*success {
                     self.metrics.failed_tool_calls += 1;
                 }
@@ -445,6 +493,18 @@ impl ChildObserver {
                     .pending
                     .remove(id)
                     .map_or(Value::Null, |(_, input)| input);
+                if *success {
+                    self.note_write(name, &input);
+                }
+                if !*success && name == "patch" {
+                    self.metrics.patch_failures += 1;
+                }
+                if *success
+                    && write_path(name, &input).is_some()
+                    && self.metrics.time_to_first_successful_edit_ms.is_none()
+                {
+                    self.metrics.time_to_first_successful_edit_ms = Some(elapsed_ms(self.started));
+                }
                 if *success && is_discovery(name) && self.findings.len() < Self::MAX_FINDINGS {
                     let finding = format!("{name}: {}", bounded(&result.summary, 200));
                     self.findings.push(finding);
@@ -483,6 +543,57 @@ impl ChildObserver {
         }
     }
 
+    fn trace_start(&mut self, id: &str, name: &str, input: &Value) {
+        let now = elapsed_ms(self.started);
+        self.metrics.time_to_first_tool_ms.get_or_insert(now);
+        if write_path(name, input).is_some() {
+            self.metrics.time_to_first_edit_ms.get_or_insert(now);
+        }
+        let signature = format!("{name}:{input}");
+        let read = name == "filesystem" && input["operation"] == "read";
+        let search = is_discovery(name);
+        let repeated_search = search && !self.seen_searches.insert(signature.clone());
+        let repeated_read = read && !self.seen_reads.insert(signature);
+        self.metrics.search_calls += usize::from(search);
+        self.metrics.read_calls += usize::from(read);
+        self.metrics.patch_calls += usize::from(name == "patch");
+        self.metrics.shell_calls += usize::from(name == "shell");
+        self.metrics.repeated_searches += usize::from(repeated_search);
+        self.metrics.repeated_reads += usize::from(repeated_read);
+        let parallel = self.pending.len() > 1;
+        self.metrics.max_parallel_tools = self.metrics.max_parallel_tools.max(self.pending.len());
+        if parallel {
+            if self.parallel_round != Some(self.metrics.model_rounds) {
+                self.metrics.parallel_tool_rounds += 1;
+                self.parallel_round = Some(self.metrics.model_rounds);
+            }
+            for index in self.pending_trace.values() {
+                self.trace[*index]["parallel"] = json!(true);
+            }
+        }
+        self.pending_trace.insert(id.into(), self.trace.len());
+        self.trace.push(json!({"round_id":self.metrics.model_rounds,"tool_call_id":id,"tool_name":name,"start_time_ms":unix_ms(),"end_time_ms":null,"duration_ms":null,"status":"running","error_type":null,"input_summary":bounded(&input.to_string(),240),"result_size":null,"parallel":parallel,"repeated_search":repeated_search,"repeated_read":repeated_read,"start_elapsed_ms":now}));
+    }
+    fn trace_finish(&mut self, id: &str, success: bool, result: &tool::ToolResult) {
+        if let Some(index) = self.pending_trace.remove(id) {
+            let entry = &mut self.trace[index];
+            entry["end_time_ms"] = json!(unix_ms());
+            entry["duration_ms"] = json!(
+                elapsed_ms(self.started)
+                    .saturating_sub(entry["start_elapsed_ms"].as_u64().unwrap_or(0))
+            );
+            entry["status"] = json!(if success { "success" } else { "error" });
+            entry["result_size"] = json!(result.raw_output.len());
+            // Semantic error classes (expected bug vs agent mistake) remain
+            // unknown unless the tool reports them; never guess from prose.
+            entry["error_type"] = result
+                .diagnostics
+                .iter()
+                .find_map(|value| value.get("error_type").cloned())
+                .unwrap_or(Value::Null);
+        }
+    }
+
     /// Provider that does not stream still produced a final answer.
     pub fn set_output(&mut self, output: &str) {
         if self.summary.trim().is_empty() && !output.trim().is_empty() {
@@ -515,11 +626,44 @@ impl ChildObserver {
 
     /// Fold reported provider usage from the child transcript.
     pub fn absorb_usage(&mut self, messages: &[Message]) {
-        for message in messages {
+        let retained_rounds = messages
+            .iter()
+            .filter(|message| message.role == model::Role::Assistant)
+            .count();
+        let complete_history =
+            self.metrics.model_rounds == 0 || self.metrics.model_rounds == retained_rounds;
+        let mut input_known = complete_history;
+        let mut output_known = complete_history;
+        let mut cached_known = complete_history;
+        let mut inputs = 0_u64;
+        let mut outputs = 0_u64;
+        let mut cached = 0_u64;
+        for message in messages
+            .iter()
+            .filter(|message| message.role == model::Role::Assistant)
+        {
             let Some(usage) = &message.usage else {
+                input_known = false;
+                output_known = false;
+                cached_known = false;
                 continue;
             };
             let reported = usage.get("reported").unwrap_or(usage);
+            let input = ["input_tokens", "prompt_tokens"]
+                .iter()
+                .find_map(|key| reported[*key].as_u64());
+            let output = ["output_tokens", "completion_tokens"]
+                .iter()
+                .find_map(|key| reported[*key].as_u64());
+            let cache = reported["input_tokens_details"]["cached_tokens"]
+                .as_u64()
+                .or_else(|| reported["prompt_tokens_details"]["cached_tokens"].as_u64());
+            input_known &= input.is_some();
+            output_known &= output.is_some();
+            cached_known &= cache.is_some();
+            inputs = inputs.saturating_add(input.unwrap_or(0));
+            outputs = outputs.saturating_add(output.unwrap_or(0));
+            cached = cached.saturating_add(cache.unwrap_or(0));
             self.metrics.prompt_tokens = self
                 .metrics
                 .prompt_tokens
@@ -528,16 +672,29 @@ impl ChildObserver {
                 token_field(reported, &["completion_tokens", "output_tokens"]),
             );
         }
+        self.metrics.input_tokens = input_known.then_some(inputs);
+        self.metrics.output_tokens = output_known.then_some(outputs);
+        self.metrics.cached_input_tokens = cached_known.then_some(cached);
     }
 
     #[must_use]
     pub fn into_result(
-        self,
+        mut self,
         child_id: impl Into<String>,
         task_id: impl Into<String>,
         status: ChildStatus,
         failure_reason: Option<String>,
     ) -> ChildResult {
+        // A cancelled/expired run may not receive ToolFinished. Close those
+        // spans from measured elapsed time rather than leaving running traces.
+        let elapsed = u64::try_from(self.started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        for index in self.pending_trace.values() {
+            let entry = &mut self.trace[*index];
+            let start = entry["start_elapsed_ms"].as_u64().unwrap_or(elapsed);
+            entry["end_time_ms"] = json!(unix_ms());
+            entry["duration_ms"] = json!(elapsed.saturating_sub(start));
+            entry["status"] = json!("interrupted");
+        }
         let mut metrics = self.metrics;
         metrics.wall_time_ms =
             u64::try_from(self.started.elapsed().as_millis()).unwrap_or(u64::MAX);
@@ -557,6 +714,7 @@ impl ChildObserver {
             bounded(&self.summary, 2_048)
         };
         ChildResult {
+            trace: self.trace,
             child_id,
             task_id,
             status,
@@ -599,13 +757,18 @@ fn is_discovery(name: &str) -> bool {
 }
 
 fn write_path(name: &str, input: &Value) -> Option<String> {
-    match name {
+    let path = match name {
         "patch" => input["path"].as_str().map(str::to_owned),
         "filesystem" if input["operation"].as_str() == Some("write") => {
             input["path"].as_str().map(str::to_owned)
         }
         _ => None,
-    }
+    };
+    path.filter(|path| {
+        !std::path::Path::new(path)
+            .components()
+            .any(|part| part.as_os_str() == ".ax-artifacts")
+    })
 }
 
 /// A shell command counts as validation when it runs a known verifier.
@@ -627,3 +790,16 @@ fn verification_command(name: &str, input: &Value) -> Option<String> {
 #[cfg(test)]
 #[path = "child_result_tests.rs"]
 mod tests;
+
+fn elapsed_ms(started: Instant) -> u64 {
+    u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
+}
+fn unix_ms() -> u64 {
+    u64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis(),
+    )
+    .unwrap_or(u64::MAX)
+}

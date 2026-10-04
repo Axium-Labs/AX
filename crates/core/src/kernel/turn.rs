@@ -46,8 +46,11 @@ impl AgentKernel {
                 let had_queue = self.task_queue.is_some();
                 // A durable empty head prevents restoring an archived queue when
                 // the replacement goal is a plain single task.
-                let next = if had_queue {
+                let next = if had_queue || self.coding_harness {
                     let mut queue = task_queue::TaskQueue::new(input.into(), vec![]);
+                    if self.coding_harness {
+                        queue.state = QueueState::Active;
+                    }
                     queue.goal_id.clone_from(&goal_id);
                     queue.parent_goal_id.clone_from(&self.parent_goal_id);
                     Some(queue)

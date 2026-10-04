@@ -356,6 +356,7 @@ mod tests {
         );
         let bound = parent
             .fork_for_run(&tool::RunContext {
+                workspace_root: root.clone(),
                 cwd: root.clone(),
                 state_dir: root.clone(),
                 session_id: "child".into(),

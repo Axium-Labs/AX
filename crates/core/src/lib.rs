@@ -26,6 +26,7 @@ mod context;
 mod error;
 mod event;
 pub mod execution;
+mod harness;
 pub mod instructions;
 mod kernel;
 mod loop_runtime;
@@ -67,3 +68,7 @@ mod task_queue_tests;
 
 #[cfg(test)]
 mod execution_tests;
+
+#[cfg(test)]
+#[path = "../../../test/harness/core.rs"]
+mod harness_tests;

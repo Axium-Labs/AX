@@ -101,17 +101,24 @@ impl AgentKernel {
                             Prepared::Failed(index, error) => {
                                 reserved.retain(|(held, _)| *held != index);
                                 let task_id = task_id_of(index);
-                                settled.push_back((
-                                    index,
-                                    None,
-                                    ChildResult::failed(
-                                        String::new(),
-                                        task_id,
-                                        ChildStatus::Failed,
-                                        error.to_string(),
+                                let mut result = ChildResult::failed(
+                                    format!(
+                                        "{}:{task_id}:setup",
+                                        self.goal_id.as_deref().unwrap_or_default()
                                     ),
-                                    ExecutionState::fresh(),
-                                ));
+                                    task_id,
+                                    ChildStatus::Failed,
+                                    error.to_string(),
+                                );
+                                if let Err(persist_error) = host.persist_preparation_failure(
+                                    &self.task_queue.as_ref().unwrap().tasks[index],
+                                    &mut result,
+                                ) {
+                                    result.diagnostics.push(format!(
+                                        "setup receipt persistence failed: {persist_error}"
+                                    ));
+                                }
+                                settled.push_back((index, None, result, ExecutionState::fresh()));
                             }
                         }
                     }
@@ -201,19 +208,19 @@ impl AgentKernel {
         ready: &[usize],
     ) -> Vec<Prepared> {
         let kernel: &AgentKernel = self;
-        let inputs: Vec<(usize, String, Option<ChildRun>)> = ready
+        let inputs = ready
             .iter()
             .map(|&index| {
-                let task = &self.task_queue.as_ref().unwrap().tasks[index];
-                (index, task.task_input().to_owned(), task.child.clone())
+                (
+                    index,
+                    self.task_queue.as_ref().unwrap().tasks[index].clone(),
+                )
             })
-            .collect();
+            .collect::<Vec<_>>();
         let mut futures = Vec::with_capacity(inputs.len());
-        for (index, input, previous) in inputs {
+        for (index, task) in inputs {
             let host = host.clone();
-            futures.push(
-                async move { (index, host.prepare(kernel, &input, previous.as_ref()).await) },
-            );
+            futures.push(async move { (index, host.prepare_task(kernel, &task).await) });
         }
         futures_util::future::join_all(futures)
             .await

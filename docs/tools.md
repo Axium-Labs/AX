@@ -389,7 +389,8 @@ Ordinary tool arguments may include `_ax_execution` with `goal_id`, `step`,
 `expected_output` and `scope`. The scheduler resolves result references first;
 the kernel validates the binding and declared path resources before execution,
 then strips runtime-only metadata. New steps may select directories within the
-initial workspace; the same step may narrow its scope. Scope expansion beyond
+initial workspace; embedded non-harness kernels allow the same step to narrow
+its scope. Coding-harness step subscopes are advisory. Scope expansion beyond
 that workspace is rejected. `_ax_observe` optionally names a JSON pointer to an
 actual true boolean verifying output; repeated evidence does not reset stagnation.
 Every completed result is an observation, including empty/no-match and failure.
@@ -411,7 +412,7 @@ choose an initial workspace with `AgentKernel::with_execution_scope` and must
 bind relative tool paths to that workspace. Unknown/global tool effects still
 use an exclusive resource lease and their declared permission/sandbox boundary.
 
-Recursive searches respect the current declared scope. Broader searches can
+Embedded non-harness recursive searches respect the current declared scope. Broader searches can
 explicitly bind a new step within the workspace. `search` and
 `find_files`/`glob` declare the resolved scope as a read resource, so the same
 scope check rejects a call that points outside the current step; the legacy
@@ -626,3 +627,8 @@ keeps the tool's own approval requirement. An escape returns
 SandboxViolation and never triggers an automatic host retry. New local-effect tools
 must declare a workspace worker boundary and use SandboxManager, rather than adding
 path-string checks or host spawn paths. See [security.md](security.md).
+
+Coding-harness kernels treat model-declared step subscopes as advisory while
+enforcing the initial workspace boundary. This prevents a guessed nested scope
+from locking recovery; embedded non-harness kernels retain declared scope checks.
+See [coding-harness.md](coding-harness.md).

@@ -36,16 +36,73 @@ impl AgentKernel {
         &mut self,
         emit: &std::sync::Mutex<F>,
         checkpoint: &mut H,
-        content: String,
-        tool_calls: Vec<ToolCall>,
+        mut content: String,
+        mut tool_calls: Vec<ToolCall>,
         queue_active: bool,
         calls_used: &mut usize,
+        steps_used: &mut usize,
         subagent_events: &mut Option<mpsc::UnboundedReceiver<AgentEvent>>,
     ) -> Result<ToolStep, AgentError>
     where
         F: FnMut(AgentEvent) + Send,
         H: FnMut(&[Message]) -> Result<(), AgentError> + Send,
     {
+        if tool_calls.is_empty()
+            && self.child_run.is_none()
+            && self
+                .task_queue
+                .as_ref()
+                .is_some_and(|q| q.state == QueueState::Active && !q.tasks.is_empty())
+        {
+            self.set_context("[ax-completion-guard]\n", Some(Message::system("[ax-completion-guard]\nKnown work is unresolved. Continue execution, dispatch ready children, or explicitly finish individual tasks with evidence. Use request_user_input for a user-exclusive blocker; use task_queue block only for an evidenced global blocker.")));
+            self.checkpoint_queue(checkpoint)?;
+            return Ok(ToolStep::Continue);
+        }
+        if tool_calls.is_empty() && self.coding_harness {
+            if self.budget.max_steps != 0 && *steps_used >= self.budget.max_steps {
+                return Err(AgentError::StepLimit(self.budget.max_steps));
+            }
+            *steps_used = steps_used.saturating_add(1);
+            (emit.lock().unwrap())(AgentEvent::ModelStarted {
+                provider: self.provider.name().into(),
+                model: self.provider.model_id().into(),
+            });
+            let review = self.review_completion().await?;
+            let mut message = Message::assistant(review.content.clone(), review.tool_calls.clone());
+            message.usage = review.usage.map(|usage| serde_json::json!({"provider":self.provider.name(),"model":self.provider.model_id(),"reported":usage}));
+            self.messages.push(message.clone());
+            self.raw_turn_messages.push(message);
+            let complete = review.tool_calls.len() == 1
+                && review.tool_calls[0].function.name == crate::harness::CHECK
+                && serde_json::from_str::<Value>(&review.tool_calls[0].function.arguments)
+                    .is_ok_and(|v| v["state"] == "complete");
+            if review
+                .tool_calls
+                .iter()
+                .all(|call| call.function.name == crate::harness::CHECK)
+            {
+                for call in &review.tool_calls {
+                    let result = Message::tool(&call.id, "Completion review recorded.");
+                    self.messages.push(result.clone());
+                    self.raw_turn_messages.push(result);
+                }
+                checkpoint(&self.raw_turn_messages)?;
+                if !complete {
+                    self.set_context(
+                        "[ax-completion-guard]\n",
+                        Some(Message::system(format!(
+                            "[ax-completion-guard]\nContinue requested work. Review: {}",
+                            serde_json::to_string(&review.tool_calls).unwrap()
+                        ))),
+                    );
+                    return Ok(ToolStep::Continue);
+                }
+            } else {
+                content = review.content;
+                tool_calls = review.tool_calls;
+            }
+            checkpoint(&self.raw_turn_messages)?;
+        }
         if tool_calls.is_empty() {
             if self.child_run.is_some()
                 && let Some(outcome) = child::terminal_result(&self.messages)
@@ -66,11 +123,16 @@ impl AgentKernel {
                 queue.final_response = Some(content.clone());
                 queue.summarized = true;
                 self.checkpoint_queue(checkpoint)?;
-                if queue_active {
+                if queue_active || self.coding_harness {
                     (emit.lock().unwrap())(AgentEvent::ContentDelta {
                         delta: content.clone(),
                     });
                 }
+            }
+            if self.coding_harness && self.task_queue.is_none() {
+                (emit.lock().unwrap())(AgentEvent::ContentDelta {
+                    delta: content.clone(),
+                });
             }
             self.set_context(task_queue::PROGRESS_PREFIX, None);
             (emit.lock().unwrap())(AgentEvent::TurnFinished);
@@ -105,6 +167,9 @@ impl AgentKernel {
                 serde_json::from_str::<Value>(&tool_calls[0].function.arguments)
                     .map_err(|error| error.to_string())
                     .and_then(|input| {
+                        if self.coding_harness && input["action"] == "block" && !self.global_stop_evidenced(&input) {
+                            return Err("Global stop requires an actual runtime global blocker. Local tool/skill/setup failures or untested resource assumptions cannot end the goal. Attempt the requested resource directly, recover setup, or record affected task failures and continue. User-exclusive decisions require request_user_input.".into());
+                        }
                         task_queue::apply(
                             &mut self.task_queue,
                             &input,
@@ -277,6 +342,14 @@ impl AgentKernel {
             } else {
                 Some(failures.join("\n"))
             };
+        }
+        for result in &results {
+            if let Ok(envelope) = serde_json::from_str::<tool::ToolResult>(&result.content)
+                && envelope.status == "success"
+                && let Err(reason) = self.admit_work_items(&envelope.raw_output)
+            {
+                self.set_context("[ax-work-admission]\n", Some(Message::system(format!("[ax-work-admission]\nInvalid work inventory: {reason}. Correct complete task definitions."))));
+            }
         }
         self.messages.extend(results);
         self.checkpoint_queue(checkpoint)?;

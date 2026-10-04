@@ -7,6 +7,7 @@
 //! themselves live in [`model_step`] and [`tool_step`].
 
 mod model_step;
+mod provider_step;
 mod tool_step;
 
 #[cfg(test)]
@@ -95,14 +96,24 @@ impl AgentKernel {
         H: FnMut(&[Message]) -> Result<(), AgentError> + Send,
     {
         self.raw_turn_messages.clear();
+        self.prepare_environment().await?;
         self.touch_progress();
-        // The turn timeout is an *idle* timeout. A turn that delegates work
+        // The controller turn timeout is an *idle* timeout. A turn that delegates work
         // legitimately spans the whole child batch, and each child already has
         // its own budget, so the controller is only cancelled when nothing has
         // progressed for the whole window.
         let result = if self.budget.turn_timeout_secs == 0 {
             self.run_turn_inner(input, intent, &mut emit, &mut checkpoint)
                 .await
+        } else if self.child_run.is_some() {
+            // An explicitly budgeted isolated child must not extend its deadline
+            // by repeatedly emitting model/tool activity. Its failure stays local.
+            tokio::time::timeout(
+                std::time::Duration::from_secs(self.budget.turn_timeout_secs),
+                self.run_turn_inner(input, intent, &mut emit, &mut checkpoint),
+            )
+            .await
+            .unwrap_or_else(|_| Err(AgentError::Timeout("child execution timeout".into())))
         } else {
             let window = std::time::Duration::from_secs(self.budget.turn_timeout_secs);
             let clock = std::sync::Arc::clone(&self.progress_clock);
@@ -215,7 +226,7 @@ impl AgentKernel {
                         .clone()
                         .unwrap_or_else(|| std::env::current_dir().unwrap_or_default())
                 },
-                |run| run.cwd.clone(),
+                |run| run.workspace_root().to_path_buf(),
             );
             self.execution.lock().unwrap().begin(
                 &input,
@@ -286,7 +297,7 @@ impl AgentKernel {
             // these: they own no queue and cannot park the controller's run.
             tool_specs.push(task_queue::spec());
             tool_specs.push(user_input::spec());
-            if !self.child_results.is_empty() {
+            if self.child_host.is_some() || !self.child_results.is_empty() {
                 tool_specs.push(child_result::spec());
             }
         }
@@ -331,6 +342,7 @@ impl AgentKernel {
                     step.tool_calls,
                     queue_active,
                     &mut calls_used,
+                    &mut steps_used,
                     &mut subagent_events,
                 )
                 .await?

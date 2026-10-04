@@ -27,6 +27,9 @@ use tool::{SafetyLevel, Tool, ToolError, ToolRegistry};
 
 const CHILD_ROUND_DELAY: Duration = Duration::from_millis(30);
 
+#[path = "../../../test/harness/child_deadline.rs"]
+mod child_deadline;
+
 #[allow(clippy::needless_pass_by_value)] // Mirrors the production call shape.
 fn plain(content: &str) -> ModelResponse {
     ModelResponse {
@@ -177,8 +180,8 @@ impl ChildCheckpoint for RecordingCheckpoint {
         // The host owns the authoritative diff, as the CLI host does with git.
         result.diff_stat = DiffStat {
             files: result.changed_files.len(),
-            insertions: 3,
-            deletions: 1,
+            insertions: Some(3),
+            deletions: Some(1),
         };
         self.receipts.lock().unwrap().push(result.clone());
         Ok(())
@@ -239,6 +242,7 @@ impl ChildHost for MockHost {
         let index = self.prepared.lock().unwrap().len();
         let session = format!("child-{index}");
         let run = ChildRun {
+            workspace_root: None,
             goal_id: format!("child-{session}"),
             session_id: session,
             cwd: std::env::temp_dir(),
@@ -408,7 +412,7 @@ async fn three_independent_tasks_are_dispatched_together() {
     assert!(
         receipts
             .iter()
-            .all(|receipt| receipt.diff_stat.insertions == 3)
+            .all(|receipt| receipt.diff_stat.insertions == Some(3))
     );
 }
 

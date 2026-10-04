@@ -12,6 +12,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 pub struct SandboxedTool {
     inner: Arc<dyn Tool>,
     root: PathBuf,
+    cwd: PathBuf,
     child_state: Option<PathBuf>,
     manager: OnceLock<Result<SandboxManager, String>>,
 }
@@ -19,6 +20,7 @@ impl SandboxedTool {
     pub fn new(inner: Arc<dyn Tool>, root: PathBuf) -> Self {
         Self {
             inner,
+            cwd: root.clone(),
             root,
             child_state: None,
             manager: OnceLock::new(),
@@ -50,7 +52,8 @@ impl Tool for SandboxedTool {
             .inner
             .fork_for_run(context)
             .unwrap_or_else(|| Arc::clone(&self.inner));
-        let mut tool = Self::new(inner, context.cwd.clone());
+        let mut tool = Self::new(inner, context.workspace_root.clone());
+        tool.cwd.clone_from(&context.cwd);
         tool.child_state = Some(context.state_dir.clone());
         Some(Arc::new(tool))
     }
@@ -88,7 +91,7 @@ impl Tool for SandboxedTool {
         let mut input = input.clone();
         for field in ["path", "root"] {
             if let Some(path) = input[field].as_str() {
-                input[field] = Value::String(self.root.join(path).to_string_lossy().into());
+                input[field] = Value::String(self.cwd.join(path).to_string_lossy().into());
             }
         }
         self.inner.resources(&input)
@@ -108,6 +111,7 @@ impl Tool for SandboxedTool {
         }
         let mut spec = CommandSpec::new(std::env::current_exe()?);
         spec.args = vec!["--ax-sandbox-worker".into(), self.name().into()];
+        spec.cwd = Some(self.cwd.clone());
         spec.stdin = std::process::Stdio::piped();
         let mut child = manager.spawn(spec)?;
         let mut stdin = child
@@ -199,6 +203,7 @@ pub async fn sandbox_worker(name: &str) -> Result<(), ToolError> {
     }
     let workspace = std::env::current_dir()?;
     let tool: Box<dyn Tool> = match name {
+        "task_source" => Box::new(crate::TaskSourceTool::new(workspace.clone())),
         "shell" => Box::new(crate::ShellTool),
         "filesystem" => Box::new(crate::FilesystemTool),
         "patch" => Box::new(crate::PatchTool),

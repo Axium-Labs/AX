@@ -21,6 +21,9 @@ pub struct ExecutionState {
     pub current_step: String,
     pub expected_output: String,
     pub allowed_scope: Vec<PathBuf>,
+    /// Coding step metadata may guide work but must not lock recovery inside a guessed subpath.
+    #[serde(default)]
+    pub advisory_step_scope: bool,
     pub recovery_for: Option<String>,
     #[serde(default)]
     pub recovery_call_id: Option<String>,
@@ -117,7 +120,9 @@ impl ExecutionState {
         let actions = std::mem::take(&mut self.recent_actions);
         let total = self.total_tool_calls;
         let history_complete = self.history_complete;
+        let advisory_step_scope = self.advisory_step_scope;
         *self = Self {
+            advisory_step_scope,
             overall_goal: goal.into(),
             goal_id: id.into(),
             current_step: goal.into(),
@@ -161,7 +166,7 @@ impl ExecutionState {
             .collect();
         let successor = self.step_declared && binding.step != self.current_step;
         if scope.iter().any(|path| {
-            if successor {
+            if successor || self.advisory_step_scope {
                 !path.starts_with(&self.workspace_root)
             } else {
                 !self.allowed_scope.iter().any(|root| path.starts_with(root))
@@ -195,10 +200,13 @@ impl ExecutionState {
         let resources = tool.resources(&input);
         for resource in &resources {
             if let Resource::Path(raw_path) = &resource.resource
-                && !self
-                    .allowed_scope
-                    .iter()
-                    .any(|root| normalized(raw_path).starts_with(root))
+                && !(if self.advisory_step_scope {
+                    normalized(raw_path).starts_with(&self.workspace_root)
+                } else {
+                    self.allowed_scope
+                        .iter()
+                        .any(|root| normalized(raw_path).starts_with(root))
+                })
                 && !tool.runtime_owned_resources()
             {
                 return Err(invalid(&format!(

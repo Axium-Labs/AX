@@ -27,6 +27,7 @@ impl AgentKernel {
         // The kernel binds its own reader so children can rebind it.
         tools.register(result_reader.clone());
         Self {
+            coding_harness: false,
             provider,
             retry_policy: model::RetryPolicy::default(),
             permission_profiles: vec![],
@@ -149,6 +150,7 @@ impl AgentKernel {
         tools.remove("spawn_agent");
         tools.register(result_reader.clone());
         let mut worker = Self {
+            coding_harness: self.coding_harness,
             provider: Arc::clone(&self.provider),
             retry_policy: self.retry_policy,
             permission_profiles: self.permission_profiles.clone(),

@@ -28,6 +28,7 @@ pub(crate) fn configure_controller(state: &mut crate::repl::ReplState) -> anyhow
     let runtime = state.runtime.take().expect("runtime initialized");
     state.runtime = Some(
         runtime
+            .with_coding_harness()
             .with_execution_scope(state.project_root.clone())
             .with_execution_budget(state.execution_budget)
             .with_child_host(host)
@@ -160,6 +161,8 @@ pub(super) fn service_sandbox_mode() -> sandbox::SandboxMode {
     sandbox::SandboxManager::configured_mode().unwrap_or_default()
 }
 
+#[path = "child_file_baseline.rs"]
+mod file_baseline;
 #[path = "child_workspace.rs"]
 mod workspace;
 pub(crate) use workspace::Policy as WorkspacePolicy;
@@ -175,6 +178,7 @@ struct SessionCheckpoint {
     root: PathBuf,
     /// The child's workspace, used to derive the authoritative diff.
     cwd: PathBuf,
+    output_dir: Option<PathBuf>,
     policy: workspace::Policy,
     /// Manifest and quota accounting are amortized: the GC TTL is minutes and
     /// the quota check re-walks the tree, so both run at most once a second.
@@ -216,22 +220,24 @@ impl ChildCheckpoint for SessionCheckpoint {
         Ok(())
     }
     fn finish(&mut self, result: &mut ChildResult) -> Result<(), AgentError> {
-        // The workspace is the authority on what changed; the event-derived
-        // list is only a fallback for a non-git child workspace. A read-only
-        // child pays nothing: there is nothing to diff.
-        if result.has_changes()
-            && let Some((diff_stat, changed)) = workspace_diff(&self.cwd)
-        {
-            result.diff_stat = diff_stat;
-            if !changed.is_empty() {
-                result.changed_files.clone_from(&changed);
-                result.artifacts = changed
-                    .iter()
-                    .map(|file| runtime_core::Artifact {
-                        path: file.path.clone(),
-                        kind: "workspace-file".into(),
-                    })
-                    .collect();
+        if self.cwd.is_dir() {
+            if let Some((diff_stat, changed)) = workspace_diff(&self.cwd) {
+                result.diff_stat = diff_stat;
+                result.changed_files = changed;
+            }
+            freeze_artifacts(&self.cwd, &self.state, self.output_dir.as_deref(), result)?;
+        } else {
+            // A recovered terminal child has already been retired; preserve the
+            // previously frozen receipt instead of overwriting its patch.
+            if !self.state.join("result.json").is_file() {
+                if result.status.success() {
+                    return Err(failure("retired workspace has no durable receipt"));
+                }
+                durable_write(&self.state.join("final.patch"), b"")?;
+                durable_write(
+                    &self.state.join("result.json"),
+                    &serde_json::to_vec_pretty(result).map_err(failure)?,
+                )?;
             }
         }
         self.store
@@ -276,14 +282,325 @@ impl Drop for SessionCheckpoint {
 
 type ChildStorage = (ChildRun, MemoryStore, PathBuf, std::fs::File);
 
+fn durable_write(path: &Path, bytes: &[u8]) -> Result<(), AgentError> {
+    use std::io::Write;
+    if path
+        .symlink_metadata()
+        .is_ok_and(|m| m.file_type().is_symlink())
+    {
+        return Err(failure(format!(
+            "durable artifact is a symlink: {}",
+            path.display()
+        )));
+    }
+    let temporary = path.with_extension(format!("tmp-{}", uuid::Uuid::new_v4()));
+    let mut file = std::fs::File::create(&temporary).map_err(failure)?;
+    file.write_all(bytes).map_err(failure)?;
+    file.sync_all().map_err(failure)?;
+    std::fs::rename(temporary, path).map_err(failure)
+}
+
+/// Freeze the answer and retain files/diagnostics before retiring the workspace.
+fn capture_patch(
+    cwd: &Path,
+    state: &Path,
+    result: &mut ChildResult,
+) -> Result<Vec<u8>, AgentError> {
+    use std::ffi::OsStr;
+    Ok(if cwd.join(".git").exists() {
+        // Intent-to-add includes new files in the final binary patch without
+        // committing, changing HEAD, or touching the controller repository.
+        let untracked = git(
+            cwd,
+            &[
+                OsStr::new("ls-files"),
+                OsStr::new("--others"),
+                OsStr::new("--exclude-standard"),
+                OsStr::new("-z"),
+            ],
+        )
+        .map_err(failure)?;
+        if !untracked.status.success() {
+            return Err(failure(String::from_utf8_lossy(&untracked.stderr)));
+        }
+        for path in untracked
+            .stdout
+            .split(|byte| *byte == 0)
+            .filter(|path| !path.is_empty())
+        {
+            let path = String::from_utf8_lossy(path);
+            if runtime_artifact(&path) {
+                continue;
+            }
+            let add = git(
+                cwd,
+                &[
+                    OsStr::new("add"),
+                    OsStr::new("-N"),
+                    OsStr::new("--"),
+                    OsStr::new(path.as_ref()),
+                ],
+            )
+            .map_err(failure)?;
+            if !add.status.success() {
+                return Err(failure(String::from_utf8_lossy(&add.stderr)));
+            }
+        }
+        let diff = git(
+            cwd,
+            &[
+                OsStr::new("diff"),
+                OsStr::new("--binary"),
+                OsStr::new("--full-index"),
+                OsStr::new("HEAD"),
+                OsStr::new("--"),
+            ],
+        )
+        .map_err(failure)?;
+        if !diff.status.success() {
+            return Err(failure(String::from_utf8_lossy(&diff.stderr)));
+        }
+        if let Some((stat, changed)) = workspace_diff(cwd) {
+            result.diff_stat = stat;
+            result.changed_files = changed;
+        }
+        diff.stdout
+    } else {
+        file_baseline::apply(cwd, state, result)?;
+        Vec::new()
+    })
+}
+
+/// Staging is owned by the child; copy only regular files beneath its canonical
+/// workspace and export through the host's validated output capability.
+fn export_staged_artifacts(
+    cwd: &Path,
+    target: &Path,
+) -> Result<Vec<runtime_core::Artifact>, AgentError> {
+    let staging = cwd.join(".ax-artifacts");
+    let mut artifacts = Vec::new();
+    if !staging.is_dir() {
+        return Ok(artifacts);
+    }
+    let root = absolute_path(cwd).map_err(failure)?;
+    for entry in ignore::WalkBuilder::new(&staging).hidden(false).build() {
+        let entry = entry.map_err(failure)?;
+        if entry.file_type().is_some_and(|kind| kind.is_symlink()) {
+            return Err(failure("staged artifact must not be a symlink"));
+        }
+        if entry.file_type().is_some_and(|kind| kind.is_file()) {
+            let source = absolute_path(entry.path()).map_err(failure)?;
+            if !source.starts_with(&root) {
+                return Err(failure("staged artifact escapes workspace"));
+            }
+            let relative = entry.path().strip_prefix(&staging).map_err(failure)?;
+            let destination = target.join(relative);
+            std::fs::create_dir_all(destination.parent().unwrap()).map_err(failure)?;
+            durable_write(&destination, &std::fs::read(source).map_err(failure)?)?;
+            artifacts.push(runtime_core::Artifact {
+                path: destination.to_string_lossy().into_owned(),
+                kind: "output".into(),
+            });
+        }
+    }
+    Ok(artifacts)
+}
+
+fn freeze_artifacts(
+    cwd: &Path,
+    state: &Path,
+    output: Option<&Path>,
+    result: &mut ChildResult,
+) -> Result<(), AgentError> {
+    let patch = capture_patch(cwd, state, result)?;
+    let targets = std::iter::once(state.to_path_buf())
+        .chain(output.map(Path::to_path_buf))
+        .collect::<Vec<_>>();
+    let mut retained = Vec::new();
+    let mut trace = Vec::new();
+    for entry in &result.trace {
+        trace.extend(serde_json::to_vec(entry).map_err(failure)?);
+        trace.push(b'\n');
+    }
+    for target in &targets {
+        std::fs::create_dir_all(target).map_err(failure)?;
+        if target
+            .symlink_metadata()
+            .map_err(failure)?
+            .file_type()
+            .is_symlink()
+        {
+            return Err(failure("artifact output directory is a symlink"));
+        }
+        retained.extend(export_staged_artifacts(cwd, target)?);
+        durable_write(&target.join("final.patch"), &patch)?;
+        durable_write(&target.join("trace.jsonl"), &trace)?;
+        retained.push(runtime_core::Artifact {
+            path: target.join("final.patch").to_string_lossy().into_owned(),
+            kind: "patch".into(),
+        });
+        for changed in &result.changed_files {
+            let file = Path::new(&changed.path);
+            if file.is_absolute()
+                || file
+                    .components()
+                    .any(|part| matches!(part, std::path::Component::ParentDir))
+            {
+                return Err(failure("changed file escapes child workspace"));
+            }
+            if changed.change == "deleted" {
+                continue;
+            }
+            let source = absolute_path(&cwd.join(file)).map_err(failure)?;
+            if !source.starts_with(absolute_path(cwd).map_err(failure)?) {
+                return Err(failure("changed artifact follows a link outside workspace"));
+            }
+            let destination = target.join("changed_files").join(file);
+            std::fs::create_dir_all(destination.parent().unwrap()).map_err(failure)?;
+            durable_write(&destination, &std::fs::read(source).map_err(failure)?)?;
+            retained.push(runtime_core::Artifact {
+                path: destination.to_string_lossy().into_owned(),
+                kind: "changed-file".into(),
+            });
+        }
+        // Preserve declared relative artifacts as well as the diff. Durable
+        // references must never point at a deleted workspace.
+        for artifact in &result.artifacts {
+            let source = if Path::new(&artifact.path).is_absolute() {
+                PathBuf::from(&artifact.path)
+            } else {
+                cwd.join(&artifact.path)
+            };
+            if source.is_file()
+                && absolute_path(&source)
+                    .map_err(failure)?
+                    .starts_with(absolute_path(cwd).map_err(failure)?)
+            {
+                let relative = source.strip_prefix(cwd).map_err(failure)?;
+                let destination = target.join("artifacts").join(relative);
+                std::fs::create_dir_all(destination.parent().unwrap()).map_err(failure)?;
+                durable_write(&destination, &std::fs::read(source).map_err(failure)?)?;
+                retained.push(runtime_core::Artifact {
+                    path: destination.to_string_lossy().into_owned(),
+                    kind: artifact.kind.clone(),
+                });
+            }
+        }
+    }
+    result.artifacts.retain(|artifact| {
+        Path::new(&artifact.path).is_absolute() && !Path::new(&artifact.path).starts_with(cwd)
+    });
+    result.artifacts.extend(retained);
+    write_frozen_receipts(
+        &targets,
+        state,
+        cwd.join(".ax-artifacts/result.json").is_file(),
+        result,
+    )
+}
+
+fn write_frozen_receipts(
+    targets: &[PathBuf],
+    state: &Path,
+    custom_result: bool,
+    result: &mut ChildResult,
+) -> Result<(), AgentError> {
+    for target in targets {
+        for name in [
+            "result.json",
+            "child_result.json",
+            "trace.jsonl",
+            "final.patch",
+            "metrics.json",
+            "validation.json",
+            "diagnostics.json",
+            "artifact-manifest.json",
+        ] {
+            let path = target.join(name).to_string_lossy().into_owned();
+            if !result
+                .artifacts
+                .iter()
+                .any(|artifact| artifact.path == path)
+            {
+                result.artifacts.push(runtime_core::Artifact {
+                    path,
+                    kind: "host-output".into(),
+                });
+            }
+        }
+    }
+    for target in targets {
+        // The manifest identifies current exports without deleting previous user
+        // outputs. Consumers must not treat unlisted custom files as this run's evidence.
+        let mut current = result
+            .artifacts
+            .iter()
+            .filter(|artifact| Path::new(&artifact.path).starts_with(target))
+            .cloned()
+            .collect::<Vec<_>>();
+        for name in [
+            "result.json",
+            "child_result.json",
+            "trace.jsonl",
+            "final.patch",
+            "metrics.json",
+            "validation.json",
+            "diagnostics.json",
+        ] {
+            let path = target.join(name).to_string_lossy().into_owned();
+            if !current.iter().any(|artifact| artifact.path == path) {
+                current.push(runtime_core::Artifact {
+                    path,
+                    kind: "host-output".into(),
+                });
+            }
+        }
+        durable_write(
+            &target.join("artifact-manifest.json"),
+            &serde_json::to_vec_pretty(&serde_json::json!({
+                "child_id": result.child_id,
+                "task_id": result.task_id,
+                "status": result.status,
+                "artifacts": current,
+                "authoritative_receipt": "child_result.json",
+                "metrics": "metrics.json",
+                "instruction": "Only listed custom artifacts belong to this execution. Unlisted files may be from earlier runs; unavailable evaluation is null. Custom result status is descriptive; use the authoritative receipt for terminal status."
+            })).map_err(failure)?,
+        )?;
+        durable_write(
+            &target.join("child_result.json"),
+            &serde_json::to_vec_pretty(result).map_err(failure)?,
+        )?;
+        if target.as_path() == state || !custom_result {
+            durable_write(
+                &target.join("result.json"),
+                &serde_json::to_vec_pretty(result).map_err(failure)?,
+            )?;
+        }
+        durable_write(
+            &target.join("validation.json"),
+            &serde_json::to_vec_pretty(&result.validation).map_err(failure)?,
+        )?;
+        durable_write(
+            &target.join("metrics.json"),
+            &serde_json::to_vec_pretty(&result.metrics).map_err(failure)?,
+        )?;
+        durable_write(
+            &target.join("diagnostics.json"),
+            &serde_json::to_vec_pretty(&result.diagnostics).map_err(failure)?,
+        )?;
+    }
+    Ok(())
+}
+
 fn restore_saved(root: &Path, run: &ChildRun) -> Result<ChildStorage, AgentError> {
     let mut run = run.clone();
     // Legacy child stores move out of cwd before lifecycle cleanup is enabled.
     let parent = run
-        .cwd
+        .workspace_root()
         .parent()
         .ok_or_else(|| failure("invalid saved child cwd"))?;
-    if parent.parent() != Some(root) || run.cwd != parent.join("workspace") {
+    if parent.parent() != Some(root) || run.workspace_root() != parent.join("workspace") {
         return Err(failure("saved child workspace is outside child root"));
     }
     if absolute_path(parent).map_err(failure)?.parent() != Some(root) {
@@ -301,7 +618,7 @@ fn restore_saved(root: &Path, run: &ChildRun) -> Result<ChildStorage, AgentError
     std::fs::create_dir_all(&state).map_err(failure)?;
     let lease = workspace::lease(&state).map_err(failure)?;
     if run.state_dir.is_none() {
-        let legacy = run.cwd.join(".ax");
+        let legacy = run.workspace_root().join(".ax");
         if legacy.exists() {
             for entry in std::fs::read_dir(&legacy).map_err(failure)? {
                 let entry = entry.map_err(failure)?;
@@ -333,7 +650,7 @@ fn restore_saved(root: &Path, run: &ChildRun) -> Result<ChildStorage, AgentError
         workspace::write_manifest(
             &state,
             &workspace::Manifest {
-                cwd: run.cwd.clone(),
+                cwd: run.workspace_root().to_path_buf(),
                 repository,
                 status: "interrupted".into(),
                 touched: workspace::now(),
@@ -359,7 +676,9 @@ fn workspace_diff(cwd: &Path) -> Option<(DiffStat, Vec<ChangedFile>)> {
         cwd,
         &[
             std::ffi::OsStr::new("status"),
-            std::ffi::OsStr::new("--porcelain"),
+            std::ffi::OsStr::new("--porcelain=v1"),
+            std::ffi::OsStr::new("-z"),
+            std::ffi::OsStr::new("--untracked-files=all"),
         ],
     )
     .ok()?;
@@ -367,16 +686,20 @@ fn workspace_diff(cwd: &Path) -> Option<(DiffStat, Vec<ChangedFile>)> {
         return None;
     }
     let mut changed = Vec::new();
-    for line in String::from_utf8_lossy(&status.stdout).lines() {
-        if line.len() < 4 {
+    let mut records = status.stdout.split(|byte| *byte == 0);
+    while let Some(record) = records.next() {
+        if record.len() < 4 {
             continue;
         }
-        let code = &line[..2];
-        let path = line[2..].trim().trim_matches('"');
-        if path.is_empty() {
+        let code = String::from_utf8_lossy(&record[..2]);
+        let path = String::from_utf8_lossy(&record[3..]).into_owned();
+        if code.contains('R') || code.contains('C') {
+            let _ = records.next();
+        }
+        if code == "??" && runtime_artifact(&path) {
             continue;
         }
-        let change = if code.starts_with("??") || code.contains('A') {
+        let change = if code == "??" || code.contains('A') {
             "created"
         } else if code.contains('D') {
             "deleted"
@@ -384,35 +707,63 @@ fn workspace_diff(cwd: &Path) -> Option<(DiffStat, Vec<ChangedFile>)> {
             "modified"
         };
         changed.push(ChangedFile {
-            path: path.to_owned(),
-            change: change.to_owned(),
+            path,
+            change: change.into(),
         });
     }
     changed.sort_by(|left, right| left.path.cmp(&right.path));
     changed.dedup_by(|left, right| left.path == right.path);
     let mut diff_stat = DiffStat {
         files: changed.len(),
-        insertions: 0,
-        deletions: 0,
+        insertions: None,
+        deletions: None,
     };
     if let Ok(numstat) = git(
         cwd,
         &[
             std::ffi::OsStr::new("diff"),
             std::ffi::OsStr::new("--numstat"),
+            std::ffi::OsStr::new("-z"),
             std::ffi::OsStr::new("HEAD"),
         ],
     ) && numstat.status.success()
     {
-        for line in String::from_utf8_lossy(&numstat.stdout).lines() {
-            let mut fields = line.split('\t');
-            let (Some(added), Some(removed)) = (fields.next(), fields.next()) else {
+        let mut insertions = 0_u64;
+        let mut deletions = 0_u64;
+        let mut known = true;
+        let mut records = numstat.stdout.split(|byte| *byte == 0);
+        while let Some(record) = records.next() {
+            if record.is_empty() {
                 continue;
-            };
-            diff_stat.insertions += added.trim().parse::<u64>().unwrap_or(0);
-            diff_stat.deletions += removed.trim().parse::<u64>().unwrap_or(0);
+            }
+            let fields = record.splitn(3, |byte| *byte == b'\t').collect::<Vec<_>>();
+            if fields.len() != 3 {
+                known = false;
+                continue;
+            }
+            if fields[2].is_empty() {
+                let _ = records.next();
+                let _ = records.next();
+            }
+            match (
+                std::str::from_utf8(fields[0])
+                    .ok()
+                    .and_then(|v| v.parse::<u64>().ok()),
+                std::str::from_utf8(fields[1])
+                    .ok()
+                    .and_then(|v| v.parse::<u64>().ok()),
+            ) {
+                (Some(added), Some(removed)) => {
+                    insertions = insertions.saturating_add(added);
+                    deletions = deletions.saturating_add(removed);
+                }
+                _ => known = false,
+            }
         }
+        diff_stat.insertions = known.then_some(insertions);
+        diff_stat.deletions = known.then_some(deletions);
     }
+
     Some((diff_stat, changed))
 }
 
@@ -435,6 +786,7 @@ impl LocalChildHost {
         input: &str,
         root: &Path,
         budget: runtime_core::ExecutionBudget,
+        spec: runtime_core::task_queue::WorkspaceSpec,
     ) -> Result<ChildStorage, AgentError> {
         let policy = self.policy;
         let source = ctx("resolve workspace source", absolute_path(&self.source))?;
@@ -483,13 +835,14 @@ impl LocalChildHost {
                     },
                 )
                 .map_err(failure)?;
-                if let Err(error) = workspace::provision(
+                if let Err(error) = workspace::provision_spec(
                     &source,
                     &cwd,
                     &provision_root,
                     &excluded,
                     &state,
                     provision_policy,
+                    &spec,
                 ) {
                     let mut manifest = workspace::read_manifest(&state).map_err(failure)?;
                     manifest.status = "failed".into();
@@ -499,6 +852,7 @@ impl LocalChildHost {
                         error.to_string(),
                     )));
                 }
+                file_baseline::save(&cwd, &state)?;
                 let database = state.join("child.sqlite3");
                 let opened = MemoryStore::open(&database)
                     .and_then(|store| store.create_session(&title).map(|session| (store, session)));
@@ -520,6 +874,7 @@ impl LocalChildHost {
             memory_scope: format!("child:{session_id}"),
             execution_budget: Some(budget),
             session_id,
+            workspace_root: None,
             cwd,
             state_dir: Some(state.clone()),
         };
@@ -529,6 +884,35 @@ impl LocalChildHost {
 
 #[async_trait]
 impl ChildHost for LocalChildHost {
+    fn persist_preparation_failure(
+        &self,
+        task: &runtime_core::task_queue::QueuedTask,
+        result: &mut ChildResult,
+    ) -> Result<(), AgentError> {
+        let directory = self
+            .root
+            .join("setup-failures")
+            .join(uuid::Uuid::new_v4().to_string());
+        std::fs::create_dir_all(&directory).map_err(failure)?;
+        result.artifacts.push(runtime_core::Artifact {
+            path: directory.join("result.json").to_string_lossy().into_owned(),
+            kind: "setup-receipt".into(),
+        });
+        durable_write(
+            &directory.join("result.json"),
+            &serde_json::to_vec_pretty(result).map_err(failure)?,
+        )?;
+        if let Some(output) = task.output_dir.as_deref() {
+            let output = self.source.join(output);
+            validate_output(&self.source, &output)?;
+            std::fs::create_dir_all(&output).map_err(failure)?;
+            durable_write(&output.join("final.patch"), b"")?;
+            durable_write(&output.join("trace.jsonl"), b"")?;
+            write_frozen_receipts(&[output], &directory, false, result)?;
+        }
+        Ok(())
+    }
+
     async fn prepare_with_policy(
         &self,
         controller: &AgentKernel,
@@ -545,23 +929,79 @@ impl ChildHost for LocalChildHost {
         Ok(child)
     }
 
+    async fn prepare_task(
+        &self,
+        controller: &AgentKernel,
+        task: &runtime_core::task_queue::QueuedTask,
+    ) -> Result<PreparedChild, AgentError> {
+        self.prepare_spec(
+            controller,
+            task.task_input(),
+            task.child.as_ref(),
+            task.workspace.clone(),
+            task.output_dir.as_deref().map(PathBuf::from),
+        )
+        .await
+    }
     async fn prepare(
         &self,
         controller: &AgentKernel,
         input: &str,
         previous: Option<&ChildRun>,
     ) -> Result<PreparedChild, AgentError> {
+        self.prepare_spec(
+            controller,
+            input,
+            previous,
+            runtime_core::task_queue::WorkspaceSpec::default(),
+            None,
+        )
+        .await
+    }
+}
+
+impl LocalChildHost {
+    // Keep restore, terminal receipt and new-run binding in one lifecycle transaction.
+    #[allow(clippy::too_many_lines)]
+    async fn prepare_spec(
+        &self,
+        controller: &AgentKernel,
+        input: &str,
+        previous: Option<&ChildRun>,
+        spec: runtime_core::task_queue::WorkspaceSpec,
+        output_dir: Option<PathBuf>,
+    ) -> Result<PreparedChild, AgentError> {
+        let output_dir = output_dir.map(|path| self.source.join(path));
+        if let Some(output) = &output_dir {
+            validate_output(&self.source, output)?;
+        }
         let _timer = tool::telemetry::Timer::new("child.startup");
         ctx("create child root", std::fs::create_dir_all(&self.root))?;
         let root = ctx("resolve child root", absolute_path(&self.root))?;
         let policy = self.policy;
         workspace::schedule_background_gc(&root, policy);
-        let (run, store, state, lease) = if let Some(run) = previous {
+        let (mut run, store, state, lease) = if let Some(run) = previous {
             restore_saved(&root, run)?
         } else {
-            self.provision_new(input, &root, controller.child_execution_budget())
-                .await?
+            self.provision_new(
+                input,
+                &root,
+                controller.child_execution_budget(),
+                spec.clone(),
+            )
+            .await?
         };
+        let lifecycle_root = run.workspace_root().to_path_buf();
+        if previous.is_none()
+            && let Some(subdir) = &spec.subdir
+        {
+            let cwd = absolute_path(&lifecycle_root.join(subdir)).map_err(failure)?;
+            if !cwd.starts_with(absolute_path(&lifecycle_root).map_err(failure)?) {
+                return Err(failure("subdir escapes child workspace"));
+            }
+            run.workspace_root = Some(lifecycle_root.clone());
+            run.cwd = cwd;
+        }
         if store.session(&run.session_id).map_err(failure)?.is_none() {
             return Err(failure("saved child session is missing"));
         }
@@ -590,6 +1030,13 @@ impl ChildHost for LocalChildHost {
         if terminal.is_none() {
             terminal = runtime_core::child::terminal_result(&messages);
         }
+        if let Some(output) = &output_dir {
+            durable_write(
+                &state.join("output-dir.json"),
+                &serde_json::to_vec(&serde_json::json!({"directory":output,"source":self.source}))
+                    .map_err(failure)?,
+            )?;
+        }
         let mut manifest = workspace::read_manifest(&state).map_err(failure)?;
         if terminal.is_none() {
             let failure_reason = if manifest.status == "expired" || !run.cwd.is_dir() {
@@ -597,7 +1044,7 @@ impl ChildHost for LocalChildHost {
                     "saved child workspace expired or missing; durable history retained".to_owned(),
                 )
             } else {
-                workspace::check_quota(&root, &run.cwd, policy)
+                workspace::check_quota(&root, &lifecycle_root, policy)
                     .err()
                     .map(|error| error.to_string())
             };
@@ -618,7 +1065,8 @@ impl ChildHost for LocalChildHost {
                 saved: 0,
                 state: state.clone(),
                 root: root.clone(),
-                cwd: run.cwd.clone(),
+                cwd: lifecycle_root.clone(),
+                output_dir: output_dir.clone(),
                 policy,
                 last_accounted: std::time::Instant::now(),
                 _lease: lease,
@@ -631,6 +1079,22 @@ impl ChildHost for LocalChildHost {
                 terminal: Some(outcome),
             });
         }
+        if let Some(output) = &output_dir {
+            std::fs::create_dir_all(lifecycle_root.join(".ax-artifacts")).map_err(failure)?;
+            messages.push(Message::system(format!(
+                "[ax-artifact-output]\nDurable output: {}. Write requested report/JSON/evaluation files under staging directory {} (inside the workspace); the host exports these files to the durable output root before cleanup. Keep staging files out of the coding patch. The host freezes final.patch and measured metrics/trace; unavailable evaluation values stay null.", output.display(), lifecycle_root.join(".ax-artifacts").display()
+            )));
+        }
+        messages.retain(|message| !message.content.starts_with("[ax-task-workspace]"));
+        messages.push(Message::system(format!("[ax-task-workspace]\n{}", serde_json::json!({
+            "workspace":spec,"cwd":run.cwd,"workspace_root":lifecycle_root,
+            "prepared":true,
+            "instruction":if spec.mode == runtime_core::task_queue::WorkspaceMode::Git {
+                "The host has already prepared this repository at the requested exact revision. Edit and validate the current checkout at cwd. Do not clone another copy or switch revisions; the host captures this workspace's diff before cleanup."
+            } else {
+                "The host has prepared this task's isolated workspace. Work at cwd with the inputs supplied to this task; an empty workspace does not contain controller or sibling output directories."
+            }
+        }))));
         manifest.status = "running".into();
         manifest.touched = workspace::now();
         workspace::write_manifest(&state, &manifest).map_err(failure)?;
@@ -644,7 +1108,8 @@ impl ChildHost for LocalChildHost {
                 store,
                 session: run.session_id.clone(),
                 saved: 0,
-                cwd: run.cwd.clone(),
+                cwd: lifecycle_root,
+                output_dir,
                 state,
                 root,
                 policy,
@@ -661,3 +1126,58 @@ impl ChildHost for LocalChildHost {
 #[cfg(test)]
 #[path = "child_runtime_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "../../../test/harness/workspaces.rs"]
+mod harness_workspace_tests;
+
+fn validate_output(source: &Path, output: &Path) -> Result<(), AgentError> {
+    if !output.is_absolute()
+        || output
+            .components()
+            .any(|part| matches!(part, std::path::Component::ParentDir))
+    {
+        return Err(failure(
+            "output_dir must be an absolute non-traversing path",
+        ));
+    }
+    let policy =
+        sandbox::SandboxManager::policy_for_workspace(source.to_path_buf()).map_err(failure)?;
+    let mut ancestor = output;
+    while !ancestor.exists() {
+        ancestor = ancestor
+            .parent()
+            .ok_or_else(|| failure("invalid output directory"))?;
+    }
+    let resolved = absolute_path(ancestor)
+        .map_err(failure)?
+        .join(output.strip_prefix(ancestor).map_err(failure)?);
+    if policy
+        .protected_paths
+        .iter()
+        .any(|protected| resolved.starts_with(protected))
+        || (service_sandbox_mode() != sandbox::SandboxMode::Off
+            && !resolved.starts_with(absolute_path(source).map_err(failure)?))
+    {
+        return Err(failure("output_dir is outside permitted write boundary"));
+    }
+    Ok(())
+}
+
+fn runtime_artifact(path: &str) -> bool {
+    Path::new(path).components().any(|part| {
+        matches!(
+            part.as_os_str().to_str(),
+            Some(
+                ".venv"
+                    | ".ax-artifacts"
+                    | "venv"
+                    | ".ax"
+                    | "node_modules"
+                    | "target"
+                    | "__pycache__"
+                    | ".pytest_cache"
+            )
+        )
+    })
+}

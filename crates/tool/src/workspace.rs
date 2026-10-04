@@ -7,6 +7,7 @@ use std::{path::PathBuf, sync::Arc};
 #[derive(Clone, Debug)]
 pub struct RunContext {
     pub cwd: PathBuf,
+    pub workspace_root: PathBuf,
     pub state_dir: PathBuf,
     pub session_id: String,
     pub memory_scope: String,

@@ -7,17 +7,22 @@ CLI/TUI/ACP all bind the same LocalChildHost and child budget through
 `child_runtime::configure_controller`. ACP's `session/prompt` invokes
 `run_session_prompt`, which uses the shared prompt runner. A model-created queue
 with `execution="children"` automatically enters the kernel's
-`execute_next_child()` for each running task, executes isolated children
-sequentially and emits only the controller summary. Child failures advance
+`execute_ready_children()` with bounded resource-aware concurrency. Ordering
+resources serialize requested sequential tasks; independent children may overlap.
+Only accepted controller text is emitted as the final response. Child failures advance
 independent tasks. `--child-timeout-secs` applies independently of the controller
 turn timeout in Crew/ACP too. Child tool updates retain session-prefixed call IDs.
 
 Prompt lists never imply executable tasks. After reading a dataset, the model can
 call `task_queue start` with actual instances and complete `{title,input}` task
-objects. A mistaken queue with no dispatched work can be explicitly replanned;
+objects, or use `task_source` with an explicit record-to-work mapping for automatic
+queue admission. `append` adds concrete work without replacing executed history.
+The shared coding policy/environment, completion review and durable workspace
+artifacts are described in [coding-harness.md](coding-harness.md).
+A mistaken queue with no dispatched work can be explicitly replanned;
 its previous state remains archived in authoritative history.
 
-The adapter accepts `initialize`, `session/new`, `session/load`, `session/resume`, `session/prompt`, and `session/cancel`. JSON-RPC messages are one JSON object per line. The ACP session ID is the AX `MemoryStore` session UUID. `session/load` replays stored user, assistant, and tool messages as `session/update` notifications; `session/resume` restores context without replay. ACP clients must send a `cwd` equal to the ACP process working directory. Crew starts one `ax acp` process in the member's configured directory, which also keeps AX's existing project-root and tool-workspace resolution intact.
+The adapter accepts `initialize`, `session/new`, `session/load`, `session/resume`, `session/prompt`, `session/cancel`, and `session/delete`. JSON-RPC messages are one JSON object per line. The ACP session ID is the AX `MemoryStore` session UUID. `session/load` replays stored user, assistant, and tool messages as `session/update` notifications; `session/resume` restores context without replay; `session/delete` removes an idle session. ACP clients must send a `cwd` equal to the ACP process working directory. Crew starts one `ax acp` process in the member's configured directory, which also keeps AX's existing project-root and tool-workspace resolution intact.
 
 `AgentEvent` deltas and tool start/finish events become `session/update` notifications. Lifecycle updates use the model's original `tool_call_id`, so parallel calls to the same tool remain distinct. The adapter's `ApprovalPolicy` maps `session/request_permission` responses into the existing `PermissionStore`. Explicit Deny remains authoritative. `session/cancel` aborts the current turn future and returns `stopReason: cancelled`; it does not promise to undo a tool's external effects. The next resume uses AX's existing interrupted-tool recovery and never replays a tool automatically.
 
@@ -27,7 +32,7 @@ Crew supplies optional `_ax` session metadata. `skills` is an allowlist of local
 
 `ax crew pair <code> --gateway <https-url>` generates or loads a device Ed25519 private key under AX home, sends only the public key to Crew, and records the device ID after a successful one-time redemption. `ax crew connect <https-url>` initiates an outbound WSS connection, signs the gateway's fresh challenge, sends heartbeats, reconnects with backoff, and runs routed work through child `ax acp` processes. HTTP/WS is accepted only for loopback development. TLS termination for WSS is deployed in front of Crew; the AX binary verifies the gateway certificate.
 
-The corresponding Crew backend and its API are in the sibling `ax_crew` project. Crew stores orchestration metadata and final task outputs, while AX keeps message history, context snapshots, memory, tool results, and provider credentials. Live Crew WebSocket events can include message deltas and permission requests; its SQLite event index stores only redacted event metadata.
+The corresponding Crew backend and its API are in the sibling `axcrew` project. Crew stores orchestration metadata and final task outputs, while AX keeps message history, context snapshots, memory, tool results, and provider credentials. Live Crew WebSocket events can include message deltas and permission requests; its SQLite event index stores only redacted event metadata.
 
 ## Workspace identity and confinement
 
