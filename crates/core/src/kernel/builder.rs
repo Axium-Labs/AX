@@ -28,6 +28,11 @@ impl AgentKernel {
         tools.register(result_reader.clone());
         Self {
             coding_harness: false,
+            guard_model_requests: 0,
+            continuation: crate::TurnState::default(),
+            activity: Arc::default(),
+            turn_input: crate::continuation::TurnInput::default(),
+            stop_guard: None,
             provider,
             retry_policy: model::RetryPolicy::default(),
             permission_profiles: vec![],
@@ -151,6 +156,11 @@ impl AgentKernel {
         tools.register(result_reader.clone());
         let mut worker = Self {
             coding_harness: self.coding_harness,
+            guard_model_requests: 0,
+            continuation: crate::TurnState::default(),
+            activity: Arc::default(),
+            turn_input: crate::continuation::TurnInput::default(),
+            stop_guard: None,
             provider: Arc::clone(&self.provider),
             retry_policy: self.retry_policy,
             permission_profiles: self.permission_profiles.clone(),

@@ -10,6 +10,7 @@ design decisions that shaped the code are recorded as ADRs in
 |---|---|
 | [coding-harness.md](coding-harness.md) | Persistent coding execution, concrete task sources, workspace specs and durable artifacts |
 | [coding-harness-validation.md](coding-harness-validation.md) | Root causes, regression coverage and original testax whole-prompt acceptance evidence |
+| [agent-loop.md](agent-loop.md) | Continuation state, direct streaming completion and optional Stop Guards |
 | [architecture.md](architecture.md) | System architecture: crate responsibilities, agent loop, cold-start path |
 | [acp-crew.md](acp-crew.md) | ACP adapter and AX Crew device bridge |
 | [memory.md](memory.md) | Memory: scopes, project identity, retrieval, persistence |

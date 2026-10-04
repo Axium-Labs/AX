@@ -10,6 +10,25 @@ use tool::{ToolError, ToolOutput};
 #[derive(Clone, Debug, serde::Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AgentEvent {
+    Continuation {
+        goal_id: Option<String>,
+        step: usize,
+        continuation: crate::TurnContinuation,
+    },
+    Completion {
+        goal_id: Option<String>,
+        completion: String,
+        model_steps: usize,
+        guard_model_requests: usize,
+        tools: usize,
+        guard: Option<String>,
+    },
+    StopGuardEvaluated {
+        goal_id: Option<String>,
+        guard: String,
+        allowed: bool,
+        model_requests: usize,
+    },
     SubagentStarted {
         id: String,
     },

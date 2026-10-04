@@ -1,4 +1,6 @@
 use super::*;
+#[path = "../../../test/harness/subagent_continuation.rs"]
+mod continuation;
 use crate::{AllowAll, ApprovalPolicy, ChildCheckpoint, ChildRun, PreparedChild};
 use model::{
     FunctionCall, Message, ModelError, ModelProvider, ModelRequest, ModelResponse, ToolCall,

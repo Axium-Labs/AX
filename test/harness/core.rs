@@ -33,20 +33,19 @@ impl ModelProvider for ReviewProvider {
     ) -> Result<ModelResponse, ModelError> {
         let mut round = self.round.lock().unwrap();
         *round += 1;
-        let mut response = ModelResponse {
-            content: "premature final".into(),
+        assert_eq!(*round, 1, "harness final must not invoke a reviewer");
+        assert!(
+            !request
+                .messages
+                .iter()
+                .any(|m| m.content.starts_with("[ax-completion-review]"))
+        );
+        let response = ModelResponse {
+            content: "direct final".into(),
             tool_calls: vec![],
             usage: None,
             finish_reason: None,
         };
-        if request
-            .messages
-            .iter()
-            .any(|m| m.content.starts_with("[ax-completion-review]"))
-        {
-            assert_eq!(*round, 2);
-            response.tool_calls.push(ToolCall {id:"review-inventory".into(),kind:"function".into(),function:FunctionCall {name:"task_queue".into(),arguments:json!({"action":"start","execution":"controller","overall_goal":"all items", "tasks":(0..23).map(|i|json!({"title":format!("item {i}"),"input":format!("repair concrete item {i}")})).collect::<Vec<_>>()}).to_string()}});
-        }
         Ok(response)
     }
 }
@@ -63,46 +62,24 @@ fn kernel() -> AgentKernel {
 }
 
 #[tokio::test]
-async fn final_review_recovers_missing_queue_and_guard_preserves_pending_work() {
-    let mut kernel = kernel().with_execution_budget(ExecutionBudget {
-        max_steps: 3,
-        ..ExecutionBudget::default()
-    });
+async fn harness_final_is_direct_without_review() {
+    let mut kernel = kernel();
+    let mut started = 0;
     let mut finished = 0;
-    let mut pending_saved = false;
     let result = kernel
-        .run_turn_checkpointed(
-            "Execute the data items discovered during execution",
-            |event| {
-                if matches!(event, AgentEvent::TurnFinished) {
-                    finished += 1;
-                }
-            },
-            |messages| {
-                for (index, message) in messages.iter().enumerate() {
-                    if message.role == model::Role::Assistant
-                        && message.content == "premature final"
-                        && message.tool_calls.is_empty()
-                    {
-                        assert!(
-                            messages[index - 1]
-                                .content
-                                .starts_with(crate::harness::PENDING)
-                        );
-                        pending_saved = true;
-                    }
-                }
-                Ok(())
-            },
-        )
-        .await;
-    assert!(matches!(result, Err(AgentError::StepLimit(3))));
-    assert_eq!(finished, 0);
-    assert!(pending_saved);
-    let queue = kernel.task_queue().unwrap();
-    assert_eq!(queue.tasks.len(), 23);
-    assert_eq!(queue.state, QueueState::Suspended);
-    assert!(queue.final_response.is_none());
+        .run_turn("Explain this code", |event| match event {
+            AgentEvent::ModelStarted { .. } => started += 1,
+            AgentEvent::TurnFinished => finished += 1,
+            _ => {}
+        })
+        .await
+        .unwrap();
+    assert_eq!(result, "direct final");
+    assert_eq!((started, finished), (1, 1));
+    assert!(!kernel.messages().iter().any(|m| {
+        m.content
+            .starts_with(crate::child::LEGACY_COMPLETION_PENDING)
+    }));
 }
 
 #[test]
@@ -319,12 +296,8 @@ impl ModelProvider for SetupProvider {
             .iter()
             .filter(|m| m.role == model::Role::Tool)
             .count();
-        let tool = if review {
-            Some((
-                "completion_check",
-                json!({"state":"complete","reason":"fallback evidence present"}),
-            ))
-        } else if phase < 4 {
+        assert!(!review, "no default review");
+        let tool = if phase < 4 {
             Some(("setup_fixture", json!({"phase":phase})))
         } else {
             None
@@ -397,7 +370,7 @@ fn child_completion_review_does_not_hide_tool_failure_or_break_receipt_recovery(
             "patch",
             serde_json::to_string(&tool::ToolResult::new(false, "patch failed".into())).unwrap(),
         ),
-        Message::system(crate::harness::PENDING),
+        Message::system(crate::child::LEGACY_COMPLETION_PENDING),
         Message::assistant("could not patch", vec![]),
     ];
     assert!(
@@ -453,7 +426,7 @@ impl ModelProvider for SummaryReviewProvider {
             .messages
             .iter()
             .find(|m| m.content.starts_with("[ax-task-summary]"))
-            .expect("review must receive terminal inventory");
+            .expect("model must receive terminal inventory");
         assert!(summary.content.contains("concrete-22"));
         assert!(summary.content.contains("output_dir"));
         assert!(summary.content.contains("total_tasks"));
@@ -467,7 +440,7 @@ impl ModelProvider for SummaryReviewProvider {
             .messages
             .iter()
             .find(|m| m.content.starts_with("[ax-current-receipts]"))
-            .expect("current receipt evidence must reach final review directly");
+            .expect("current receipt evidence must reach the model directly");
         assert!(receipts.content.contains("current_output_files"));
         assert!(receipts.content.contains("completed"));
         assert!(summary.content.contains("artifact-manifest.json"));
@@ -478,22 +451,14 @@ impl ModelProvider for SummaryReviewProvider {
         );
         Ok(ModelResponse {
             content: String::new(),
-            tool_calls: vec![ToolCall {
-                id: "summary-review".into(),
-                kind: "function".into(),
-                function: FunctionCall {
-                    name: "completion_check".into(),
-                    arguments: json!({"state":"complete","reason":"terminal inventory included"})
-                        .to_string(),
-                },
-            }],
+            tool_calls: vec![],
             usage: None,
             finish_reason: None,
         })
     }
 }
 #[tokio::test]
-async fn completion_review_sees_all_terminal_titles_and_durable_output_locations() {
+async fn model_step_sees_all_terminal_titles_and_durable_output_locations() {
     let mut runtime = kernel();
     runtime.provider = Arc::new(SummaryReviewProvider);
     runtime.child_results.insert(
@@ -518,9 +483,25 @@ async fn completion_review_sees_all_terminal_titles_and_durable_output_locations
         .unwrap();
     }
     assert_eq!(runtime.task_queue().unwrap().state, QueueState::Summarizing);
-    runtime.review_completion().await.unwrap();
+    runtime
+        .model_step(
+            &Mutex::new(|_| {}),
+            &[crate::child_result::spec()],
+            1,
+            &mut |_| Ok(()),
+        )
+        .await
+        .unwrap();
     runtime.task_queue.as_mut().unwrap().state = QueueState::Completed;
-    runtime.review_completion().await.unwrap();
+    runtime
+        .model_step(
+            &Mutex::new(|_| {}),
+            &[crate::child_result::spec()],
+            1,
+            &mut |_| Ok(()),
+        )
+        .await
+        .unwrap();
 }
 
 #[test]

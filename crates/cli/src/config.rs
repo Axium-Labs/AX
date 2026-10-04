@@ -85,6 +85,8 @@ pub(crate) fn config_path() -> PathBuf {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct AxConfig {
     #[serde(default)]
+    pub verification: runtime_core::VerificationConfig,
+    #[serde(default)]
     pub child_models: std::collections::BTreeMap<String, ModelConfig>,
     #[serde(default)]
     pub context_pool: runtime_core::ContextPoolPolicy,

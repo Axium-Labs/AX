@@ -23,6 +23,12 @@ pub mod child_policy;
 pub mod child_result;
 mod compression;
 mod context;
+pub mod continuation;
+pub mod stop_guard;
+pub use continuation::{
+    ContinuationReason, TurnContinuation, TurnState, WaitReason, needs_follow_up,
+};
+pub use stop_guard::{StopDecision, StopGuard, Verification, VerificationConfig};
 mod error;
 mod event;
 pub mod execution;
@@ -72,3 +78,7 @@ mod execution_tests;
 #[cfg(test)]
 #[path = "../../../test/harness/core.rs"]
 mod harness_tests;
+
+#[cfg(test)]
+#[path = "../../../test/harness/continuation.rs"]
+mod continuation_tests;

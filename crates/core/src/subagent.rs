@@ -73,6 +73,7 @@ struct Pending {
     result: tokio::sync::Mutex<Option<SubagentResult>>,
     done: Notify,
     finished: AtomicBool,
+    consumed: AtomicBool,
 }
 
 /// Turn-scoped admission and cancellation only; contains no model execution loop.
@@ -90,6 +91,39 @@ pub struct SubagentManager {
 impl SubagentManager {
     fn event(&self, event: AgentEvent) {
         let _ = self.events.send(event);
+    }
+
+    pub(crate) fn continuation_counts(&self) -> (usize, usize) {
+        let entries = self
+            .pending
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let running = entries
+            .values()
+            .filter(|p| !p.finished.load(Ordering::Acquire))
+            .count();
+        let ready = entries
+            .values()
+            .filter(|p| p.finished.load(Ordering::Acquire) && !p.consumed.load(Ordering::Acquire))
+            .count();
+        (running, ready)
+    }
+
+    pub(crate) async fn collect_unconsumed(&self) -> Vec<(String, SubagentResult)> {
+        let ids = self
+            .pending
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .filter(|(_, p)| !p.consumed.load(Ordering::Acquire))
+            .map(|(id, _)| id.clone())
+            .collect::<Vec<_>>();
+        let mut results = Vec::new();
+        for id in ids {
+            let result = self.wait_agent(&id).await;
+            results.push((id, result));
+        }
+        results
     }
 
     /// Admit an isolated task. Unknown or recursive tools are rejected, never added.
@@ -169,6 +203,7 @@ impl SubagentManager {
                 notify: Notify::new(),
                 done: Notify::new(),
                 finished: AtomicBool::new(false),
+                consumed: AtomicBool::new(false),
                 result: tokio::sync::Mutex::new(None),
             }),
         );
@@ -230,6 +265,7 @@ impl SubagentManager {
             tokio::pin!(done);
             done.as_mut().enable();
             if let Some(result) = pending.result.lock().await.as_ref() {
+                pending.consumed.store(true, Ordering::Release);
                 return result.clone();
             }
             done.await;

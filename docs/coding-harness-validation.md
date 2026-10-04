@@ -1,5 +1,10 @@
 # Coding harness 修复与验收
 
+> 历史验收快照（AX 0.3.4）：下文记录当时的 completion review 实现和黑盒结果。
+> 2026-10-04 起默认完成机制已被 [continuation loop](agent-loop.md) 取代；
+> 不再默认审查 final。本文保留历史证据，不作为当前完成机制规范。
+
+
 ## 1. 根因
 
 | 根因 | 修复 |

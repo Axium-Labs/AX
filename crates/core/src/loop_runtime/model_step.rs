@@ -77,9 +77,7 @@ impl AgentKernel {
             .as_ref()
             .is_some_and(|q| q.active() && !q.tasks.is_empty());
         let on_delta = |delta: String| {
-            if !queue_active && !self.coding_harness {
-                (emit.lock().unwrap())(AgentEvent::ContentDelta { delta });
-            }
+            (emit.lock().unwrap())(AgentEvent::ContentDelta { delta });
         };
         let on_thinking = |delta: String| {
             (emit.lock().unwrap())(AgentEvent::ThinkingDelta { delta });
@@ -107,15 +105,31 @@ impl AgentKernel {
         drop(model_timer);
         let content = response.content;
         let tool_calls = response.tool_calls;
-        if self.coding_harness && tool_calls.is_empty() {
-            // Persist before the candidate: restart must not infer completion
-            // while the audit is still pending (including a crash in the audit).
-            let pending = Message::system(format!(
-                "{} Candidate final awaits completion review.",
-                crate::harness::PENDING
-            ));
-            self.messages.push(pending.clone());
-            self.raw_turn_messages.push(pending);
+        self.continuation.required_actions.clear();
+        self.continuation.pending_tool_results = 0;
+        self.continuation.unconsumed_child_results = 0;
+        self.continuation.pending_tool_calls = tool_calls.len();
+        self.continuation.model_requests_continuation = matches!(
+            response.finish_reason.as_deref(),
+            Some(
+                "length"
+                    | "max_tokens"
+                    | "incomplete"
+                    | "pause_turn"
+                    | "tool_calls"
+                    | "function_call"
+            )
+        );
+        if tool_calls.is_empty()
+            && (self.stop_guard.is_some() || self.continuation.model_requests_continuation)
+        {
+            let marker = Message::system(if self.stop_guard.is_some() {
+                "[ax-stop-guard-pending]"
+            } else {
+                "[ax-model-continuation]"
+            });
+            self.messages.push(marker.clone());
+            self.raw_turn_messages.push(marker);
         }
         let mut assistant = Message::assistant(content.clone(), tool_calls.clone());
         assistant.usage = response.usage.map(|reported| {

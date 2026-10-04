@@ -37,6 +37,23 @@ pub(crate) fn configure_controller(state: &mut crate::repl::ReplState) -> anyhow
                 ..state.execution_budget
             }),
     );
+    let mut verification = crate::config::AxConfig::load()?.verification;
+    let project_verification = state.project_root.join(".ax/verification.json");
+    match std::fs::read(&project_verification) {
+        Ok(bytes) => verification = serde_json::from_slice(&bytes)?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    for path in &mut verification.deliverables {
+        if path.is_relative() {
+            *path = state.project_root.join(&*path);
+        }
+    }
+    state
+        .runtime
+        .as_mut()
+        .unwrap()
+        .configure_verification(verification);
     state.configure_scoped_subagents()
 }
 

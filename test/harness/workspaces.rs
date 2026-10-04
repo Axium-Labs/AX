@@ -49,16 +49,13 @@ impl ModelProvider for Provider {
         100_000
     }
     async fn complete(&self, request: ModelRequest) -> Result<ModelResponse, ModelError> {
-        if request
-            .messages
-            .iter()
-            .any(|m| m.content.starts_with("[ax-completion-review]"))
-        {
-            return Ok(call(
-                "completion_check",
-                json!({"state":"complete","reason":"all receipts durable"}),
-            ));
-        }
+        assert!(
+            !request
+                .messages
+                .iter()
+                .any(|m| m.content.starts_with("[ax-completion-review]")),
+            "default must not invoke reviewer"
+        );
         if request
             .messages
             .iter()
@@ -285,16 +282,13 @@ impl ModelProvider for NoGitProvider {
         100_000
     }
     async fn complete(&self, request: ModelRequest) -> Result<ModelResponse, ModelError> {
-        if request
-            .messages
-            .iter()
-            .any(|m| m.content.starts_with("[ax-completion-review]"))
-        {
-            return Ok(call(
-                "completion_check",
-                json!({"state":"complete","reason":"files written and host will retain artifacts"}),
-            ));
-        }
+        assert!(
+            !request
+                .messages
+                .iter()
+                .any(|m| m.content.starts_with("[ax-completion-review]")),
+            "default must not invoke reviewer"
+        );
         if request
             .messages
             .iter()

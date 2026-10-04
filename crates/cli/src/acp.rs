@@ -219,7 +219,10 @@ fn update(out: &Outbox, session_id: &str, event: AgentEvent, calls: &mut HashMap
                 }
             })
         }
-        AgentEvent::SubagentStarted { .. }
+        AgentEvent::Continuation { .. }
+        | AgentEvent::Completion { .. }
+        | AgentEvent::StopGuardEvaluated { .. }
+        | AgentEvent::SubagentStarted { .. }
         | AgentEvent::SubagentProgress { .. }
         | AgentEvent::SubagentCompleted { .. }
         | AgentEvent::SubagentFailed { .. }

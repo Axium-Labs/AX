@@ -64,3 +64,5 @@ What becomes easier, what becomes harder, and what we accepted.
 - [0015: Shared child composition](0015-shared-child-composition.md) — frontend parity, explicit complete task inputs and unexecuted-plan replacement.
 
 - [0017 — Authoritative Experience JSONL](0017-evolution-jsonl-authority.md) — Evolution control checkpoints, incremental consumption and legacy migration.
+
+- [0018 — Continuation-driven completion](0018-continuation-driven-completion.md) — no mandatory final reviewer; optional Stop Guards.

@@ -17,7 +17,7 @@ use crate::{
     repl::ReplState,
 };
 
-fn render_event(event: AgentEvent) {
+fn log_event(event: &AgentEvent) {
     // Opt-in measurement sink; no new session or startup work in normal runs.
     if let Some(path) = std::env::var_os("AX_EVENT_LOG") {
         use std::fs::OpenOptions;
@@ -33,6 +33,9 @@ fn render_event(event: AgentEvent) {
             );
         }
     }
+}
+
+fn render_event(event: AgentEvent) {
     match event {
         AgentEvent::ModelStarted { provider, model } => {
             eprintln!("[{provider}/{model}] thinking...");
@@ -61,7 +64,10 @@ fn render_event(event: AgentEvent) {
         AgentEvent::SubagentCompleted { id } => eprintln!("[{id}] completed"),
         AgentEvent::SubagentFailed { id, error } => eprintln!("[{id}] failed: {error}"),
         AgentEvent::SubagentCancelled { id } => eprintln!("[{id}] cancelled"),
-        AgentEvent::SubagentProgress { .. }
+        AgentEvent::Continuation { .. }
+        | AgentEvent::Completion { .. }
+        | AgentEvent::StopGuardEvaluated { .. }
+        | AgentEvent::SubagentProgress { .. }
         | AgentEvent::TurnStarted
         | AgentEvent::ThinkingDelta { .. } => {}
     }
@@ -79,7 +85,7 @@ pub(crate) async fn run_prompt_with<F>(
     selection: &ModelSelection,
     approval: Arc<dyn ApprovalPolicy>,
     prompt: &str,
-    emit: F,
+    mut emit: F,
 ) -> Result<String>
 where
     F: FnMut(AgentEvent) + Send,
@@ -113,7 +119,11 @@ where
         prepare_turn_context(state, selection, prompt)?;
     }
     let mut runtime = state.runtime.take().expect("runtime initialized");
-    let result = evolution::checkpointed_turn(&mut runtime, state, prompt, emit).await;
+    let result = evolution::checkpointed_turn(&mut runtime, state, prompt, |event| {
+        log_event(&event);
+        emit(event);
+    })
+    .await;
     let snapshot = if runtime.take_compression_dirty() {
         let summary = runtime
             .messages()

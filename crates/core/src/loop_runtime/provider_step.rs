@@ -1,4 +1,4 @@
-//! All controller, child and completion-review requests share streaming/retry semantics.
+//! All controller, child and optional stop-guard requests share streaming/retry semantics.
 use crate::{AgentError, AgentKernel};
 use model::{ModelError, ModelRequest, ModelResponse};
 
@@ -6,13 +6,26 @@ impl AgentKernel {
     pub(crate) async fn request_with_retry(
         &self,
         request: ModelRequest,
+        on_delta: impl FnMut(String) + Send,
+        on_thinking: impl FnMut(String) + Send,
+    ) -> Result<ModelResponse, AgentError> {
+        self.request_with_retry_observed(request, on_delta, on_thinking, || {})
+            .await
+    }
+
+    pub(crate) async fn request_with_retry_observed(
+        &self,
+        request: ModelRequest,
         mut on_delta: impl FnMut(String) + Send,
         mut on_thinking: impl FnMut(String) + Send,
+        mut on_request: impl FnMut() + Send,
     ) -> Result<ModelResponse, AgentError> {
         let started = std::time::Instant::now();
         let mut attempts = 0;
+        let mut retry_activity = None;
         loop {
             attempts += 1;
+            on_request();
             let emitted = std::sync::atomic::AtomicBool::new(false);
             let response = {
                 let mut delta = |text: String| {
@@ -65,6 +78,9 @@ impl AgentKernel {
                     ) else {
                         return Err(error.into());
                     };
+                    retry_activity.get_or_insert_with(|| {
+                        crate::continuation::ActivityLease::new(&self.activity.retries)
+                    });
                     tokio::time::sleep(delay).await;
                 }
             }

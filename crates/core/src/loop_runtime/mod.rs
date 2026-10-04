@@ -96,6 +96,8 @@ impl AgentKernel {
         H: FnMut(&[Message]) -> Result<(), AgentError> + Send,
     {
         self.raw_turn_messages.clear();
+        self.continuation = crate::TurnState::default();
+        self.guard_model_requests = 0;
         self.prepare_environment().await?;
         self.touch_progress();
         // The controller turn timeout is an *idle* timeout. A turn that delegates work
@@ -305,6 +307,12 @@ impl AgentKernel {
         let mut calls_used = 0;
         let mut steps_used = 0usize;
         loop {
+            for steer in self.turn_input.drain() {
+                let message = Message::user(steer);
+                self.messages.push(message.clone());
+                self.raw_turn_messages.push(message);
+                checkpoint(&self.raw_turn_messages)?;
+            }
             self.touch_progress();
             if let Some(queue) = self.task_queue.as_ref().filter(|q| !q.active()) {
                 let content = queue
@@ -314,10 +322,11 @@ impl AgentKernel {
                     .unwrap_or_default();
                 return self.finish_goal_response(content, &emit, checkpoint);
             }
-            if self.budget.max_steps != 0 && steps_used >= self.budget.max_steps {
+            if self.budget.max_steps != 0
+                && steps_used.saturating_add(self.guard_model_requests) >= self.budget.max_steps
+            {
                 return Err(AgentError::StepLimit(self.budget.max_steps));
             }
-            steps_used = steps_used.saturating_add(1);
             if self.child_host.is_some()
                 && self.task_queue.as_ref().is_some_and(|q| {
                     q.delegate && q.state == QueueState::Active && child_dispatch::has_open_work(q)
@@ -330,6 +339,7 @@ impl AgentKernel {
                     continue;
                 }
             }
+            steps_used = steps_used.saturating_add(1);
             let step = self
                 .model_step(&emit, &tool_specs, steps_used, checkpoint)
                 .await?;
@@ -348,7 +358,16 @@ impl AgentKernel {
                 .await?
             {
                 ToolStep::Final(content) => return Ok(content),
-                ToolStep::Continue => {}
+                ToolStep::Continue => {
+                    self.continuation.pending_tool_calls = 0;
+                    self.continuation.pending_tool_results = self
+                        .messages
+                        .iter()
+                        .rev()
+                        .take_while(|message| message.role != model::Role::Assistant)
+                        .filter(|message| message.role == model::Role::Tool)
+                        .count();
+                }
                 ToolStep::Waiting(question) => {
                     return Err(AgentError::WaitingForUser(question));
                 }

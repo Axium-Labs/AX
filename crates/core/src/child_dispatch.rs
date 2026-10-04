@@ -125,6 +125,7 @@ impl AgentKernel {
                 }
             }
 
+            self.continuation.running_children = running.len();
             let outcome = if let Some(item) = settled.pop_front() {
                 Some(item)
             } else if running.is_empty() {
@@ -135,6 +136,7 @@ impl AgentKernel {
             let Some((index, run, result, child_state)) = outcome else {
                 break;
             };
+            self.continuation.running_children = running.len();
             reserved.retain(|(held, _)| *held != index);
             self.record_child(index, run.as_ref(), result, &child_state, checkpoint)?;
         }
@@ -307,6 +309,7 @@ impl AgentKernel {
         let status = result.status;
         child_result::store(&mut self.child_results, result);
         self.receipts_dirty = true;
+        self.continuation.unconsumed_child_results += 1;
         let queue = self.task_queue.as_mut().unwrap();
         let task = &mut queue.tasks[index];
         // A receipt is the only thing that decides the task's fate; the compact

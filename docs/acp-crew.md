@@ -9,7 +9,7 @@ CLI/TUI/ACP all bind the same LocalChildHost and child budget through
 with `execution="children"` automatically enters the kernel's
 `execute_ready_children()` with bounded resource-aware concurrency. Ordering
 resources serialize requested sequential tasks; independent children may overlap.
-Only accepted controller text is emitted as the final response. Child failures advance
+Controller text streams immediately; only the shared kernel emits turn completion. Child failures advance
 independent tasks. `--child-timeout-secs` applies independently of the controller
 turn timeout in Crew/ACP too. Child tool updates retain session-prefixed call IDs.
 
@@ -17,7 +17,7 @@ Prompt lists never imply executable tasks. After reading a dataset, the model ca
 call `task_queue start` with actual instances and complete `{title,input}` task
 objects, or use `task_source` with an explicit record-to-work mapping for automatic
 queue admission. `append` adds concrete work without replacing executed history.
-The shared coding policy/environment, completion review and durable workspace
+The shared coding policy/environment, continuation loop, optional Stop Guard and durable workspace
 artifacts are described in [coding-harness.md](coding-harness.md).
 A mistaken queue with no dispatched work can be explicitly replanned;
 its previous state remains archived in authoritative history.

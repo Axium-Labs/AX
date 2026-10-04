@@ -113,6 +113,10 @@ pub trait ChildHost: Send + Sync {
     ) -> Result<PreparedChild, AgentError>;
 }
 
+// Read-only compatibility with pre-continuation harness checkpoints.
+pub(crate) const LEGACY_COMPLETION_CHECK: &str = "completion_check";
+pub(crate) const LEGACY_COMPLETION_PENDING: &str = "[ax-completion-pending]";
+
 /// Recover a final receipt from durable history, including unresolved tool errors.
 #[must_use]
 pub fn terminal_result(messages: &[Message]) -> Option<ChildResult> {
@@ -131,7 +135,7 @@ fn terminal_result_reviewed(messages: &[Message], reviewed: bool) -> Option<Chil
         && let Some(index) = messages.iter().rposition(|message| {
             message.tool_calls.len() == 1
                 && message.tool_calls[0].id == last.tool_call_id.as_deref().unwrap_or_default()
-                && message.tool_calls[0].function.name == crate::harness::CHECK
+                && message.tool_calls[0].function.name == LEGACY_COMPLETION_CHECK
                 && serde_json::from_str::<serde_json::Value>(
                     &message.tool_calls[0].function.arguments,
                 )
@@ -143,11 +147,21 @@ fn terminal_result_reviewed(messages: &[Message], reviewed: bool) -> Option<Chil
     if last.role != model::Role::Assistant || !last.tool_calls.is_empty() {
         return None;
     }
-    if !reviewed
-        && messages
+    let final_index = messages
+        .iter()
+        .rposition(|m| m.role != model::Role::System)?;
+    let preceding = final_index.checked_sub(1).and_then(|i| messages.get(i));
+    if preceding.is_some_and(|m| m.content == "[ax-model-continuation]") {
+        return None;
+    }
+    if preceding.is_some_and(|m| m.content == "[ax-stop-guard-pending]")
+        && !messages[final_index + 1..]
             .iter()
-            .any(|message| message.content.starts_with(crate::harness::PENDING))
+            .any(|m| m.content == "[ax-stop-guard-allowed]")
     {
+        return None;
+    }
+    if !reviewed && preceding.is_some_and(|m| m.content.starts_with(LEGACY_COMPLETION_PENDING)) {
         return None;
     }
     let round = messages.iter().rposition(|m| !m.tool_calls.is_empty());

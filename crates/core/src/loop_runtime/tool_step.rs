@@ -36,8 +36,8 @@ impl AgentKernel {
         &mut self,
         emit: &std::sync::Mutex<F>,
         checkpoint: &mut H,
-        mut content: String,
-        mut tool_calls: Vec<ToolCall>,
+        content: String,
+        tool_calls: Vec<ToolCall>,
         queue_active: bool,
         calls_used: &mut usize,
         steps_used: &mut usize,
@@ -47,63 +47,97 @@ impl AgentKernel {
         F: FnMut(AgentEvent) + Send,
         H: FnMut(&[Message]) -> Result<(), AgentError> + Send,
     {
-        if tool_calls.is_empty()
-            && self.child_run.is_none()
-            && self
-                .task_queue
-                .as_ref()
-                .is_some_and(|q| q.state == QueueState::Active && !q.tasks.is_empty())
-        {
-            self.set_context("[ax-completion-guard]\n", Some(Message::system("[ax-completion-guard]\nKnown work is unresolved. Continue execution, dispatch ready children, or explicitly finish individual tasks with evidence. Use request_user_input for a user-exclusive blocker; use task_queue block only for an evidenced global blocker.")));
-            self.checkpoint_queue(checkpoint)?;
+        let state = self.turn_state();
+        (emit.lock().unwrap())(AgentEvent::Continuation {
+            goal_id: self.goal_id.clone(),
+            step: *steps_used,
+            continuation: state.continuation(),
+        });
+        if tool_calls.is_empty() && crate::needs_follow_up(&state) {
+            if let Some(question) = &self.pending_question {
+                return Ok(ToolStep::Waiting(Box::new(question.clone())));
+            }
+            if let Some(manager) = self.subagent_manager.clone() {
+                let results =
+                    subagent::forward_events(manager.collect_unconsumed(), subagent_events, emit)
+                        .await;
+                for (id, result) in results {
+                    let message = Message::system(format!(
+                        "[ax-child-result] {id} {}",
+                        serde_json::to_string(&result).unwrap()
+                    ));
+                    self.messages.push(message.clone());
+                    self.raw_turn_messages.push(message);
+                    self.continuation.unconsumed_child_results += 1;
+                }
+            }
+            self.set_context("[ax-continuation]\n", Some(Message::system(format!(
+                "[ax-continuation]\nRuntime work remains: {:?}. Consume results or continue the pending action. Request user input if needed.", state.continuation()))));
+            checkpoint(&self.raw_turn_messages)?;
             return Ok(ToolStep::Continue);
         }
-        if tool_calls.is_empty() && self.coding_harness {
-            if self.budget.max_steps != 0 && *steps_used >= self.budget.max_steps {
+        if tool_calls.is_empty()
+            && let Some(guard) = self.stop_guard.clone()
+        {
+            if guard.uses_model()
+                && self.budget.max_steps != 0
+                && steps_used.saturating_add(self.guard_model_requests) >= self.budget.max_steps
+            {
                 return Err(AgentError::StepLimit(self.budget.max_steps));
             }
-            *steps_used = steps_used.saturating_add(1);
-            (emit.lock().unwrap())(AgentEvent::ModelStarted {
-                provider: self.provider.name().into(),
-                model: self.provider.model_id().into(),
-            });
-            let review = self.review_completion().await?;
-            let mut message = Message::assistant(review.content.clone(), review.tool_calls.clone());
-            message.usage = review.usage.map(|usage| serde_json::json!({"provider":self.provider.name(),"model":self.provider.model_id(),"reported":usage}));
-            self.messages.push(message.clone());
-            self.raw_turn_messages.push(message);
-            let complete = review.tool_calls.len() == 1
-                && review.tool_calls[0].function.name == crate::harness::CHECK
-                && serde_json::from_str::<Value>(&review.tool_calls[0].function.arguments)
-                    .is_ok_and(|v| v["state"] == "complete");
-            if review
-                .tool_calls
+            let mut state = self.turn_state();
+            state.guard_model_requests = Arc::default();
+            state.evidence.clone_from(&self.messages);
+            state.successful_tool_calls = self
+                .messages
                 .iter()
-                .all(|call| call.function.name == crate::harness::CHECK)
-            {
-                for call in &review.tool_calls {
-                    let result = Message::tool(&call.id, "Completion review recorded.");
-                    self.messages.push(result.clone());
-                    self.raw_turn_messages.push(result);
-                }
-                checkpoint(&self.raw_turn_messages)?;
-                if !complete {
-                    self.set_context(
-                        "[ax-completion-guard]\n",
-                        Some(Message::system(format!(
-                            "[ax-completion-guard]\nContinue requested work. Review: {}",
-                            serde_json::to_string(&review.tool_calls).unwrap()
-                        ))),
-                    );
+                .chain(&self.raw_turn_messages)
+                .filter(|m| m.role == model::Role::Tool)
+                .filter(|m| {
+                    serde_json::from_str::<Value>(&m.content)
+                        .is_ok_and(|v| v["status"] == "success")
+                })
+                .filter_map(|m| m.tool_call_id.clone())
+                .collect();
+            if let Some(queue) = &self.task_queue {
+                state.evidence.push(queue.summary_context());
+            }
+            if let Some(receipts) = self.current_receipts_context() {
+                state.evidence.push(receipts);
+            }
+            let decision = guard.evaluate(&state).await;
+            let requests = state
+                .guard_model_requests
+                .load(std::sync::atomic::Ordering::Relaxed);
+            self.guard_model_requests += requests;
+            (emit.lock().unwrap())(AgentEvent::StopGuardEvaluated {
+                goal_id: self.goal_id.clone(),
+                guard: guard.name().into(),
+                allowed: decision == crate::StopDecision::Allow,
+                model_requests: requests,
+            });
+            match decision {
+                crate::StopDecision::Continue { reason } => {
+                    self.continuation.required_actions.push(reason.clone());
+                    let message = Message::system(format!("[ax-stop-guard] Continue: {reason}"));
+                    self.messages.push(message.clone());
+                    self.raw_turn_messages.push(message);
+                    checkpoint(&self.raw_turn_messages)?;
                     return Ok(ToolStep::Continue);
                 }
-            } else {
-                content = review.content;
-                tool_calls = review.tool_calls;
+                crate::StopDecision::Allow => {
+                    let marker = Message::system("[ax-stop-guard-allowed]");
+                    self.messages.push(marker.clone());
+                    self.raw_turn_messages.push(marker);
+                    checkpoint(&self.raw_turn_messages)?;
+                }
             }
-            checkpoint(&self.raw_turn_messages)?;
         }
         if tool_calls.is_empty() {
+            // Input may arrive while an explicitly blocking guard is running.
+            if crate::needs_follow_up(&self.turn_state()) {
+                return Ok(ToolStep::Continue);
+            }
             if self.child_run.is_some()
                 && let Some(outcome) = child::terminal_result(&self.messages)
                 && !outcome.status.success()
@@ -115,25 +149,27 @@ impl AgentKernel {
             if let Some(queue) = self.task_queue.as_mut().filter(|q| q.active()) {
                 // A final response is goal-scoped. Never interpret it as one
                 // task's completion and ask again for every remaining item.
-                if queue.state == QueueState::Active && !queue.tasks.is_empty() {
-                    queue.stop(QueueState::Blocked, content.clone());
-                } else {
-                    queue.state = QueueState::Completed;
-                }
+                queue.state = QueueState::Completed;
                 queue.final_response = Some(content.clone());
                 queue.summarized = true;
                 self.checkpoint_queue(checkpoint)?;
-                if queue_active || self.coding_harness {
-                    (emit.lock().unwrap())(AgentEvent::ContentDelta {
-                        delta: content.clone(),
-                    });
+            }
+            (emit.lock().unwrap())(AgentEvent::Completion {
+                goal_id: self.goal_id.clone(),
+                completion: if self.stop_guard.is_some() {
+                    "stop_guard"
+                } else {
+                    "direct"
                 }
-            }
-            if self.coding_harness && self.task_queue.is_none() {
-                (emit.lock().unwrap())(AgentEvent::ContentDelta {
-                    delta: content.clone(),
-                });
-            }
+                .into(),
+                model_steps: *steps_used,
+                guard_model_requests: self.guard_model_requests,
+                tools: *calls_used,
+                guard: self
+                    .stop_guard
+                    .as_ref()
+                    .map(|guard| guard.name().to_owned()),
+            });
             self.set_context(task_queue::PROGRESS_PREFIX, None);
             (emit.lock().unwrap())(AgentEvent::TurnFinished);
             return Ok(ToolStep::Final(content));
@@ -264,7 +300,10 @@ impl AgentKernel {
         let results = subagent::forward_events(
             scheduler::run(
                 jobs,
-                Arc::clone(&self.approval),
+                Arc::new(crate::continuation::TrackedApproval {
+                    inner: self.approval.clone(),
+                    activity: self.activity.clone(),
+                }),
                 self.permission_profiles.clone(),
                 self.tool_concurrency,
                 self.budget.tool_timeout_secs,

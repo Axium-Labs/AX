@@ -240,7 +240,8 @@ user task
   → retrieve memory and checkpoint user input
   → context pressure check / layered compression
   → model streaming request
-  → proposed final ─────────→ pending guard / completion review → persist and finish
+  → final + no continuation → optional StopGuard (default absent) → TurnFinished
+  → pending input / approval / child / retry → wait, collect results, continue
   → tool calls
       → goal-bound step/scope admission
       → permission check
@@ -261,6 +262,10 @@ session. Compression keeps skill system context and the full raw history and
 only replaces older conversation/execution records fed to the model with a
 summary. Every model step and tool call records latency metrics visible in
 `/status`.
+
+Completion uses the shared `TurnState` / `TurnContinuation` state machine.
+Default final text is streamed immediately and never routed through a reviewer.
+See [agent-loop.md](agent-loop.md) for state, configuration and telemetry.
 
 ## Extension points
 
@@ -504,5 +509,5 @@ registries bind their own workspace. Permission remains independent. See
 [security.md](security.md) and [ADR 0013](adr/0013-workspace-runtime-sandbox.md)
 for backend requirements, lifecycle capabilities and platform limitations.
 
-Current coding execution policy, task-level Git workspaces, final completion review
+Current coding execution policy, task-level Git workspaces, optional stop verification
 and artifact staging/export are described in [coding-harness.md](coding-harness.md).

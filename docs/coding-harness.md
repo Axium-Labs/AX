@@ -23,25 +23,18 @@ This is advisory model policy, not an observed-progress gate or recovery lock.
 In harness mode model-declared step subscopes are advisory: tools still enforce the
 initial workspace boundary. A mistaken `workspace/workspace` declaration cannot
 prevent inspecting the actual checkout or recovering within that boundary.
-When a controller proposes text-only completion, known pending/running queue items
-keep the same goal active. Both controller and child proposed finals use a streaming completion
-review that checks original deliverables against tool evidence. It accepts completion,
-requests concrete controller queue start/append, executes the next recovery tool
-through the ordinary scheduler, continues recovery/reporting, or calls
-structured `request_user_input`. The review uses the same retry/provider path and
-counts toward step budgets. Synthetic completion checks do not count as executed
-workspace tools; their model requests count as model rounds. Proposed controller text is emitted only after
-acceptance. Reviews can still be wrong; they do not prove semantic code correctness.
-Terminal queue summaries direct the controller to read authoritative current
-receipts and create cross-item reports itself. Isolated reporting children need
-complete report inputs, rather than assuming sibling output directories exist.
-A persisted `[ax-completion-pending]` marker precedes each candidate final.
-Recovery cannot treat that text as terminal until an accepted review acknowledgement
-is durable; legacy histories without this marker retain their existing behavior.
-Children do not create nested queues; the controller owns necessary user decisions.
-A final child response with unresolved tool errors becomes a failed receipt even
-after an accepted completion audit; reconnect recovers the candidate final rather
-than treating the review acknowledgement as repair evidence.
+Completion is continuation-driven for controllers and children. Final text streams
+immediately; `TurnState::continuation()` permits completion only when there is no
+pending execution, result consumption, task, child, approval, retry, input or next
+action. Tool use, edits, shell commands and tests never trigger another model
+request by themselves. A plain answer costs one execution model request and zero
+reviewer requests. There is no task complexity classifier.
+
+Extra verification is an optional `StopGuard`, default off. Deterministic checks
+run before any explicitly enabled model verification. See [agent-loop.md](agent-loop.md)
+for configuration, events, extension points and recovery. Legacy completion-review
+markers are read for recovery compatibility only; new default turns do not write
+them. A child final with unresolved tool errors still produces a failed receipt.
 
 ## Concrete work activation
 
@@ -71,7 +64,7 @@ newly discovered items and offsetting dependencies. It cannot erase prior work.
 
 ```text
 Goal active → projected concrete inventory → start/append queue → ready children
-→ task-local receipt → next independent ready item → all terminal → report/review
+→ task-local receipt → next independent ready item → all terminal → model report
 → completed
 ```
 
@@ -165,14 +158,14 @@ The controller advertises `child_result` before its first dispatch so newly crea
 receipts can be inspected in the same goal.
 
 Configured child timeouts bound the total child model/tool loop, including
-completion reviews; tool/model activity cannot renew that deadline. The controller
+explicit optional guard evaluation; tool/model activity cannot renew that deadline. The controller
 turn timeout remains idle-based so productive independent batches can outlive it.
 A timed-out child saves its receipt/artifacts and independent tasks continue.
 
 ## Regression coverage
 
 `test/harness/core.rs` covers typed dynamic 23-item admission, no bullet parsing,
-pending completion rejection, streaming-only completion review, executed-queue
+pending task continuation, direct final completion, executed-queue
 append, shared environment binding and local/global evidence classification.
 `test/harness/task_source.rs` covers projected input isolation, 23 record mappings,
 sequential failure continuation and relative output resolution.
@@ -190,8 +183,8 @@ benchmark-specific planner or correctness oracle.
 
 ### Current output evidence
 
-Each frozen output has `artifact-manifest.json` identifying this child/task and its current exported artifacts. Existing unlisted custom files can be historical and must not supply current evaluation. `child_result.json` owns terminal status; custom `result.json` labels are descriptive. Cross-item reports use measured `metrics.json`, preserve unknown counts as null, and verify totals against terminal inventory. Terminal inventory remains injected after the queue is marked completed, including final completion review.
+Each frozen output has `artifact-manifest.json` identifying this child/task and its current exported artifacts. Existing unlisted custom files can be historical and must not supply current evaluation. `child_result.json` owns terminal status; custom `result.json` labels are descriptive. Cross-item reports use measured `metrics.json`, preserve unknown counts as null, and verify totals against terminal inventory. Terminal inventory remains injected after the queue is marked completed, including optional verification.
 
-The current manifest includes host-generated receipt, trace, patch, metrics, validation and diagnostic files, even without child staging files. Setup failures publish the same receipt/manifest surface. Final review requires requested per-item reports for failed as well as completed items; unavailable measurements/evaluation remain null rather than excusing missing files.
+The current manifest includes host-generated receipt, trace, patch, metrics, validation and diagnostic files, even without child staging files. Setup failures publish the same receipt/manifest surface. Coding policy asks for requested per-item reports for failed as well as completed items; unavailable measurements/evaluation remain null rather than excusing missing files.
 
-Current child receipt status, measured metrics, diff statistics and grouped current output filenames are injected directly into controller terminal summarization and completion review. They do not require the model to first discover/call child_result. Host outputs are Artifact references as well as manifest entries. This remains evidence for advisory review, without observed-progress gates.
+Current child receipt status, measured metrics, diff statistics and grouped current output filenames are injected directly into controller terminal summarization and optional stop verification. They do not require the model to first discover/call child_result. Host outputs are Artifact references as well as manifest entries. This supplies execution context without an automatic semantic review.

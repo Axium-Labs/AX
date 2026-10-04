@@ -319,7 +319,11 @@ impl App {
             // Reasoning deltas are private model working text. Keep the compact
             // animated `Thinking` status instead of dumping chain-of-thought
             // into the transcript and consuming the whole viewport.
-            AgentEvent::SubagentProgress { .. } | AgentEvent::ThinkingDelta { delta: _ } => {}
+            AgentEvent::Continuation { .. }
+            | AgentEvent::Completion { .. }
+            | AgentEvent::StopGuardEvaluated { .. }
+            | AgentEvent::SubagentProgress { .. }
+            | AgentEvent::ThinkingDelta { delta: _ } => {}
             AgentEvent::TurnFinished => {
                 self.transcript.streaming = false;
             }
