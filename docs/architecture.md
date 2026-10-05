@@ -528,3 +528,7 @@ authentication; AWS/Google credential discovery remains lazy. Optional assistant
 `provider_metadata` preserves signed native blocks through session checkpoints
 and context budgeting without adding model calls. See [providers](providers.md)
 and [ADR 0020](adr/0020-native-model-providers.md).
+
+## Optional Distributed Collaboration
+
+The CLI composition root conditionally registers the `collaboration` Tool only when worker environment bindings are present. `distributed_client`, `distributed_tool` and `distributed_worker` provide scoped REST, Tool adaptation and per-lease ACP execution. Core reasoning, Subagents, Tasks, Sessions, Memory, Skills and MCP are unchanged. `ax crew worker` is separate from the existing device bridge. See [distributed-collaboration.md](distributed-collaboration.md) and [ADR 0021](adr/0021-durable-distributed-collaboration.md).

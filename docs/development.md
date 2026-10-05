@@ -153,3 +153,7 @@ AX Crew can fall back to the official installer when an older AX updater has a
 network error. The Windows installer renames an existing executable before
 copying the verified replacement and restores it if copying fails. A backup
 still in use by a running task is retained until it can be removed.
+
+## Distributed collaboration validation
+
+Worker regression tests live in `test/distributed_worker.rs` and run with `cargo test --workspace` (Git/snapshot isolation and transport policy). Build AX and the sibling Crew, then run `python ../axcrew/tests/integration/distributed_process.py target/debug/ax.exe ../axcrew/target/debug/ax-crew.exe` from this repository on Windows, or corresponding executable paths on Linux. The fake-model scenario runs actual ACP workers; it needs no provider credential.

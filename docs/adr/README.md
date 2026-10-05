@@ -70,3 +70,5 @@ What becomes easier, what becomes harder, and what we accepted.
 - [0019 — Search provider routing](0019-search-provider-routing.md) — provider-specific transport, reachability/latency routing, circuits and bounded hedging.
 
 - [0020 — Native model providers](0020-native-model-providers.md) — native protocols/authentication, shared dispatch, signed replay and separate resource configuration status.
+
+- [0021 — Durable distributed collaboration](0021-durable-distributed-collaboration.md) — optional CLI worker, fenced ownership and checkpoint-based recovery.

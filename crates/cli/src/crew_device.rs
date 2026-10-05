@@ -69,6 +69,7 @@ fn save(value: &Identity) -> Result<()> {
 }
 pub async fn run(command: &CrewCommand) -> Result<()> {
     match command {
+        CrewCommand::Worker { config } => crate::distributed_worker::run(config).await,
         CrewCommand::Pair { code, gateway } => pair(code, gateway).await,
         CrewCommand::Connect { gateway } => connect(gateway).await,
     }
@@ -145,6 +146,34 @@ struct RunProcess {
     child: Child,
     input: ChildStdin,
 }
+fn resolve_workspace(
+    value: &Value,
+    projects: &[crate::session_projects::ProjectLocation],
+) -> Result<PathBuf> {
+    if let Some(id) = value["workspace_id"].as_str() {
+        anyhow::ensure!(value.get("cwd").is_none(), "send workspace_id without cwd");
+        return projects
+            .iter()
+            .find(|p| p.id == id)
+            .ok_or_else(|| anyhow!("unknown local workspace_id"))?
+            .root
+            .canonicalize()
+            .map_err(Into::into);
+    }
+    // Older Crew releases send a path. Accept only an already registered project
+    // root, after canonicalization; arbitrary paths and nested directories stay forbidden.
+    let cwd = value["cwd"]
+        .as_str()
+        .ok_or_else(|| anyhow!("workspace_id missing"))?;
+    let root = PathBuf::from(cwd).canonicalize()?;
+    anyhow::ensure!(
+        projects
+            .iter()
+            .any(|p| p.root.canonicalize().is_ok_and(|p| p == root)),
+        "legacy cwd is not a registered local workspace"
+    );
+    Ok(root)
+}
 #[allow(clippy::too_many_lines)]
 async fn connected(url: &str, device_id: &str, key: &SigningKey) -> Result<()> {
     let (stream, _) = connect_async(url).await?;
@@ -194,20 +223,7 @@ async fn connected(url: &str, device_id: &str, key: &SigningKey) -> Result<()> {
         match value["type"].as_str().unwrap_or("") {
             "open" => {
                 let result = async {
-                    if value.get("cwd").is_some() {
-                        return Err(anyhow!(
-                            "Crew must send workspace_id; arbitrary cwd is forbidden"
-                        ));
-                    }
-                    let workspace_id = value["workspace_id"]
-                        .as_str()
-                        .ok_or_else(|| anyhow!("workspace_id missing"))?;
-                    let cwd = crate::session_projects::list()?
-                        .into_iter()
-                        .find(|project| project.id == workspace_id)
-                        .ok_or_else(|| anyhow!("unknown local workspace_id"))?
-                        .root
-                        .canonicalize()?;
+                    let cwd = resolve_workspace(&value, &crate::session_projects::list()?)?;
                     // Trusted control-plane bootstrap: pin the running AX object,
                     // even when a writable workspace replaces its on-disk pathname.
                     #[cfg(target_os = "linux")]
@@ -288,3 +304,7 @@ async fn connected(url: &str, device_id: &str, key: &SigningKey) -> Result<()> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "../../../test/crew_compatibility.rs"]
+mod compatibility_tests;

@@ -946,7 +946,7 @@ pub async fn run(cli: &Cli, data_dir: PathBuf, skills_dir: PathBuf) -> Result<()
                 let task_budget = crate::runtime::execution_budget(cli);
                 let task_child_timeout = cli.child_timeout_secs;
                 let task = tokio::spawn(async move {
-                    let result: Result<String> = async {
+                    let result: Result<(String, bool)> = async {
                         let mut state =
                             ReplState::new_in_project(task_data, task_skills, task_mcp, &task_cwd)?;
                         state.mcp_override = task_override;
@@ -985,7 +985,8 @@ pub async fn run(cli: &Cli, data_dir: PathBuf, skills_dir: PathBuf) -> Result<()
                             let body=stamp(json!({"sessionUpdate":"turn_changes","changedFiles":files}),now_seconds());
                             task_out.send(json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":task_session,"update":body}})).ok();
                         }
-                        outcome.map(|_| state.runtime.as_ref().and_then(runtime_core::AgentKernel::goal_id).unwrap_or_default().to_owned())
+                        outcome.map(|_| (state.runtime.as_ref().and_then(runtime_core::AgentKernel::goal_id).unwrap_or_default().to_owned(),
+                            state.runtime.as_ref().is_some_and(|kernel| kernel.pending_question().is_some())))
                     }
                     .await;
                     let should_reply = task_active
@@ -996,10 +997,10 @@ pub async fn run(cli: &Cli, data_dir: PathBuf, skills_dir: PathBuf) -> Result<()
                     if should_reply {
                         task_active.lock().unwrap().take();
                         match result {
-                            Ok(goal_id) => reply(
+                            Ok((goal_id, waiting_for_user)) => reply(
                                 &task_out,
                                 task_id,
-                                json!({"stopReason":"end_turn","_meta":{"axGoal":{"goal_id":goal_id}}}),
+                                json!({"stopReason":"end_turn","_meta":{"axGoal":{"goal_id":goal_id,"waiting_for_user":waiting_for_user}}}),
                             ),
                             Err(err) => error(&task_out, task_id, -32000, err.to_string()),
                         }

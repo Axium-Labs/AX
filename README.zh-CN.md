@@ -194,3 +194,7 @@ ax mcp import C:/downloads/mcp.toml --global     # <install-dir>/.ax/mcp.toml
 ## 本地编码基准
 
 见 `benchmark/README.md`：固定的三任务 AX vs Codex 运行器、隔离要求与实测结果。包含的这次运行在编码前被网关 403 阻断，不构成性能排名。
+
+## 可选的分布式协作
+
+AX 0.3.7 / AXCrew 0.3.3 新增基于 Durable Task、Event、Artifact 与 Workflow State 的协作层。AXCrew 按 AX 能力与 Host 资源统一分配任务；AX 保持现有推理、Memory 和 Subagent 能力，无须持续存活的 Coordinator Agent。在 AXCrew 侧边栏「分布式协作」注册实例、下载配置，再在目标机器运行 `ax crew worker worker.json`。支持一台 Host 多个 AX、一个 AX 多个 Execution，普通单机与原有设备控制仍可独立使用。见 [配置与恢复边界](docs/distributed-collaboration.md)。

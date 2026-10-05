@@ -17,6 +17,9 @@ mod child_runtime;
 mod commands;
 mod config;
 mod crew_device;
+mod distributed_client;
+mod distributed_tool;
+mod distributed_worker;
 #[cfg(test)]
 mod e2e_tests;
 mod evolution;

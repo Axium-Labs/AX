@@ -36,8 +36,14 @@ The corresponding Crew backend and its API are in the sibling `axcrew` project. 
 
 ## Workspace identity and confinement
 
-Device run requests must carry workspace_id. AX resolves that ID through its local
-registered-project list and canonicalizes the result. Supplied cwd is rejected;
-older gateways must migrate to this contract. Device ACP children use strict sandbox
+New device run requests carry workspace_id. AX resolves that ID through its local
+registered-project list and canonicalizes the result. For existing Crew versions,
+a legacy cwd is accepted only when it canonicalizes to an already registered
+project root. Nested or unregistered paths and mixed workspace_id/cwd requests
+are rejected. Distributed Tasks always use logical project identity. Device ACP children use strict sandbox
 mode and cannot switch away from their bound root through ACP requests. See
 [security.md](security.md).
+
+## Distributed worker adapter
+
+`ax crew worker worker.json` is an additional outbound pull adapter, separate from `ax crew connect`. It executes durable distributed assignments through the existing ACP process and isolated workspace, with optional `collaboration` Tool bindings. `session/prompt` now additively includes `_meta.axGoal.waiting_for_user`; unattended workers treat an unresolved user interaction as failure instead of publishing successful completion. Full ACP/Session/Memory state stays local; selected task summaries, checkpoints and explicitly published artifacts cross to Crew. See [distributed collaboration](distributed-collaboration.md).

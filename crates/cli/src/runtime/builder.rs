@@ -44,6 +44,9 @@ pub(crate) fn tools(mcp_tools: &[McpToolProxy]) -> ToolRegistry {
         registry.register(tool::SandboxedTool::new(local, root.clone()));
     }
     registry.register(tool::WebTool::new());
+    if let Some(collaboration) = crate::distributed_tool::CollaborationTool::from_env(root) {
+        registry.register(collaboration);
+    }
     for tool in mcp_tools {
         registry.register(tool.clone());
     }

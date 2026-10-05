@@ -177,6 +177,8 @@ pub(crate) enum WorkBuddyLoginRegion {
 }
 #[derive(Subcommand)]
 pub(crate) enum CrewCommand {
+    /// Run an opt-in distributed AX worker using a local JSON configuration.
+    Worker { config: PathBuf },
     /// Pair this machine using a one-time code issued by Crew.
     Pair {
         code: String,

@@ -246,3 +246,7 @@ or MCP servers. MCP JSON accepts the common `mcpServers` format.
 ## Local coding benchmark
 
 See `benchmark/README.md` for the fixed three-task AX vs Codex runner, isolation requirements and measured results. The included run was blocked by gateway 403 responses before coding and does not establish a performance ranking.
+
+## Optional distributed collaboration
+
+AXCrew can schedule durable tasks across independent AX instances using capability and Host resource requirements. AX keeps its existing runtime, local memory and Subagents. Workers exchange selected summaries, Events and Artifacts through persistent Workflow State; a Coordinator Agent need not remain alive. Enroll an instance in AXCrew’s **Distributed** page, download its configuration and run `ax crew worker worker.json`. This is additive functionality in AX 0.3.7 / AXCrew 0.3.3; ordinary AX and the existing device bridge remain available. See [setup and recovery boundaries](docs/distributed-collaboration.md).
