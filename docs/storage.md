@@ -284,3 +284,12 @@ only in a bounded memory buffer. An ID/offset index is rebuilt from JSONL once o
 worker initialization and extended incrementally thereafter. Legacy ledger copies
 are reconciled by ID before publishing version 2. See [Evolution](evolution.md) for
 migration, failure recovery, and the restriction on older AX writers.
+
+## Concurrent ACP/SSH initialization
+
+Schema migrations reserve an immediate SQLite writer transaction before reading
+migration metadata, avoiding WAL read-snapshot upgrade failures when many local
+AX processes open the same project database. Scoped-index migration uses the
+same writer reservation. Session-project registry updates acquire a file lock,
+write a unique staging file and rename it atomically; readers cannot observe
+truncated JSON and concurrent writers retain each registered project.

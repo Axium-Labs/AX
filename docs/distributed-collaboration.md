@@ -36,14 +36,19 @@ Agent. This resumes durable work, not the previous model's complete session.
 ## Setup
 
 1. Run a current AXCrew server and open the desktop **Distributed** sidebar page.
-2. Add an AX instance with a stable Host ID, approved capabilities, project IDs,
-   resource capacity, concurrency and delegation policy. Instances on the same
-   physical Host must reuse its Host ID.
+2. Add an AX instance with a stable Host ID, name, project mapping, concurrency
+   and delegation policy. No CPU/GPU/RAM or Skill/MCP/Tool/model fields are needed
+   at enrollment. Instances on the same physical Host must reuse its Host ID.
 3. Download `worker.json`. Map the same logical project ID to each machine's
    local source directory, such as `D:\AX`, `/srv/AX` or `/workspace/AX`.
 4. Check local model credentials, enabled capabilities, paths and permissions,
    then run `ax crew worker worker.json` on that Host.
-5. Create a task through the management page or distributed API. AXCrew selects
+5. After connection, inspect automatically detected hardware under **Hosts**.
+   Use **AX instances → Configure capabilities** to add roles, Skill/MCP/Tool
+   names, a model and other settings. Merge the downloaded settings into the
+   existing local worker config, install/enable local dependencies and restart.
+   The page shows pending configuration until AX reports matching capabilities.
+6. Create a task through the management page or distributed API. AXCrew selects
    an eligible AX and reserves resources across all AX instances on its Host.
 
 Example configuration (replace the credential and IDs from enrollment):
@@ -71,8 +76,13 @@ must be outside project sources. `ax_home` is optional; use separate homes for
 independent instance memory/configuration. Optional `skills_dir` and `mcp_config`
 select local configuration files. Advertised models must match the explicit
 model setting; advertised Skill/MCP names must be enabled in worker settings.
-Concurrency and project mappings must match enrollment. Capabilities are admin
-declarations, not automatic host discovery or a proof that local services work.
+Concurrency and project mappings must match enrollment. Optional `roles`, `tools`
+and `environments` select capability metadata. Tools must name AX built-ins; MCP
+servers use the separate MCP selection. Default tools advertise built-ins and the
+default environment is the OS name. Explicit Skill/MCP selections and a configured
+model are reported by the worker, without copying model credentials or memory.
+These selections are declarations of enabled configuration, not a health check
+of every Skill/MCP service. Pending admin settings are checked during worker startup.
 
 Remote connections require HTTPS with a valid certificate; plain HTTP is allowed
 only for localhost/loopback. The worker initiates outbound connections and needs
@@ -84,6 +94,25 @@ For autonomous mutations, explicitly preauthorize the local `allow` profile;
 existing workspace sandbox and policy rules still apply. Cluster capabilities
 never override local permissions. A stalled user interaction is reported as
 failed work rather than a successful distributed result.
+
+## Automatic Host inventory
+
+Only `ax crew worker` starts inventory detection. A background native probe has a
+10-second deadline and refreshes every 60 seconds, independently of the five-second
+lease heartbeat. Failed heartbeat delivery retries the detected inventory.
+Windows uses CIM for logical CPU count, physical RAM and PCI video controllers;
+Linux reads `/proc` and PCI display devices in `/sys`; macOS uses `sysctl` and
+`system_profiler`. The worker reports hostname, OS/architecture, CPU name/count,
+RAM MiB, GPU count/names and probe errors. AXCrew timestamps accepted reports and
+persists one shared capacity per Host, regardless of the number of AX instances.
+
+Unknown RAM/GPU are reported as null, displayed as unknown, and reserve zero
+available capacity for tasks requesting those resources. Unknown GPU does not
+mean that no GPUs exist. GPU inventory includes integrated and discrete adapters;
+it is not a count of CUDA devices. CPU count is logical, not physical core count.
+Inventory and online status are separate: offline Hosts retain their last detected
+configuration and timestamp. These figures are hardware capacity, not utilization,
+OS quotas or GPU isolation. Normal single-machine AX startup is unaffected.
 
 ## Collaboration Tool
 

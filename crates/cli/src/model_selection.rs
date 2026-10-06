@@ -457,7 +457,7 @@ fn apply_cli_overrides(selection: &mut ModelSelection, cli: &Cli) -> Result<()> 
     if let Some(value) = cli.reasoning_effort.as_deref() {
         let effort = ReasoningEffort::parse(value).ok_or_else(|| {
             anyhow!(
-                "invalid --reasoning-effort '{value}' (expected low, medium, high, xhigh or max)"
+                "invalid --reasoning-effort '{value}' (expected none, minimal, low, medium, high, xhigh, max or ultra)"
             )
         })?;
         selection.reasoning_effort = Some(effort);

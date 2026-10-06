@@ -27,3 +27,13 @@ ACP attempt from durable inputs and checkpoints; it does not restore every local
 execution detail. At-least-once work needs idempotent external effects. SQLite
 provides a single control-plane authority; replicated consensus and object storage
 are future deployment extensions, not current guarantees.
+
+## Connected instance configuration and inventory
+
+Enrollment establishes identity and workspace policy first. Host hardware is
+reported by the outbound worker through native probes with a bounded background
+deadline, keeping lease renewal independent of slow inventory. AXCrew maintains
+one shared Host capacity, unknown detection fields and the last accepted report
+time. Connected instance settings are staged separately from worker-reported
+active capabilities; local configuration, dependency installation and permissions
+remain in AX. No complete agent state or local credentials are replicated.

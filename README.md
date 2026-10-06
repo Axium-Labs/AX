@@ -249,4 +249,10 @@ See `benchmark/README.md` for the fixed three-task AX vs Codex runner, isolation
 
 ## Optional distributed collaboration
 
-AXCrew can schedule durable tasks across independent AX instances using capability and Host resource requirements. AX keeps its existing runtime, local memory and Subagents. Workers exchange selected summaries, Events and Artifacts through persistent Workflow State; a Coordinator Agent need not remain alive. Enroll an instance in AXCrew’s **Distributed** page, download its configuration and run `ax crew worker worker.json`. This is additive functionality in AX 0.3.7 / AXCrew 0.3.3; ordinary AX and the existing device bridge remain available. See [setup and recovery boundaries](docs/distributed-collaboration.md).
+AXCrew can schedule durable tasks across independent AX instances using capability and Host resource requirements. AX keeps its existing runtime, local memory and Subagents. Workers exchange selected summaries, Events and Artifacts through persistent Workflow State; a Coordinator Agent need not remain alive. Enroll an instance in AXCrew’s **Distributed** page, download its configuration and run `ax crew worker worker.json`. AX automatically reports Host CPU/RAM/GPU inventory after connection; configure skills, MCP, tools and models in the connected instance page and apply the generated local settings. This is additive functionality in AX 0.3.8 / AXCrew 0.3.4; ordinary AX and the existing device bridge remain available. See [setup and recovery boundaries](docs/distributed-collaboration.md).
+
+
+AX ACP provides read-only directory discovery for AXCrew local project
+selection. SSH projects run local AX with an SSH tool; remote hosts need no AX. Paired devices advertise registered project roots while keeping the
+existing registered-root execution restriction. See
+[the ACP design note](docs/adr/0004-acp-control-plane.md).

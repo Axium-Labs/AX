@@ -52,6 +52,12 @@ struct WorkerSettings {
     skills: Vec<String>,
     #[serde(default)]
     mcp: Vec<String>,
+    #[serde(default)]
+    roles: Option<Vec<String>>,
+    #[serde(default)]
+    tools: Option<Vec<String>>,
+    #[serde(default)]
+    environments: Option<Vec<String>>,
     #[serde(default = "default_profile")]
     permission_profile: String,
     #[serde(default = "default_sandbox")]
@@ -133,34 +139,35 @@ pub(crate) async fn run(path: &Path) -> Result<()> {
             "unapproved project mapping"
         );
     }
+    let policy =
+        approved["pending_capabilities"]
+            .as_object()
+            .map_or(
+                &approved["capabilities"],
+                |_| &approved["pending_capabilities"],
+            );
     if let Some(model) = &config.model {
         ensure!(
-            approved["capabilities"]["models"]
+            policy["models"]
                 .as_array()
                 .is_none_or(|models| models.is_empty() || models == &vec![json!(model)]),
             "advertised models must match the configured model"
         );
     } else {
         ensure!(
-            approved["capabilities"]["models"]
-                .as_array()
-                .is_none_or(Vec::is_empty),
+            policy["models"].as_array().is_none_or(Vec::is_empty),
             "an advertised model requires an explicit local model setting"
         );
     }
     for (field, selected) in [("skills", &config.skills), ("mcp", &config.mcp)] {
         ensure!(
-            approved["capabilities"][field]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .all(|v| v
-                    .as_str()
-                    .is_some_and(|name| selected.iter().any(|s| s == name))),
+            policy[field].as_array().into_iter().flatten().all(|v| v
+                .as_str()
+                .is_some_and(|name| selected.iter().any(|s| s == name))),
             "advertised {field} must be enabled in worker settings"
         );
     }
-    let profile = approved["capabilities"]["permissions"].as_array();
+    let profile = policy["permissions"].as_array();
     if profile.is_some_and(|ps| {
         ps.iter()
             .any(|p| matches!(p.as_str(), Some("ask" | "allow" | "deny")))
@@ -170,6 +177,32 @@ pub(crate) async fn run(path: &Path) -> Result<()> {
             "local permission profile differs from enrollment"
         );
     }
+    let builtin_tools = [
+        "shell",
+        "filesystem",
+        "find_files",
+        "glob",
+        "patch",
+        "search",
+        "web",
+        "view_image",
+    ];
+    let tools = config
+        .tools
+        .clone()
+        .unwrap_or_else(|| builtin_tools.iter().map(|name| (*name).into()).collect());
+    ensure!(
+        tools
+            .iter()
+            .all(|name| builtin_tools.contains(&name.as_str())),
+        "tools must name available AX built-ins; configure MCP separately"
+    );
+    let capabilities = json!({
+        "roles": config.roles.clone().map_or_else(|| policy["roles"].clone(), |roles| json!(roles)),
+        "skills":config.skills, "mcp":config.mcp, "tools":tools,
+        "models":config.model.iter().collect::<Vec<_>>(), "permissions":[config.permission_profile],
+        "environments":config.environments.clone().unwrap_or_else(||vec![std::env::consts::OS.into()])
+    });
     let incarnation = uuid::Uuid::new_v4().to_string();
     let started = client
         .request(
@@ -189,6 +222,9 @@ pub(crate) async fn run(path: &Path) -> Result<()> {
     let mut running: BTreeMap<String, Running> = BTreeMap::new();
     let mut pending: BTreeMap<String, Value> = BTreeMap::new();
     let mut tick = tokio::time::interval(Duration::from_secs(5));
+    let mut inventory_probe = Some(tokio::spawn(crate::distributed_host::detect()));
+    let mut next_inventory = Instant::now() + Duration::from_secs(60);
+    let mut host_inventory = None;
     loop {
         tokio::select! { _ = tick.tick() => {}, result = tokio::signal::ctrl_c() => { result?; break; } }
         let done: Vec<_> = running
@@ -220,15 +256,26 @@ pub(crate) async fn run(path: &Path) -> Result<()> {
                     .map(|(id, r)| json!({"task_id":id,"generation":r["generation"]})),
             )
             .collect();
+        if inventory_probe
+            .as_ref()
+            .is_some_and(JoinHandle::is_finished)
+        {
+            host_inventory = inventory_probe.take().unwrap().await.ok();
+        }
+        if inventory_probe.is_none() && Instant::now() >= next_inventory {
+            inventory_probe = Some(tokio::spawn(crate::distributed_host::detect()));
+            next_inventory = Instant::now() + Duration::from_secs(60);
+        }
         let response = client
             .request(
                 "POST",
                 "/api/distributed/worker/heartbeat",
-                Some(json!({"incarnation":incarnation,"active":active})),
+                Some(json!({"incarnation":incarnation,"active":active,"host_inventory":host_inventory,"capabilities":capabilities})),
             )
             .await;
         match response {
             Ok(response) => {
+                host_inventory = None;
                 let server_time = response["server_time"]
                     .as_i64()
                     .ok_or_else(|| anyhow!("server time missing"))?;

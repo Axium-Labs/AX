@@ -28,3 +28,18 @@ AX process in each member directory. Cancellation cannot undo completed tool
 side effects; resume marks interrupted calls rather than re-executing them.
 Multiple independent Crew tasks can run in parallel through separate ACP
 processes, while deterministic dependencies remain Crew's responsibility.
+
+
+## Workspace discovery extension
+
+_ax/workspace is read-only: optional cwd selects a canonical existing directory;
+omission starts at user home. Returns cwd, parent and directories of name/path,
+listing directories only. Missing/non-directory paths return invalid params.
+Strict sandbox mode confines canonical cwd, listed destinations (including
+symlinks) and parent to the process workspace. _ax/capabilities.workspace
+advertises the method and read-only property.
+
+Crew heartbeats include registered AX roots under capabilities.workspaces as
+id/name/path. This enables project selection without relaxing the bridge
+requirement that execution opens a registered root. Session cwd matching stays
+unchanged.

@@ -29,6 +29,16 @@ use crate::{
 pub(crate) fn tools(mcp_tools: &[McpToolProxy]) -> ToolRegistry {
     let mut registry = ToolRegistry::new();
     let root = tool_workspace();
+    if std::env::var_os("AX_SSH_CONTEXT").is_some()
+        || std::env::var_os("AX_SSH_CONTEXT_FILE").is_some()
+    {
+        // Remote SSH work must not accidentally mutate a matching local path.
+        if let Ok(Some(ssh)) = tool::SshTool::from_env() {
+            registry.register(ssh);
+        }
+        registry.register(tool::WebTool::new());
+        return registry;
+    }
     // Every local tool is bound to the same workspace root, so the main agent
     // and a forked child differ only by that binding, never by implementation.
     for local in [
@@ -132,6 +142,9 @@ impl Runtime {
         let policy = include_str!("tool_policy.md");
         if !messages.iter().any(|message| message.content == policy) {
             messages.insert(0, Message::system(policy));
+        }
+        if let Some(ssh) = tool::SshTool::from_env()? {
+            messages.insert(0, Message::system(ssh.instructions()));
         }
         let config = AxConfig::load()?;
         let mut kernel = AgentKernel::new(self.provider, self.tools, approval)

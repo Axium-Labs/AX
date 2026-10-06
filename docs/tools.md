@@ -38,6 +38,13 @@ permissions from tool-name strings (e.g. `mcp__`/`::`).
 
 ## Built-in tools
 
+The CLI runtime's shared tool policy asks AX to communicate in the user's language,
+report related tool calls as one work phase, and avoid narrating each routine result.
+Material findings, obstacles, questions and changes of approach can still receive
+progress updates; one coherent final answer completes the request. This guidance
+applies to CLI/TUI and ACP sessions used by AXCrew; it does not discard model prose
+or tool history. AXCrew groups and folds that history in its own presentation layer.
+
 | Tool | Purpose | Capability |
 |---|---|---|
 | `shell` | Run builds, tests, Git operations and command-line workflows | `Shell` / `Process` |
@@ -685,3 +692,26 @@ Coding-harness kernels treat model-declared step subscopes as advisory while
 enforcing the initial workspace boundary. This prevents a guessed nested scope
 from locking recovery; embedded non-harness kernels retain declared scope checks.
 See [coding-harness.md](coding-harness.md).
+
+## SSH execution context
+
+AX_SSH_CONTEXT_FILE points to a JSON manifest supplied by AXCrew to local AX.
+This avoids command-line/environment length limits for large SSH catalogues.
+AX_SSH_CONTEXT can alternatively contain the JSON directly. Both formats carry
+hosts (id, name, host, optional port/identity_file), default_host and remote cwd.
+Malformed contexts fail rather than falling back to local file execution.
+The remote runtime exposes ssh and web instead of local shell/filesystem/patch
+tools. Model credentials and inference remain local; no remote AX is required.
+
+ssh action=list returns host IDs/names/endpoints without key-file paths.
+ssh action=exec takes command, optional host_id/cwd/timeout_seconds. The selected
+host/cwd are defaults; another host defaults to its login directory. Commands
+travel as stdin to a fixed OpenSSH remote sh process, never through a local
+shell. Result contains host_id, cwd, exit_code, stdout and stderr. Commands require
+Shell approval; read-only/no-network profiles deny them, and domain-rule
+profiles fail closed because SSH cannot enforce URL-level filtering.
+
+There is no configured SSH host count limit or independent-host tool pool cap.
+Per-host resources serialize conflicting effects in one turn; separate hosts
+can run concurrently. Timeouts kill the local SSH process; remote process cleanup
+still depends on the remote SSH server/shell's disconnect handling.

@@ -377,7 +377,8 @@ pub(crate) fn migrate_memory_index(connection: &rusqlite::Connection) -> Result<
     if ready {
         return Ok(());
     }
-    let tx = connection.unchecked_transaction()?;
+    let tx =
+        rusqlite::Transaction::new_unchecked(connection, rusqlite::TransactionBehavior::Immediate)?;
     let had_type: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info('scoped_memories') WHERE name='memory_type')", [], |row| row.get(0))?;
     for (column, definition) in [
         (

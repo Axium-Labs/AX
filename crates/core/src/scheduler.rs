@@ -302,10 +302,19 @@ where
         FuturesUnordered::new();
     loop {
         for index in 0..jobs.len() {
-            if running.len() >= concurrency.max(1) {
-                break;
-            }
             let job = &jobs[index];
+            let independent = |i: usize| {
+                jobs[i]
+                    .tool
+                    .as_ref()
+                    .is_some_and(|tool| tool.independent_remote_execution())
+            };
+            let bounded_active = (0..jobs.len())
+                .filter(|i| started[*i] && outputs[*i].is_none() && !independent(*i))
+                .count();
+            if !independent(index) && bounded_active >= concurrency.max(1) {
+                continue;
+            }
             if started[index]
                 || !job
                     .dependencies

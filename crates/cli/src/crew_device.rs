@@ -214,7 +214,7 @@ async fn connected(url: &str, device_id: &str, key: &SigningKey) -> Result<()> {
     let mut heartbeat = tokio::time::interval(std::time::Duration::from_secs(5));
     loop {
         let value = tokio::select! {
-            _=heartbeat.tick()=>{out.send(json!({"type":"heartbeat","protocol_version":1,"ax_version":env!("CARGO_PKG_VERSION"),"capabilities":{"acp":true,"sessions":true,"resume":true,"cancel":true,"permissions":true}})).ok();continue;}
+            _=heartbeat.tick()=>{out.send(json!({"type":"heartbeat","protocol_version":1,"ax_version":env!("CARGO_PKG_VERSION"),"capabilities":{"workspaces":crate::session_projects::list().unwrap_or_default().iter().map(|p|json!({"id":p.id,"name":p.root.file_name().map(|n|n.to_string_lossy()),"path":p.root})).collect::<Vec<_>>(),"acp":true,"sessions":true,"resume":true,"cancel":true,"permissions":true}})).ok();continue;}
             msg=source.next()=>{let Some(msg)=msg else{break};let msg=msg?;if let Message::Text(text)=msg{serde_json::from_str::<Value>(&text)?}else{continue}}
         };
         let Some(run_id) = value["run_id"].as_str().map(str::to_owned) else {

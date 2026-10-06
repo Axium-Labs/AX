@@ -30,3 +30,7 @@ path = "../../test/providers/native.rs"
 
 [lints]
 workspace = true
+
+[[test]]
+name = "reasoning_catalogue"
+path = "../../test/providers/reasoning_catalogue.rs"

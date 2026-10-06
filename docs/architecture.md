@@ -532,3 +532,19 @@ and [ADR 0020](adr/0020-native-model-providers.md).
 ## Optional Distributed Collaboration
 
 The CLI composition root conditionally registers the `collaboration` Tool only when worker environment bindings are present. `distributed_client`, `distributed_tool` and `distributed_worker` provide scoped REST, Tool adaptation and per-lease ACP execution. Core reasoning, Subagents, Tasks, Sessions, Memory, Skills and MCP are unchanged. `ax crew worker` is separate from the existing device bridge. See [distributed-collaboration.md](distributed-collaboration.md) and [ADR 0021](adr/0021-durable-distributed-collaboration.md).
+
+
+### Crew workspace discovery
+
+The CLI ACP adapter delegates read-only directory discovery to acp_workspace.rs
+with canonical paths and strict-sandbox boundaries. crew_device.rs publishes
+registered project roots in heartbeat capabilities. Crew/SSH clients select
+host directories without reading gateway-local paths or changing session cwd.
+
+SSH contexts select a separate runtime tool set (ssh and web, with normal
+runtime-owned readers). Local AX drives remote POSIX shell commands and keeps
+inference/history locally. Remote source cwd is metadata, separate from the
+process workspace. The SSH tool declares remote-host resources, permission
+requirements and an exemption from the fixed local tool pool; same-host
+dependencies and approvals remain enforced. Parallel ACP startup uses immediate
+SQLite migration transactions and locked atomic project-registry writes.

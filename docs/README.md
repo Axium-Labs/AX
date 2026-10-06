@@ -13,6 +13,7 @@ design decisions that shaped the code are recorded as ADRs in
 | [agent-loop.md](agent-loop.md) | Continuation state, direct streaming completion and optional Stop Guards |
 | [architecture.md](architecture.md) | System architecture: crate responsibilities, agent loop, cold-start path |
 | [distributed-collaboration.md](distributed-collaboration.md) | Optional durable cross-Host Tasks, Events, Artifacts, Workflow State and AX worker |
+| [release-notes/0.3.8.md](release-notes/0.3.8.md) | AX 0.3.8 remote SSH execution and provider reasoning effort |
 | [acp-crew.md](acp-crew.md) | ACP adapter and AX Crew device bridge |
 | [memory.md](memory.md) | Memory: scopes, project identity, retrieval, persistence |
 | [context.md](context.md) | Context budgeting, compression, session resume |

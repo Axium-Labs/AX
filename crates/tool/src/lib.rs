@@ -31,6 +31,8 @@ mod permission;
 mod resources;
 pub use resources::{Resource, ResourceAccess};
 mod shell;
+pub mod ssh;
+pub use ssh::{SshContext, SshHost, SshTool};
 pub mod telemetry;
 pub use permission::{
     Capability, PermissionDecision, PermissionProfile, PermissionRule, PermissionStore,
@@ -106,6 +108,11 @@ pub trait Tool: Send + Sync {
         None
     }
     /// Explicit runtime placement; unbound extensions cannot run in confinement.
+    /// Remote channels may opt out of the fixed local tool concurrency budget.
+    /// Resource dependencies and permissions continue to apply.
+    fn independent_remote_execution(&self) -> bool {
+        false
+    }
     fn execution_boundary(&self) -> ExecutionBoundary {
         ExecutionBoundary::Unbound
     }

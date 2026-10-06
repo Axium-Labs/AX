@@ -5,6 +5,7 @@
 //! state lives in [`repl`], and runtime assembly lives in [`runtime`].
 
 mod acp;
+mod acp_workspace;
 mod app;
 mod args;
 mod auth_login;
@@ -18,6 +19,7 @@ mod commands;
 mod config;
 mod crew_device;
 mod distributed_client;
+mod distributed_host;
 mod distributed_tool;
 mod distributed_worker;
 #[cfg(test)]

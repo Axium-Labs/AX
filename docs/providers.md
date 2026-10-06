@@ -158,6 +158,14 @@ plus a per-provider refresh cache (`models/<provider>.json`). The cache avoids
 API requests on every startup; refresh falls back to the cache after a 15s
 timeout.
 
+Reasoning capabilities are model-specific: `_ax/models` publishes only the model's
+`reasoning_efforts` and `default_reasoning_effort`. Protocol values `none`,
+`minimal`, `low`, `medium`, `high`, `xhigh`, `max` and `ultra` are preserved through
+catalogue serialization, CLI parsing and request serialization. `minimal` is no
+longer normalized to `low`, nor `ultra` to `max`. This does not add these levels
+to models that do not advertise them. Crew's combined model/effort panel consumes
+the catalogue subset; absent capabilities do not produce invented UI choices.
+
 ## Model selection
 
 - **`/model`** — choose a configured provider model and, where supported, its

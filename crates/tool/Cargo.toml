@@ -42,3 +42,7 @@ pedantic = "warn"
 [[test]]
 name = "search_router"
 path = "../../test/web/search_router.rs"
+
+[[test]]
+name = "ssh"
+path = "../../test/ssh.rs"

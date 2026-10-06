@@ -27,13 +27,22 @@ pub fn list() -> Result<Vec<ProjectLocation>> {
 }
 
 pub fn register(project: ProjectLocation) -> Result<()> {
-    let mut projects = list()?;
-    projects.retain(|existing| existing.id != project.id);
-    projects.insert(0, project);
     let path = path();
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-    fs::write(path, serde_json::to_vec_pretty(&projects)?)?;
+    let lock = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(path.with_extension("lock"))?;
+    fs2::FileExt::lock_exclusive(&lock)?;
+    let mut projects = list()?;
+    projects.retain(|existing| existing.id != project.id);
+    projects.insert(0, project);
+    let stage = path.with_extension(format!("{}.tmp", uuid::Uuid::new_v4()));
+    fs::write(&stage, serde_json::to_vec_pretty(&projects)?)?;
+    fs::rename(stage, path)?;
     Ok(())
 }

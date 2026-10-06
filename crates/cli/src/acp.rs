@@ -690,6 +690,14 @@ pub async fn run(cli: &Cli, data_dir: PathBuf, skills_dir: PathBuf) -> Result<()
                     }),
                 );
             }
+            "_ax/workspace" => {
+                let boundary =
+                    (cli.sandbox == Some(sandbox::SandboxMode::Strict)).then_some(cwd.as_path());
+                match crate::acp_workspace::listing(params, boundary) {
+                    Ok(value) => reply(&out, id, value),
+                    Err(err) => error(&out, id, -32602, err.to_string()),
+                }
+            }
             "session/delete" => {
                 let session_id = params["sessionId"].as_str().unwrap_or("");
                 if uuid::Uuid::parse_str(session_id).is_err() || active.lock().unwrap().is_some() {
@@ -1062,6 +1070,7 @@ pub async fn run(cli: &Cli, data_dir: PathBuf, skills_dir: PathBuf) -> Result<()
                     "cancel":"abort_turn",
                     "goals":{"promptMetadata":"_meta.axGoal","actions":["new","start","resume","cancel"]},
                     "permissions":true,
+                    "workspace":{"method":"_ax/workspace","readOnly":true},
                     "providers":{
                         "supported": model::PROVIDERS.iter()
                             .filter(|spec| model::provider_supported(spec.id))

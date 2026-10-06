@@ -91,6 +91,33 @@ fn linux_path(path: &std::ffi::OsStr) -> Result<String> {
         .to_owned())
 }
 
+#[cfg(windows)]
+fn ssh_context_for_wsl() -> Result<Option<std::path::PathBuf>> {
+    if tool::SshTool::from_env()?.is_none() {
+        return Ok(None);
+    }
+    let raw = if let Some(path) = std::env::var_os("AX_SSH_CONTEXT_FILE") {
+        std::fs::read_to_string(path)?
+    } else {
+        std::env::var("AX_SSH_CONTEXT")?
+    };
+    let mut context: serde_json::Value = serde_json::from_str(&raw)?;
+    for host in context["hosts"].as_array_mut().into_iter().flatten() {
+        if let Some(path) = host["identity_file"]
+            .as_str()
+            .filter(|p| std::path::Path::new(p).is_absolute())
+        {
+            host["identity_file"] =
+                serde_json::Value::String(linux_path(std::ffi::OsStr::new(path))?);
+        }
+    }
+    let directory = crate::config::ax_home().join("ssh-contexts");
+    std::fs::create_dir_all(&directory)?;
+    let path = directory.join(format!("{}-wsl.json", uuid::Uuid::new_v4()));
+    std::fs::write(&path, context.to_string())?;
+    Ok(Some(path))
+}
+
 #[cfg_attr(
     not(windows),
     allow(
@@ -153,25 +180,27 @@ pub(crate) fn launch(cli: &crate::args::Cli) -> Result<Option<i32>> {
         }
         let acp = matches!(cli.command, Some(crate::args::Command::Acp));
         let mut command = wsl_command();
+        command.args(["--cd", &cwd, "--exec", "env", &format!("AX_HOME={home}")]);
+        let ssh_manifest = ssh_context_for_wsl()?;
+        if let Some(path) = &ssh_manifest {
+            command.arg(format!(
+                "AX_SSH_CONTEXT_FILE={}",
+                linux_path(path.as_os_str())?
+            ));
+        }
         command
-            .args([
-                "--cd",
-                &cwd,
-                "--exec",
-                "env",
-                &format!("AX_HOME={home}"),
-                "sh",
-                "-lc",
-                "exec \"$HOME/.local/bin/ax\" \"$@\"",
-                "ax",
-            ])
+            .args(["sh", "-lc", "exec \"$HOME/.local/bin/ax\" \"$@\"", "ax"])
             .args(args);
         if acp {
             command.stdin(Stdio::piped());
         }
         let mut child = command.spawn()?;
         forward_acp(child.stdin.take());
-        Ok(Some(child.wait()?.code().unwrap_or(1)))
+        let code = child.wait()?.code().unwrap_or(1);
+        if let Some(path) = ssh_manifest {
+            let _ = std::fs::remove_file(path);
+        }
+        Ok(Some(code))
     }
     #[cfg(not(windows))]
     {

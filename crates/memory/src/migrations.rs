@@ -25,7 +25,10 @@ pub(crate) fn apply(connection: &Connection) -> Result<(), MemoryError> {
         ));
     }
     connection.pragma_update(None, "foreign_keys", "ON")?;
-    let tx = connection.unchecked_transaction()?;
+    // Reserve the writer before reading migration metadata; concurrent ACP
+    // processes must not attempt to upgrade an obsolete WAL read snapshot.
+    let tx =
+        rusqlite::Transaction::new_unchecked(connection, rusqlite::TransactionBehavior::Immediate)?;
     tx.execute_batch(schema::BASE)?;
     ensure_column(
         &tx,
