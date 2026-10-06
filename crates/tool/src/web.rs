@@ -614,6 +614,14 @@ impl Tool for WebTool {
          independent page fetches into one call. Results are deduplicated by URL and partial \
          failures do not cancel successful results. If search fails, report provider errors and prefer fixing configuration or retrying later. Do not automatically bypass search providers with shell/Python scraping. User-requested alternative search or network diagnostics are allowed subject to tool permissions. Use fetch for known URLs."
     }
+    fn guidance(&self) -> Option<&'static str> {
+        Some(
+            "web: batch independent queries into one search and independent known URLs into one \
+             fetch; both run concurrently and deduplicate by URL. When search returns usable \
+             sources, answer from them rather than scraping around the provider. Use fetch only for \
+             URLs you already have.",
+        )
+    }
     fn input_schema(&self) -> Value {
         json!({
             "type": "object",

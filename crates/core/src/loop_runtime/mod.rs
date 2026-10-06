@@ -98,6 +98,7 @@ impl AgentKernel {
         self.raw_turn_messages.clear();
         self.continuation = crate::TurnState::default();
         self.guard_model_requests = 0;
+        self.repeat_calls.reset();
         self.prepare_environment().await?;
         self.touch_progress();
         // The controller turn timeout is an *idle* timeout. A turn that delegates work

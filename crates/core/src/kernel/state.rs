@@ -56,6 +56,8 @@ pub struct AgentKernel {
     pub(crate) subagent_config: SubagentConfig,
     pub(crate) agent_templates: Vec<AgentTemplate>,
     pub(crate) subagent_manager: Option<Arc<SubagentManager>>,
+    /// Advisory loop hygiene: consecutive identical tool calls for this turn.
+    pub(crate) repeat_calls: crate::loop_hygiene::RepeatCallChain,
     pub(crate) execution: Arc<std::sync::Mutex<ExecutionState>>,
     pub(crate) execution_root: Option<PathBuf>,
     /// Last time this kernel made observable progress. The turn timeout is an

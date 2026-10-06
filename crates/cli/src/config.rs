@@ -27,6 +27,28 @@ pub(crate) fn ax_home() -> PathBuf {
 }
 
 #[cfg(test)]
+mod harness_config_tests {
+    use super::*;
+
+    #[test]
+    fn harness_is_off_by_default_and_explicitly_opt_in() {
+        // Absent or empty config means neutral: the coding harness is off.
+        assert!(!AxConfig::default().harness.enabled);
+        assert!(!serde_json::from_str::<AxConfig>("{}").unwrap().harness.enabled);
+        // Only an explicit user setting turns it on.
+        let config: AxConfig =
+            serde_json::from_str(r#"{"harness":{"enabled":true}}"#).unwrap();
+        assert!(config.harness.enabled);
+        // A disabled harness is omitted from persisted config, so the default
+        // file stays clean.
+        let encoded = serde_json::to_string(&AxConfig::default()).unwrap();
+        assert!(!encoded.contains("harness"));
+        // Unknown keys inside the section fail loudly rather than silently.
+        assert!(serde_json::from_str::<AxConfig>(r#"{"harness":{"enabled":true,"auto":true}}"#).is_err());
+    }
+}
+
+#[cfg(test)]
 mod subagent_tests {
     use super::*;
 
@@ -98,12 +120,37 @@ pub struct AxConfig {
     pub sandbox: sandbox::SandboxMode,
     #[serde(default)]
     pub subagent: runtime_core::SubagentConfig,
+    #[serde(default, skip_serializing_if = "HarnessConfig::is_disabled")]
+    pub harness: HarnessConfig,
     #[serde(default)]
     pub execution: ExecutionConfig,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<ModelConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inference: Option<InferenceConfig>,
+}
+
+/// Explicit, user-selected coding execution mode.
+///
+/// This is the only production opt-in for the coding harness, and it must come
+/// from user intent (this config field). It is never derived from environment
+/// heuristics — a `Cargo.toml`, a source-file count, a detected language or a
+/// shell call are not reasons to enable it. See
+/// `runtime_core::AgentKernel::with_coding_harness`.
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct HarnessConfig {
+    /// Enable the coding execution harness. Default `false`: AX is neutral.
+    pub enabled: bool,
+}
+
+impl HarnessConfig {
+    /// `serde(skip_serializing_if)` requires a `fn(&Self) -> bool`, so the
+    /// reference signature is forced even though the type is `Copy`.
+    #[allow(clippy::trivially_copy_pass_by_ref)]
+    fn is_disabled(&self) -> bool {
+        !self.enabled
+    }
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]

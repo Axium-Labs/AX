@@ -43,6 +43,15 @@ impl Tool for FilesystemTool {
         "Read, list or write a known path. `read` accepts a 1-based start_line/end_line range when sufficient; omit the range for full file context. `list` shows exactly one directory level and is not a discovery tool: prefer find_files/glob for unknown locations and search for text or symbols. After discovery, prefer direct reads for context; targeted searches within known files remain useful. Batch independent reads when possible. Prefer patch for localized edits; write creates or replaces a whole file and is appropriate for requested full-file rewrites or generated artifacts. Inspect existing content before replacing it; writes require approval."
     }
 
+    fn guidance(&self) -> Option<&'static str> {
+        Some(
+            "filesystem: read only the smallest sufficient 1-based line range; omit the range only \
+             when the whole file is genuinely needed. `list` returns one directory level and is not \
+             a discovery tool. Batch independent reads of already-known paths into one call rather \
+             than alternating read -> model -> read.",
+        )
+    }
+
     fn input_schema(&self) -> Value {
         json!({
             "type": "object",

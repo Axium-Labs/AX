@@ -20,6 +20,9 @@ pub struct EnvironmentContext {
     pub cwd: PathBuf,
     pub workspace_root: PathBuf,
     pub path_separator: char,
+    /// Executable path/version probes. Empty (and omitted) in the lightweight
+    /// context, which never spawns a probe process.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub executables: BTreeMap<String, Executable>,
     pub network_policy: &'static str,
     pub sandbox: String,
@@ -27,6 +30,21 @@ pub struct EnvironmentContext {
 }
 
 impl EnvironmentContext {
+    /// Bounded runtime context: cwd, workspace root, sandbox/network posture and
+    /// the shell contract, without executable version probes.
+    ///
+    /// This is cheap and safe to inject on every run, including a direct answer:
+    /// it describes the environment so the model can use it when the request
+    /// needs it. It does not ask the model to inspect or change anything, so its
+    /// presence never triggers an action.
+    #[must_use]
+    pub fn light(cwd: &Path, root: &Path) -> Self {
+        Self::base(cwd, root, BTreeMap::new())
+    }
+
+    /// Full runtime context including cached executable path/version probes.
+    /// Probing spawns one short-lived process per known executable, so it is
+    /// reserved for callers that actually need process capabilities.
     #[must_use]
     pub fn detect(cwd: &Path, root: &Path) -> Self {
         static CAPABILITIES: OnceLock<BTreeMap<String, Executable>> = OnceLock::new();
@@ -44,6 +62,10 @@ impl EnvironmentContext {
                 .collect()
             })
             .clone();
+        Self::base(cwd, root, executables)
+    }
+
+    fn base(cwd: &Path, root: &Path, executables: BTreeMap<String, Executable>) -> Self {
         Self {
             os: std::env::consts::OS,
             shell: if cfg!(windows) {

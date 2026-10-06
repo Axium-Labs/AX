@@ -37,6 +37,14 @@ impl Tool for PatchTool {
     fn description(&self) -> &'static str {
         "Apply an atomic structured multi-hunk patch. Each edit addresses original 1-based start_line and delete_count (0 inserts), with optional expected_lines to detect stale context. Read enough relevant context before editing, including surrounding functions or callers when needed. All hunks validate before writing."
     }
+    fn guidance(&self) -> Option<&'static str> {
+        Some(
+            "patch: edit existing files with structured hunks rather than scripts that rewrite \
+             files or unique-string replacements. Group independent hunks of one file into a single \
+             atomic patch. Read enough surrounding context first so line coordinates and \
+             expected_lines are accurate.",
+        )
+    }
     fn input_schema(&self) -> Value {
         json!({"type":"object","properties":{"path":{"type":"string"},"edits":{"type":"array","minItems":1,"maxItems":128,"items":{"type":"object","properties":{"start_line":{"type":"integer","minimum":1},"delete_count":{"type":"integer","minimum":0},"expected_lines":{"type":"array","items":{"type":"string"}},"new_text":{"type":"string"}},"required":["start_line","delete_count","new_text"],"additionalProperties":false}}},"required":["path","edits"],"additionalProperties":false})
     }

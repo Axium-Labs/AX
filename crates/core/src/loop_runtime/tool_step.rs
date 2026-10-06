@@ -391,6 +391,22 @@ impl AgentKernel {
             }
         }
         self.messages.extend(results);
+        // Advisory loop hygiene: after the round, nudge the model if it keeps
+        // issuing the same call with identical arguments. The calls already ran;
+        // this only enriches the next request and never blocks.
+        for call in &tool_calls {
+            if let Some(reminder) = self
+                .repeat_calls
+                .observe(&call.function.name, &call.function.arguments)
+            {
+                let message = Message::system(format!(
+                    "[ax-loop-hygiene]\n{}",
+                    reminder.text(&call.function.name)
+                ));
+                self.messages.push(message.clone());
+                self.raw_turn_messages.push(message);
+            }
+        }
         self.checkpoint_queue(checkpoint)?;
         Ok(ToolStep::Continue)
     }

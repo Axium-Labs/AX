@@ -633,8 +633,11 @@ async fn compresses_between_tool_calls_and_preserves_raw_turn() {
     );
     let sizes = provider.request_tokens.lock().unwrap().clone();
     assert_eq!(sizes.len(), 3);
+    // The second request sees the large test output compressed. The bound is
+    // well below the raw tool output (~20k chars) and above the neutral runtime
+    // prompt baseline every request now carries.
     assert!(
-        sizes[1] < 1000,
+        sizes[1] < 2000,
         "second request should see reduced test output: {sizes:?}"
     );
     assert!(

@@ -161,6 +161,13 @@ impl Tool for SshTool {
     fn description(&self) -> &'static str {
         "Run remote shell commands through local OpenSSH, or list configured hosts. AX and model inference stay local. Use commands such as cat, find, git, or scripts to work on remote files."
     }
+    fn guidance(&self) -> Option<&'static str> {
+        Some(
+            "ssh: use `list` first when the host id is unknown, then `exec` with a remote POSIX \
+             command. Remote work must not assume local paths: bind cwd explicitly and never touch a \
+             matching local path by accident.",
+        )
+    }
     fn input_schema(&self) -> Value {
         json!({"type":"object","properties":{"action":{"type":"string","enum":["list","exec"]},"host_id":{"type":"string","description":"Configured ID from list; omitted uses selected host"},"command":{"type":"string","description":"Remote POSIX shell command"},"cwd":{"type":"string","description":"Remote working directory; selected host default applies only to that host"},"timeout_seconds":{"type":"integer","minimum":1}},"required":["action"],"additionalProperties":false})
     }

@@ -1,16 +1,28 @@
 # Coding execution harness
 
-AX enables the coding harness at the shared CLI runtime composition boundary. CLI
-`run`, REPL/TUI prompts, ACP `session/prompt` and Crew's ACP bridge use
-`configure_controller` and the same `AgentKernel`, `AgentSupervisor`, tool registry,
-`LocalChildHost`, execution budgets and checkpoint path. Embedded core consumers
-opt in with `with_coding_harness()`; mock/other consumers retain their existing
-policy unless enabled.
+The coding harness is an **explicit opt-in**, not the default runtime. A plain
+AX run is neutral: the user request defines the task and the runtime stops when
+the request is satisfied. See [agent-runtime.md](agent-runtime.md) for the
+neutral principle and the trigger conditions.
+
+The harness is enabled with `AgentKernel::with_coding_harness()`. In the CLI
+composition root the explicit user switch is the `harness.enabled` config field
+(`~/.ax/config.json` → `{"harness":{"enabled":true}}`); embedders and tests opt
+in by calling the builder method directly. The default CLI/TUI/ACP/Crew
+composition and every child no longer enable it. The opt-in must originate from
+explicit user intent and never from environment detection (`Cargo.toml`, source
+counts, detected languages, shell usage). When enabled, the harness adds the full
+environment snapshot (with executable probes), an advisory step scope, the coding
+policy (`[ax-coding-harness]`) and the per-goal queue behaviour on top of the
+neutral runtime. The same `AgentKernel`, tool registry, `LocalChildHost`,
+execution budgets and checkpoint path are reused; nothing about coding capability
+changes.
 
 ## Policy and completion
 
-The system policy directs execution until requested deliverables are completed,
-failed with evidence, or suspended for a user-exclusive decision. Missing runners,
+In harness mode, the coding policy `[ax-coding-harness]` directs execution until
+requested deliverables are completed, failed with evidence, or suspended for a
+user-exclusive decision. Missing runners,
 venvs, optional packages, pytest, uncloned repositories and no-match searches are
 recoverable setup observations. Try installation, creation or fallback, record
 local failures and continue independent work. Discover concrete items before

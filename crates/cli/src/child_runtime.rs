@@ -28,7 +28,6 @@ pub(crate) fn configure_controller(state: &mut crate::repl::ReplState) -> anyhow
     let runtime = state.runtime.take().expect("runtime initialized");
     state.runtime = Some(
         runtime
-            .with_coding_harness()
             .with_execution_scope(state.project_root.clone())
             .with_execution_budget(state.execution_budget)
             .with_child_host(host)

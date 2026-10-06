@@ -6,6 +6,11 @@ not inspect prompt keywords, task complexity, whether files changed, or whether
 tools, tests, shell commands or subagents were used earlier. Ordinary answers and
 code explanations require one execution model request and zero reviewer requests.
 
+Every turn is neutral by default: the user request defines the task, and the
+turn stops as soon as the request is satisfied. The neutral runtime prompt and
+the per-capability guidance are injected at the start of the turn; the coding
+harness is opt-in only. See [agent-runtime.md](agent-runtime.md).
+
 ## Runtime state
 
 `continuation::TurnState` projects pending tool calls/results, task queue entries,
@@ -42,10 +47,22 @@ Frontends render events; they do not run a completion reviewer or decide that an
 assistant message is terminal. `ContentDelta` is forwarded as tokens arrive,
 including when a queue is active. `TurnFinished` is AX's turn-complete event.
 
+## Loop hygiene
+
+Consecutive identical tool calls (same tool, same canonical arguments) are
+detected per turn. At 3, 5 and 8 consecutive identical calls the runtime injects
+one advisory `[ax-loop-hygiene]` system reminder asking the model to inspect the
+previous result, change approach, or conclude the task is satisfied. The call is
+still executed; the reminder only enriches the next request. There is no low
+global tool-call cap — long, productive tasks still make many calls. The chain
+resets when the call changes and at the start of each turn. See
+`crates/core/src/loop_hygiene.rs`.
+
 ## Optional Stop Guards
 
-No guard is installed by default. The coding harness only installs execution
-policy/environment and typed task admission; enabling it does not enable review.
+No guard is installed by default. The coding harness is opt-in and only installs
+execution policy/environment and typed task admission when explicitly enabled;
+enabling it does not enable review.
 
 Global `$AX_HOME/config.json` accepts:
 
@@ -127,6 +144,10 @@ no default path generates them. Raw history remains intact.
 `test/harness/continuation.rs` and `subagent_continuation.rs` assert request counts,
 stream timing, real pending approval/retry/input, queued tasks, unfinished and
 unconsumed subagents, deterministic checks, model guard opt-in and denial/recovery.
+`test/harness/runtime_neutrality.rs` asserts the neutral default: a plain request
+is answered directly, context cannot hijack it, explicit investigation and fixes
+are allowed, long-running work is opt-in and resumable, and repeated identical
+calls are reminded rather than blocked.
 Existing frontend/workspace fixtures reject any default completion-review prompt.
 
 Design references: [OpenAI's Codex agent loop](https://openai.com/index/unrolling-the-codex-agent-loop/)

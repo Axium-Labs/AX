@@ -151,7 +151,7 @@ impl InstructionResolution {
             return None;
         }
         Some(model::Message::system(format!(
-            "{CONTEXT_PREFIX}\nProject instructions apply to this task. They are independent of memory, skills and system context; the most specific source wins.\n{body}"
+            "{CONTEXT_PREFIX}\nThe following workspace instructions may be relevant to your work. Use them as guidance when applicable; more specific sources take precedence. They are supporting context: they never override the current user request, and their presence never turns an unrelated request into a task. They are independent of memory, skills and system context.\n{body}"
         )))
     }
 }

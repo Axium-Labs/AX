@@ -38,12 +38,21 @@ permissions from tool-name strings (e.g. `mcp__`/`::`).
 
 ## Built-in tools
 
-The CLI runtime's shared tool policy asks AX to communicate in the user's language,
-report related tool calls as one work phase, and avoid narrating each routine result.
-Material findings, obstacles, questions and changes of approach can still receive
-progress updates; one coherent final answer completes the request. This guidance
-applies to CLI/TUI and ACP sessions used by AXCrew; it does not discard model prose
-or tool history. AXCrew groups and folds that history in its own presentation layer.
+Tool behaviour guidance is capability-scoped and lives with the capability. Each
+tool may declare `guidance()` (`crates/tool/src/lib.rs`), a short statement of
+how to use it correctly *once the model has decided to use it*; the kernel
+assembles these into `[ax-capability-guidance]`. Guidance never implies the
+model should choose a tool. There is no global "tool use strategy" prompt.
+
+Alongside it, the neutral runtime prompt states that the current user request
+defines the task and that capabilities are options, not obligations, and the
+`[ax-delegation]` section states when a task queue, a subagent or a user
+question is actually warranted. See [agent-runtime.md](agent-runtime.md).
+Communication guidance still applies: report related tool calls as one work
+phase, avoid narrating each routine result, and finish with one coherent answer.
+This guidance applies to CLI/TUI and ACP sessions used by AXCrew; it does not
+discard model prose or tool history. AXCrew groups and folds that history in its
+own presentation layer.
 
 | Tool | Purpose | Capability |
 |---|---|---|

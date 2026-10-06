@@ -132,6 +132,15 @@ impl Tool for FindFilesTool {
     fn description(&self) -> &str {
         DESCRIPTION
     }
+    fn guidance(&self) -> Option<&'static str> {
+        Some(
+            "find_files / glob: discover names, paths and extensions without reading contents. \
+             Emit every independent discovery call for one work phase in the same response instead \
+             of alternating search -> model -> read -> model. Read returned paths directly; never \
+             repeat the same pattern over the same scope in one round. Prefer this over a recursive \
+             shell scan when it can express the request.",
+        )
+    }
     fn input_schema(&self) -> Value {
         json!({
             "type": "object",

@@ -63,6 +63,11 @@ impl Tool for SandboxedTool {
     fn description(&self) -> &str {
         self.inner.description()
     }
+    fn guidance(&self) -> Option<&'static str> {
+        // Confinement wraps a capability; it never changes how the capability is
+        // used, so guidance passes through unchanged.
+        self.inner.guidance()
+    }
     fn input_schema(&self) -> Value {
         self.inner.input_schema()
     }

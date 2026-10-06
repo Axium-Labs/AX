@@ -139,17 +139,24 @@ impl Runtime {
         mut messages: Vec<Message>,
         auth_path: &Path,
     ) -> Result<AgentKernel> {
-        let policy = include_str!("tool_policy.md");
-        if !messages.iter().any(|message| message.content == policy) {
-            messages.insert(0, Message::system(policy));
-        }
+        // The runtime prompt is injected by the kernel itself: every run gets
+        // the neutral core guidance plus the per-capability guidance owned by
+        // the registered tools. There is no global "tool use strategy" prompt
+        // and no coding harness by default.
         if let Some(ssh) = tool::SshTool::from_env()? {
             messages.insert(0, Message::system(ssh.instructions()));
         }
         let config = AxConfig::load()?;
         let mut kernel = AgentKernel::new(self.provider, self.tools, approval)
-            .with_coding_harness()
             .with_messages(messages);
+        // The coding harness is opt-in from explicit user configuration only.
+        // It is never derived from the environment (a Cargo.toml, a source-file
+        // count, a detected language or a shell call are not reasons to enable
+        // it); that would turn "every request is coding" into "many requests
+        // become coding based on the environment".
+        if config.harness.enabled {
+            kernel = kernel.with_coding_harness();
+        }
         for (name, child) in config.child_models {
             let child_selection = model_selection::selection_for_provider_id(
                 &child.provider,

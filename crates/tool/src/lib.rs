@@ -131,6 +131,15 @@ pub trait Tool: Send + Sync {
     }
     fn name(&self) -> &str;
     fn description(&self) -> &str;
+    /// Capability-scoped guidance describing *how* to use this tool correctly
+    /// once the model has decided to use it. It must never instruct the model to
+    /// use the tool. `None` when the tool's own description is the complete
+    /// guidance. The kernel assembles every contribution into
+    /// `[ax-capability-guidance]`, so this text is behaviour policy, not safety
+    /// policy: permissions, approvals and sandboxing are enforced elsewhere.
+    fn guidance(&self) -> Option<&'static str> {
+        None
+    }
     fn input_schema(&self) -> Value;
     fn safety(&self, input: &Value) -> SafetyLevel;
     /// Permission category determined from structured operation input, never tool names.

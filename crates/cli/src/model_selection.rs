@@ -674,6 +674,7 @@ mod tests {
             retry: model::RetryPolicy::default(),
             sandbox: sandbox::SandboxMode::default(),
             subagent: runtime_core::SubagentConfig::default(),
+            harness: crate::config::HarnessConfig::default(),
             execution: crate::config::ExecutionConfig::default(),
             model: Some(ModelConfig {
                 provider: "deepseek".to_owned(),

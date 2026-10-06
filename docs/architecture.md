@@ -136,9 +136,14 @@ Owns:
 - **`AgentSupervisor`**, running tasks with independent contexts and bounded
   concurrency.
 
-The core has no fixed system prompt. Compaction uses a focused, impersonal
-summarization instruction; long-task turns add only transient progress and
-recovery state.
+The core has no personality or task-classification prompt. Every run receives
+one neutral runtime prompt (`[ax-agent-runtime]` + `[ax-delegation]`), the
+per-capability guidance owned by the registered tools (`[ax-capability-guidance]`)
+and bounded runtime context (`[ax-environment]`: cwd, workspace root, sandbox
+posture). These describe boundaries, the environment and how to use a capability
+once chosen; they never imply a task or widen scope. Compaction uses a focused,
+impersonal summarization instruction; long-task turns add only transient progress
+and recovery state. See [agent-runtime.md](agent-runtime.md).
 
 ### `mcp`
 
@@ -245,6 +250,7 @@ Guarantees:
 user task
   → compact eligible Skill metadata
   → retrieve memory and checkpoint user input
+  → inject neutral runtime + delegation + per-capability guidance + runtime context
   → context pressure check / layered compression
   → model streaming request
   → final + no continuation → optional StopGuard (default absent) → TurnFinished
@@ -254,6 +260,7 @@ user task
       → permission check
       → dependency DAG and bounded resource-aware execution
       → update ExecutionState from actual completion events
+      → advisory loop-hygiene reminder on repeated identical calls
       → checkpoint completed results and execution state with original tool call IDs
       → append completed round in original call order
       → context pressure check / next model step
@@ -289,6 +296,11 @@ See [agent-loop.md](agent-loop.md) for state, configuration and telemetry.
 Step-by-step guidance lives in [development.md](development.md).
 
 ## Lightweight long-task orchestration
+
+A queue is created only for genuinely multi-item or long-running work: the model
+must start one with `task_queue`, a durable queue must already exist, or the
+explicit coding harness must be enabled. A plain turn creates no queue and no
+implicit per-goal queue. See [agent-runtime.md](agent-runtime.md).
 
 The existing Agent Loop and tool-round DAG remain the execution mechanisms. A
 small Task Queue stores concrete model-created tasks through `task_queue` or typed

@@ -10,6 +10,15 @@ backs these flows is documented in [storage.md](storage.md).
 deletes raw history; it manages how much of it is *visible* to the model, and
 compresses the visible portion when pressure builds.
 
+Context is **available by default and supporting material, never a task**. The
+runtime injects bounded runtime context (cwd, workspace root, sandbox posture)
+every turn, and applicable workspace instructions (`AGENTS.md`, `.ax/rules`)
+when they exist. Memory, session history and prior artifacts are added when
+relevant to the current request. None of this means the user asked to inspect,
+repair, continue or modify anything: the current user request defines the work,
+and context only triggers an action when that request needs it. See
+[agent-runtime.md](agent-runtime.md).
+
 ## ContextBudget
 
 AX uses one elastic input pool:

@@ -73,6 +73,12 @@ impl Tool for ViewImageTool {
     fn description(&self) -> &'static str {
         "Read a workspace PNG, JPEG, WebP or GIF as a native image for a vision-capable model."
     }
+    fn guidance(&self) -> Option<&'static str> {
+        Some(
+            "view_image: use only when the request is actually about an image's visual content. It \
+             returns the image itself; use filesystem read for text or metadata.",
+        )
+    }
     fn input_schema(&self) -> Value {
         json!({"type":"object","properties":{"path":{"type":"string"}},"required":["path"],"additionalProperties":false})
     }

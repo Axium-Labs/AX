@@ -597,7 +597,7 @@ impl Tool for SubagentTool {
         "subagent"
     }
     fn description(&self) -> &'static str {
-        "Delegate an independent task with only necessary context. Returns its final result. Child tools may only be narrowed; children cannot delegate."
+        "Delegate a genuinely independent, parallel, or separately-scoped subproblem with only necessary context. Do not delegate work one agent can complete. Returns its final result. Child tools may only be narrowed; children cannot delegate."
     }
     fn input_schema(&self) -> Value {
         let mut schema = json!({"type":"object","properties":{"task":{"type":"string"},"context":{"type":"string"},"tools":{"type":"array","items":{"type":"string"}},"policy":{"type":"object","description":"ChildPolicy inheritance contract. Default: no parent context, isolated memory/workspace, no skills/MCP. Parent permission ceiling always applies."}},"required":["task"],"additionalProperties":false});

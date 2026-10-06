@@ -255,6 +255,15 @@ fn shell_description() -> &'static str {
     }
 }
 
+/// Shared capability guidance: how to use shell correctly once chosen. It is the
+/// last-resort capability for discovery, and it never replaces the permission
+/// system.
+const SHELL_GUIDANCE: &str = "shell: the fallback for work no dedicated capability covers. Do not use a recursive \
+    scan (Get-ChildItem -Recurse, find, rg --files) when find_files/glob or search can express the request. \
+    On failure, inspect the smallest diagnostics, repair the local cause, and run the smallest relevant \
+    verification before broader reruns. Shell commands are authorized by the permission system, not by prompt \
+    wording.";
+
 fn validate_command(command: &str, windows: bool) -> Result<(), ToolError> {
     if command.trim().is_empty() {
         return Err(ToolError::InvalidInput("command must not be empty".into()));
@@ -297,6 +306,9 @@ impl Tool for ChildShell {
     fn description(&self) -> &str {
         shell_description()
     }
+    fn guidance(&self) -> Option<&'static str> {
+        Some(SHELL_GUIDANCE)
+    }
     fn input_schema(&self) -> Value {
         ShellTool.input_schema()
     }
@@ -337,6 +349,10 @@ impl Tool for ShellTool {
 
     fn description(&self) -> &str {
         shell_description()
+    }
+
+    fn guidance(&self) -> Option<&'static str> {
+        Some(SHELL_GUIDANCE)
     }
 
     fn input_schema(&self) -> Value {

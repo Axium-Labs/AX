@@ -166,6 +166,15 @@ impl Tool for SearchTool {
     fn description(&self) -> &'static str {
         DESCRIPTION
     }
+    fn guidance(&self) -> Option<&'static str> {
+        Some(
+            "search: narrow with path/include/exclude before widening the scope. Emit independent \
+             searches for one work phase together. Never run the same query over the same scope \
+             twice in a round: identical discovery calls reuse the first result. A no-match is a \
+             successful empty result, not a failure — change the query or scope instead of \
+             repeating it.",
+        )
+    }
     fn input_schema(&self) -> Value {
         json!({
             "type": "object",
