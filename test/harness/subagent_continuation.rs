@@ -2,7 +2,7 @@ use super::*;
 
 #[tokio::test]
 async fn unfinished_subagent_waits_then_result_is_consumed_before_direct_final() {
-    let (mut kernel, provider, _, _) = fixture(true, 1);
+    let (mut kernel, provider, _, _) = fixture(1);
     let mut receiver = kernel.prepare_subagents();
     let manager = kernel.subagent_manager.as_ref().unwrap().clone();
     manager
@@ -79,7 +79,7 @@ async fn unfinished_subagent_waits_then_result_is_consumed_before_direct_final()
 
 #[tokio::test]
 async fn completed_unconsumed_subagent_still_requires_follow_up() {
-    let (mut kernel, _, _, _) = fixture(true, 1);
+    let (mut kernel, _, _, _) = fixture(1);
     let _receiver = kernel.prepare_subagents();
     let manager = kernel.subagent_manager.as_ref().unwrap().clone();
     manager

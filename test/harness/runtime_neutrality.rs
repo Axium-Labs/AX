@@ -1,10 +1,10 @@
-//! Agent Runtime neutrality: the current user request defines the task.
+//! Agent Runtime acceptance: the coding execution harness is the runtime.
 //!
-//! These tests exercise a *neutral* kernel — no `with_coding_harness()` — and
-//! assert that a plain request stays a plain request, that context never
-//! hijacks it, and that escalation only happens when the request calls for it.
-//! The keyword "鲁迅" appears only as a user request in a test; no production
-//! rule keys on it.
+//! These tests exercise a *plain* kernel — no mode switch exists — and assert
+//! the `DeepSeek Harness` philosophy: every run carries the coding policy and the
+//! full environment snapshot, every goal gets a task queue, and a plain request
+//! still completes directly without burning capabilities. The keyword "鲁迅"
+//! appears only as a user request in a test; no production rule keys on it.
 
 use crate::*;
 use async_trait::async_trait;
@@ -55,7 +55,7 @@ impl Script {
 #[async_trait]
 impl ModelProvider for Script {
     fn name(&self) -> &'static str {
-        "runtime-neutrality-test"
+        "runtime-acceptance-test"
     }
     fn model_id(&self) -> &'static str {
         "script"
@@ -144,15 +144,13 @@ impl tool::Tool for WebFixture {
     }
 }
 
-/// A neutral kernel: no coding harness, so no per-goal queue and no global
-/// coding policy.
 fn kernel(provider: Arc<Script>) -> AgentKernel {
     let mut tools = tool::ToolRegistry::with_mode(tool::SandboxMode::Off);
     tools.register(Capability);
     AgentKernel::new(provider, tools, Arc::new(AllowAll))
 }
 
-/// The same neutral kernel with a network capability registered.
+/// The same kernel with a network capability registered.
 fn kernel_with_web(provider: Arc<Script>) -> AgentKernel {
     let mut tools = tool::ToolRegistry::with_mode(tool::SandboxMode::Off);
     tools.register(WebFixture);
@@ -168,7 +166,10 @@ fn all_messages(requests: &[ModelRequest]) -> String {
         .join("\n")
 }
 
-/// A: a bare question is answered directly — no workspace read, no task, no child.
+/// A: a bare question is answered directly — no capability is used. The run
+/// still carries the full harness context (runtime prompt, capability
+/// guidance, environment snapshot, coding policy) and its goal queue reaches
+/// the completed terminal state.
 #[tokio::test]
 async fn a_plain_question_is_answered_directly() {
     let provider = Script::new(vec![response("2", vec![])]);
@@ -192,17 +193,17 @@ async fn a_plain_question_is_answered_directly() {
     assert_eq!(completion, Some(("direct".into(), 1, 0)));
     let requests = provider.requests();
     assert_eq!(requests.len(), 1);
-    // Context is available by default (it does not have to be asked for): the
-    // neutral runtime prompt, the capability guidance and the runtime
-    // environment are all present. What is absent is the coding policy and any
-    // task queue, and no capability was used.
     let text = all_messages(&requests);
     assert!(text.contains("[ax-agent-runtime]"));
     assert!(text.contains("[ax-capability-guidance]"));
     assert!(text.contains("[ax-environment]"));
-    assert!(!text.contains("[ax-coding-harness]"));
+    assert!(text.contains("[ax-coding-harness]"));
+    // Progress state is only injected for a queue with tasks; an empty goal
+    // queue never reaches the request.
     assert!(!text.contains("[ax-task-queue]"));
-    assert!(runtime.task_queue().is_none());
+    let queue = runtime.task_queue().expect("every goal has a queue");
+    assert!(!queue.active());
+    assert_eq!(queue.final_response.as_deref(), Some("2"));
 }
 
 /// B: knowledge/retrieval requests never scan or mutate the workspace.
@@ -217,14 +218,12 @@ async fn b_retrieval_request_does_not_touch_the_workspace() {
     let requests = provider.requests();
     assert_eq!(requests.len(), 1);
     let text = all_messages(&requests);
-    // Runtime context is available; no task queue was created.
-    assert!(text.contains("[ax-environment]"));
     assert!(!text.contains("[ax-task-queue]"));
-    assert!(runtime.task_queue().is_none());
+    assert!(runtime.task_queue().is_some());
 }
 
 /// B (source branch): when the model wants a source, it may use the web
-/// capability. That is still not a workspace scan and creates no task.
+/// capability. That is still not a workspace scan.
 #[tokio::test]
 async fn b_retrieval_may_search_the_web_without_touching_the_workspace() {
     let provider = Script::new(vec![
@@ -251,17 +250,14 @@ async fn b_retrieval_may_search_the_web_without_touching_the_workspace() {
             .iter()
             .any(|message| message.tool_call_id.as_deref() == Some("search"))
     );
-    let text = all_messages(&provider.requests());
-    assert!(text.contains("[ax-environment]"));
-    assert!(!text.contains("[ax-task-queue]"));
-    assert!(runtime.task_queue().is_none());
+    assert!(runtime.task_queue().is_some());
 }
 
-/// C: files that happen to be in cwd never hijack the request.
+/// C: files that happen to be in cwd are context, not instructions.
 #[tokio::test]
 async fn c_workspace_files_do_not_hijack_the_request() {
     let dir = std::env::temp_dir().join(format!(
-        "ax-runtime-neutrality-c-{}-{}",
+        "ax-runtime-acceptance-c-{}-{}",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -288,20 +284,20 @@ async fn c_workspace_files_do_not_hijack_the_request() {
     // The runtime tells the model where the workspace is (cwd/workspace root),
     // but it never lists what is inside it. Knowing the location is context;
     // naming the files would be an implicit instruction to look at them.
-    assert!(text.contains("ax-runtime-neutrality-c-"));
+    assert!(text.contains("ax-runtime-acceptance-c-"));
     assert!(!text.contains("luxun_fetch.py"));
     assert!(!text.contains("鲁迅作品总目录.md"));
-    assert!(runtime.task_queue().is_none());
+    assert!(runtime.task_queue().is_some());
 
     std::fs::remove_dir_all(&dir).ok();
 }
 
-/// The coding harness is opt-in from user intent only. A repo-like workspace
-/// with shell/filesystem capabilities must not switch modes by itself.
+/// The harness is unconditional: a repo-like workspace changes nothing because
+/// there is no mode to switch — every run is a coding execution run.
 #[tokio::test]
-async fn no_environment_heuristic_enables_the_coding_harness() {
+async fn the_harness_is_unconditional_across_workspaces() {
     let dir = std::env::temp_dir().join(format!(
-        "ax-runtime-neutrality-heuristic-{}-{}",
+        "ax-runtime-acceptance-harness-{}-{}",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -317,25 +313,16 @@ async fn no_environment_heuristic_enables_the_coding_harness() {
     let mut tools = tool::ToolRegistry::with_mode(tool::SandboxMode::Off);
     tools.register(Capability);
     tools.register(WebFixture);
-    let mut runtime = AgentKernel::new(provider, tools, Arc::new(AllowAll))
-        .with_execution_scope(dir.clone());
-    assert!(!runtime.coding_harness_enabled());
+    let mut runtime = AgentKernel::new(
+        Arc::clone(&provider) as Arc<dyn ModelProvider>,
+        tools,
+        Arc::new(AllowAll),
+    )
+    .with_execution_scope(dir.clone());
     runtime.run_turn("hello", |_| {}).await.unwrap();
-    // A Cargo.toml, a source file and a .git directory changed nothing: the
-    // harness stayed off and no queue was created.
-    assert!(!runtime.coding_harness_enabled());
-    assert!(runtime.task_queue().is_none());
-
-    // The explicit opt-in is the only switch, and it does turn it on.
-    assert!(
-        AgentKernel::new(
-            Script::new(vec![response("ok", vec![])]),
-            tool::ToolRegistry::with_mode(tool::SandboxMode::Off),
-            Arc::new(AllowAll),
-        )
-        .with_coding_harness()
-        .coding_harness_enabled()
-    );
+    let text = all_messages(&provider.requests());
+    assert!(text.contains("[ax-coding-harness]"));
+    assert!(text.contains("[ax-agent-runtime]"));
 
     std::fs::remove_dir_all(&dir).ok();
 }
@@ -380,11 +367,11 @@ async fn e_explicit_fix_and_verify_runs_to_completion() {
         .unwrap();
     assert_eq!(result, "Fixed and verified.");
     assert_eq!(provider.requests().len(), 3);
-    assert!(runtime.task_queue().is_none());
+    assert!(runtime.task_queue().is_some());
 }
 
-/// F: a durable queue exists only when the request itself is long-running, and
-/// resuming it continues the tracked work.
+/// F: a durable queue tracks long-running work, and resuming it continues the
+/// tracked work.
 #[tokio::test]
 async fn f_long_running_work_is_explicit_and_resumable() {
     let provider = Script::new(vec![
@@ -410,8 +397,7 @@ async fn f_long_running_work_is_explicit_and_resumable() {
         .run_turn("把刚才那个未完成的重构继续做完", |_| {})
         .await;
     assert!(matches!(result, Err(AgentError::WaitingForUser(_))));
-    // The explicit long-running request produced a durable, tracked queue.
-    let queue = runtime.task_queue().expect("explicit long task has a queue");
+    let queue = runtime.task_queue().expect("long task has a queue");
     assert_eq!(queue.tasks.len(), 2);
 
     // Resuming with an answer continues the same tracked goal. The queue still
@@ -533,14 +519,15 @@ async fn g_every_repeat_threshold_fires_in_the_real_loop() {
     );
 }
 
-/// A request with no workspace context and no tools still yields a durable
-/// goal record but never a queue; the neutral kernel has no implicit mode.
+/// Every run carries the harness context: runtime prompt, capability guidance
+/// assembled from tool-owned guidance, environment snapshot and coding policy.
 #[tokio::test]
-async fn neutral_kernel_has_no_implicit_coding_mode() {
+async fn every_run_carries_the_harness_context() {
     let provider = Script::new(vec![response("ok", vec![])]);
     let mut runtime = kernel(provider);
     runtime.run_turn("hi", |_| {}).await.unwrap();
-    assert!(runtime.task_queue().is_none());
+    let queue = runtime.task_queue().expect("every goal has a queue");
+    assert!(!queue.active());
     // The capability guidance section is assembled from tool-owned guidance.
     assert!(runtime.has_tool("capability"));
 }

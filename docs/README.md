@@ -8,8 +8,8 @@ design decisions that shaped the code are recorded as ADRs in
 
 | Document | Topic |
 |---|---|
-| [agent-runtime.md](agent-runtime.md) | The neutral runtime principle: request/context/capability boundary, escalation ladder, trigger conditions |
-| [coding-harness.md](coding-harness.md) | Explicit opt-in coding execution, concrete task sources, workspace specs and durable artifacts |
+| [agent-runtime.md](agent-runtime.md) | The runtime contract: request/context/capability boundary, turn flow, trigger conditions |
+| [coding-harness.md](coding-harness.md) | The coding execution policy: concrete task sources, workspace specs and durable artifacts |
 | [coding-harness-validation.md](coding-harness-validation.md) | Root causes, regression coverage and original testax whole-prompt acceptance evidence |
 | [agent-loop.md](agent-loop.md) | Continuation state, direct streaming completion and optional Stop Guards |
 | [architecture.md](architecture.md) | System architecture: crate responsibilities, agent loop, cold-start path |

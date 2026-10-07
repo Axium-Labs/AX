@@ -32,9 +32,9 @@ fn registry() -> ToolRegistry {
 fn resources_of(
     registry: &ToolRegistry,
     name: &str,
-    input: serde_json::Value,
+    input: &serde_json::Value,
 ) -> Vec<ResourceAccess> {
-    registry.get(name).expect(name).resources(&input).clone()
+    registry.get(name).expect(name).resources(input).clone()
 }
 
 fn contains_all(resources: &[ResourceAccess]) -> bool {
@@ -53,13 +53,13 @@ fn three_independent_reads_and_searches_are_never_serialized() {
     let read_a = resources_of(
         &registry,
         "filesystem",
-        json!({"operation":"read","path":"src/a.rs"}),
+        &json!({"operation":"read","path":"src/a.rs"}),
     );
-    let search_b = resources_of(&registry, "search", json!({"query":"needle","path":"src"}));
+    let search_b = resources_of(&registry, "search", &json!({"query":"needle","path":"src"}));
     let find_c = resources_of(
         &registry,
         "find_files",
-        json!({"pattern":"**/*.rs","path":"src"}),
+        &json!({"pattern":"**/*.rs","path":"src"}),
     );
     for (name, resources) in [("read", &read_a), ("search", &search_b), ("find", &find_c)] {
         assert!(
@@ -79,7 +79,7 @@ fn three_independent_reads_and_searches_are_never_serialized() {
     let tool_output = resources_of(
         &registry,
         "tool_output",
-        json!({"call_id":"x","start_line":1,"end_line":2}),
+        &json!({"call_id":"x","start_line":1,"end_line":2}),
     );
     assert!(tool_output.is_empty());
     assert!(!conflicts(&tool_output, &read_a));
@@ -91,14 +91,14 @@ fn a_read_and_a_write_on_the_same_path_conflict() {
     let write = resources_of(
         &registry,
         "filesystem",
-        json!({"operation":"write","path":"src/a.rs"}),
+        &json!({"operation":"write","path":"src/a.rs"}),
     );
     let read = resources_of(
         &registry,
         "filesystem",
-        json!({"operation":"read","path":"src/a.rs"}),
+        &json!({"operation":"read","path":"src/a.rs"}),
     );
-    let patch = resources_of(&registry, "patch", json!({"path":"src/a.rs"}));
+    let patch = resources_of(&registry, "patch", &json!({"path":"src/a.rs"}));
     assert!(conflicts(&write, &read));
     assert!(conflicts(&patch, &read));
     assert!(conflicts(&write, &patch));
@@ -106,7 +106,7 @@ fn a_read_and_a_write_on_the_same_path_conflict() {
     let other = resources_of(
         &registry,
         "filesystem",
-        json!({"operation":"write","path":"src/b.rs"}),
+        &json!({"operation":"write","path":"src/b.rs"}),
     );
     assert!(!conflicts(&read, &other));
 }
@@ -117,11 +117,11 @@ fn read_only_shell_calls_do_not_serialize_each_other() {
     let status_a = resources_of(
         &registry,
         "shell",
-        json!({"command":"git status --porcelain"}),
+        &json!({"command":"git status --porcelain"}),
     );
-    let status_b = resources_of(&registry, "shell", json!({"command":"git status"}));
-    let location = resources_of(&registry, "shell", json!({"command":"Get-Location"}));
-    let version = resources_of(&registry, "shell", json!({"command":"node --version"}));
+    let status_b = resources_of(&registry, "shell", &json!({"command":"git status"}));
+    let location = resources_of(&registry, "shell", &json!({"command":"Get-Location"}));
+    let version = resources_of(&registry, "shell", &json!({"command":"node --version"}));
     for (name, resources) in [
         ("git status a", &status_a),
         ("git status b", &status_b),
@@ -145,12 +145,12 @@ fn read_only_shell_calls_do_not_serialize_each_other() {
     let cat = resources_of(
         &registry,
         "shell",
-        json!({"command":"Get-Content src/a.rs"}),
+        &json!({"command":"Get-Content src/a.rs"}),
     );
     let write = resources_of(
         &registry,
         "filesystem",
-        json!({"operation":"write","path":"src/a.rs"}),
+        &json!({"operation":"write","path":"src/a.rs"}),
     );
     assert!(conflicts(&cat, &write));
 }
@@ -169,7 +169,7 @@ fn unclassifiable_commands_stay_exclusive() {
         "Set-Content a.rs x",
         "unknown-binary --flag",
     ] {
-        let resources = resources_of(&registry, "shell", json!({"command": command}));
+        let resources = resources_of(&registry, "shell", &json!({"command": command}));
         assert!(
             contains_all(&resources),
             "`{command}` must stay exclusive: {resources:?}"
@@ -178,7 +178,7 @@ fn unclassifiable_commands_stay_exclusive() {
         let read = resources_of(
             &registry,
             "filesystem",
-            json!({"operation":"read","path":"src/a.rs"}),
+            &json!({"operation":"read","path":"src/a.rs"}),
         );
         assert!(conflicts(&resources, &read), "`{command}` must serialize");
     }
@@ -190,12 +190,12 @@ fn declared_writes_and_reads_serialize_only_where_they_overlap() {
     let web_a = resources_of(
         &registry,
         "web",
-        json!({"operation":"search","queries":["a"]}),
+        &json!({"operation":"search","queries":["a"]}),
     );
     let web_b = resources_of(
         &registry,
         "web",
-        json!({"operation":"fetch","urls":["https://x"]}),
+        &json!({"operation":"fetch","urls":["https://x"]}),
     );
     // Web is a shared read on a named resource: it must not serialize.
     assert!(!conflicts(&web_a, &web_b));

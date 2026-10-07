@@ -129,12 +129,12 @@ The optional `tools` list narrows the parent tools; it cannot grant permissions.
 The model calls `subagent` with `agent = "reviewer"`, `task` and optional
 explicit `context`. Named Agent instructions are read only on this invocation.
 Disabled names are rejected and excluded from the tool schema. Unnamed
-delegation remains available under the existing optional execution switch.
+delegation remains always available.
 
 Global execution defaults still live in the existing `AxConfig` JSON file.
 Project `[subagent]` settings in `.ax/config.toml` partially override those
-defaults, for example `enabled = true` for this project alone. When execution
-is disabled, no named Agent registry is initialized for a model turn.
+defaults, for example `max_concurrent = 2` for this project alone. When the
+depth budget is zero, no named Agent registry is initialized for a model turn.
 
 Skill frontmatter and MCP/Agent definitions are metadata only. Disabled Skills
 never load bodies or enter routing/catalog context; disabled MCP servers never

@@ -1,22 +1,18 @@
 # Coding execution harness
 
-The coding harness is an **explicit opt-in**, not the default runtime. A plain
-AX run is neutral: the user request defines the task and the runtime stops when
-the request is satisfied. See [agent-runtime.md](agent-runtime.md) for the
-neutral principle and the trigger conditions.
+The coding harness **is** the runtime. Every run — CLI, TUI, ACP, Crew bridge
+and every isolated child — executes requested deliverables under the coding
+policy, with the full environment snapshot and a per-goal task queue. There is
+no mode switch and no configuration flag: composition (which tools and
+providers a host registers) is the only variation point. See
+[agent-runtime.md](agent-runtime.md) for the runtime contract and the trigger
+conditions.
 
-The harness is enabled with `AgentKernel::with_coding_harness()`. In the CLI
-composition root the explicit user switch is the `harness.enabled` config field
-(`~/.ax/config.json` → `{"harness":{"enabled":true}}`); embedders and tests opt
-in by calling the builder method directly. The default CLI/TUI/ACP/Crew
-composition and every child no longer enable it. The opt-in must originate from
-explicit user intent and never from environment detection (`Cargo.toml`, source
-counts, detected languages, shell usage). When enabled, the harness adds the full
-environment snapshot (with executable probes), an advisory step scope, the coding
-policy (`[ax-coding-harness]`) and the per-goal queue behaviour on top of the
-neutral runtime. The same `AgentKernel`, tool registry, `LocalChildHost`,
-execution budgets and checkpoint path are reused; nothing about coding capability
-changes.
+Every run receives the full environment snapshot (with executable probes), an
+advisory step scope, the coding policy (`[ax-coding-harness]`) and the per-goal
+queue behaviour. The same `AgentKernel`, tool registry, `LocalChildHost`,
+execution budgets and checkpoint path are shared by every frontend; nothing
+about coding capability differs between surfaces.
 
 ## Policy and completion
 

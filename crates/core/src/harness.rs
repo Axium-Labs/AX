@@ -1,71 +1,38 @@
-//! The neutral runtime prompt injection, explicit coding policy, and typed
-//! dynamic work admission.
+//! The coding execution policy, the runtime prompt, and typed dynamic work
+//! admission.
 //!
-//! The default runtime is neutral: every run receives [`crate::runtime_core`]
-//! guidance and the assembled per-capability guidance. The coding harness is an
-//! explicitly opted-in policy (`with_coding_harness`) that additionally installs
-//! the environment snapshot, an advisory step scope and the coding [`POLICY`].
-//! It is never enabled by default.
+//! AX is a coding execution harness, in the `DeepSeek Harness` lineage: every run
+//! receives [`crate::runtime_core`] guidance, the assembled per-capability
+//! guidance, the full environment snapshot and the coding [`POLICY`], and each
+//! goal gets an active task queue. There is no mode switch — this is simply
+//! what the runtime is; composition (which tools a host registers) is the only
+//! variation point.
+
 use crate::runtime_core;
 use crate::{AgentError, AgentKernel, task_queue};
 use model::Message;
 use serde_json::{Value, json};
 
-/// Explicit coding-execution policy. Installed only when a caller opts in with
-/// [`AgentKernel::with_coding_harness`]; it is not a global default.
+/// Coding execution policy, injected on every run.
 pub const POLICY: &str = "[ax-coding-harness]\nExecute requested deliverables until completed, failed with evidence, or waiting for a necessary user decision. Missing venv, pytest, packages, runner, uncloned repo or no search matches are recoverable setup/task-local observations: attempt installation, creation or fallback, then record a local failure and continue independent work. Honor user-requested ordering: sequential work runs one item at a time; choose parallel execution only when compatible with the user goal. Do setup and data reads before queueing. Queue items must be concrete user deliverables, never a preliminary discovery/reporting checklist. Use task_source projected columns and work mapping for tables; it automatically registers records as children. Otherwise register concrete executable items with task_queue once known. Data readers may return {\"ax_work_items\":[{\"title\":...,\"input\":...,\"workspace\":...,\"output_dir\":...}]} to register work automatically. Each child input must include all its necessary data and output requirements, never sibling results or reference answers. Select allowed dataset columns at the reader, before loading data; execution and evaluator inputs stay separate. Use repo/config/tools to answer discoverable questions. Only user-exclusive decisions use request_user_input, which suspends/resumes the goal. A final answer requires every known item terminal and all requested durable reports written. Freeze patches and save results before workspace cleanup. An unavailable official evaluator leaves official_resolved=null and does not prevent coding/local validation.";
 
 impl AgentKernel {
-    /// Opt in to the coding execution harness. Not a default; a plain kernel
-    /// stays neutral and never installs the coding policy, the advisory step
-    /// scope or a per-goal queue.
-    ///
-    /// **Provenance rule.** This opt-in must originate from explicit user
-    /// intent — a user-selected mode, an explicit coding session, or an explicit
-    /// coding task. It must never be derived from environment heuristics: the
-    /// presence of `Cargo.toml`, a count of source files, a detected language, or
-    /// the fact that a shell/filesystem tool was used are not reasons to enable
-    /// it. Turning "every request is coding" into "many requests become coding
-    /// based on the environment" reintroduces the same over-execution through a
-    /// different door.
-    ///
-    /// # Panics
-    /// Panics if the execution-state mutex was poisoned by a prior panic.
-    #[must_use]
-    pub fn with_coding_harness(mut self) -> Self {
-        self.coding_harness = true;
-        self.execution.lock().unwrap().advisory_step_scope = true;
-        self
-    }
-
-    /// Whether the coding execution harness is enabled for this kernel. Read-only
-    /// observability for hosts and tests; it is never a heuristic input.
-    #[must_use]
-    pub fn coding_harness_enabled(&self) -> bool {
-        self.coding_harness
-    }
-
-    /// Inject the runtime prompt and runtime context every run receives, and —
-    /// only when explicitly enabled — the coding harness step scope and policy.
+    /// Inject the runtime prompt and runtime context every run receives: the
+    /// runtime identity, per-capability guidance, the full environment
+    /// snapshot and the coding policy.
     pub(crate) async fn prepare_environment(&mut self) -> Result<(), AgentError> {
-        // Neutral, always-on guidance. The user request defines the task; these
-        // texts only describe the runtime's boundaries and how to use a chosen
-        // capability. They are replaced in place, never accumulated.
+        // The user request defines the work; these texts describe the runtime's
+        // boundaries and how to use a chosen capability. They are replaced in
+        // place, never accumulated.
         self.set_context(
             runtime_core::CORE_PREFIX,
             Some(Message::system(runtime_core::CORE_GUIDANCE)),
         );
-        self.set_context(
-            runtime_core::DELEGATION_PREFIX,
-            Some(Message::system(runtime_core::DELEGATION_GUIDANCE)),
-        );
         self.set_context(runtime_core::CAPABILITY_PREFIX, self.capability_guidance());
-        // Runtime context is available on every run, not hidden behind an
-        // explicit user request. It describes the environment (cwd, workspace
-        // root, sandbox/network posture, shell) so the model can use it when the
-        // request needs it; it never asks the model to inspect or change
-        // anything, so its presence cannot trigger an action. The full
-        // executable-probe variant is reserved for the coding harness.
+        // Full environment snapshot with cached executable probes: the run is a
+        // coding execution run. The snapshot describes the environment (cwd,
+        // workspace root, sandbox/network posture, shell, executables) so the
+        // model can use it; it never asks the model to inspect anything.
         let cwd = self.child_run.as_ref().map_or_else(
             || std::env::current_dir().unwrap_or_default(),
             |run| run.cwd.clone(),
@@ -74,14 +41,11 @@ impl AgentKernel {
             || self.execution_root.clone().unwrap_or_else(|| cwd.clone()),
             |run| run.workspace_root().to_path_buf(),
         );
-        let context = if self.coding_harness {
-            let (cwd, root) = (cwd.clone(), root.clone());
+        let (cwd, root) = (cwd.clone(), root.clone());
+        let context =
             tokio::task::spawn_blocking(move || tool::EnvironmentContext::detect(&cwd, &root))
                 .await
-                .map_err(|error| AgentError::WorkerJoin(error.to_string()))?
-        } else {
-            tool::EnvironmentContext::light(&cwd, &root)
-        };
+                .map_err(|error| AgentError::WorkerJoin(error.to_string()))?;
         self.set_context(
             "[ax-environment]\n",
             Some(Message::system(format!(
@@ -89,10 +53,6 @@ impl AgentKernel {
                 json!(context)
             ))),
         );
-        if !self.coding_harness {
-            return Ok(());
-        }
-        self.execution.lock().unwrap().advisory_step_scope = true;
         self.set_context("[ax-coding-harness]\n", Some(Message::system(POLICY)));
         Ok(())
     }

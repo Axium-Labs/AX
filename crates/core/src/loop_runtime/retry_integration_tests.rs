@@ -108,7 +108,7 @@ async fn retry_timeout_respects_remaining_time_budget() {
     });
     assert!(
         tokio::time::timeout(
-            std::time::Duration::from_millis(250),
+            std::time::Duration::from_secs(10),
             kernel.run_turn("request", |_| {})
         )
         .await

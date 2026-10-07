@@ -30,21 +30,9 @@ pub struct EnvironmentContext {
 }
 
 impl EnvironmentContext {
-    /// Bounded runtime context: cwd, workspace root, sandbox/network posture and
-    /// the shell contract, without executable version probes.
-    ///
-    /// This is cheap and safe to inject on every run, including a direct answer:
-    /// it describes the environment so the model can use it when the request
-    /// needs it. It does not ask the model to inspect or change anything, so its
-    /// presence never triggers an action.
-    #[must_use]
-    pub fn light(cwd: &Path, root: &Path) -> Self {
-        Self::base(cwd, root, BTreeMap::new())
-    }
-
-    /// Full runtime context including cached executable path/version probes.
-    /// Probing spawns one short-lived process per known executable, so it is
-    /// reserved for callers that actually need process capabilities.
+    /// Full runtime context with cached executable path/version probes.
+    /// Probing spawns one short-lived process per known executable once per
+    /// process; the result is then reused.
     #[must_use]
     pub fn detect(cwd: &Path, root: &Path) -> Self {
         static CAPABILITIES: OnceLock<BTreeMap<String, Executable>> = OnceLock::new();

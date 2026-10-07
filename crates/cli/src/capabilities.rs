@@ -339,7 +339,7 @@ impl ReplState {
             }
             subagent_config = effective.try_into()?;
         }
-        let templates = if subagent_config.enabled && subagent_config.max_depth > 0 {
+        let templates = if subagent_config.max_depth > 0 {
             state
                 .capability_registry(Kind::Agents)?
                 .effective()

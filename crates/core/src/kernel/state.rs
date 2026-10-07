@@ -26,7 +26,6 @@ pub struct AgentKernel {
     pub(crate) continuation: crate::TurnState,
     pub(crate) guard_model_requests: usize,
     pub(crate) stop_guard: Option<Arc<dyn crate::StopGuard>>,
-    pub(crate) coding_harness: bool,
     pub(crate) provider: Arc<dyn ModelProvider>,
     pub(crate) retry_policy: model::RetryPolicy,
     pub(crate) permission_profiles: Vec<tool::PermissionProfile>,

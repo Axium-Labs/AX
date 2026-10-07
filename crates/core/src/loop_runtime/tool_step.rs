@@ -203,7 +203,7 @@ impl AgentKernel {
                 serde_json::from_str::<Value>(&tool_calls[0].function.arguments)
                     .map_err(|error| error.to_string())
                     .and_then(|input| {
-                        if self.coding_harness && input["action"] == "block" && !self.global_stop_evidenced(&input) {
+                        if input["action"] == "block" && !self.global_stop_evidenced(&input) {
                             return Err("Global stop requires an actual runtime global blocker. Local tool/skill/setup failures or untested resource assumptions cannot end the goal. Attempt the requested resource directly, recover setup, or record affected task failures and continue. User-exclusive decisions require request_user_input.".into());
                         }
                         task_queue::apply(

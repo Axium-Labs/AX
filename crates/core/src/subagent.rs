@@ -26,15 +26,17 @@ pub struct AgentTemplate {
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct SubagentConfig {
-    pub enabled: bool,
+    /// Maximum live children sharing the concurrency pool (deepseek-harness's
+    /// `maxActiveSubagents`).
     pub max_concurrent: usize,
+    /// Delegation budget: `0` disables delegation entirely; `1` (default) is
+    /// the single delegation level this runtime supports.
     pub max_depth: usize,
 }
 impl Default for SubagentConfig {
     fn default() -> Self {
         Self {
-            enabled: false,
-            max_concurrent: 3,
+            max_concurrent: 8,
             max_depth: 1,
         }
     }
@@ -336,6 +338,11 @@ impl SubagentManager {
             .and_then(|name| self.controller.child_models.get(name))
             .cloned()
             .unwrap_or_else(|| Arc::clone(&self.controller.provider));
+        // deepseek-harness's delegation contract: the child's permission scope
+        // was fixed at start and can never be widened from inside.
+        child.kernel.messages.push(model::Message::system(
+            "[ax-delegation]\nYou are a delegated subagent: your permission scope was fixed when you were started and cannot be widened from inside this session - operations that require approval are rejected automatically. When the task needs access beyond that scope, do not retry the denied operation; state the limitation in your reply so the delegating agent can handle it.".to_owned(),
+        ));
         let inherited = policy
             .inherited_context(&self.parent_messages)
             .map_err(|e| ToolError::InvalidInput(e.into()))?;
@@ -587,23 +594,54 @@ impl Drop for CancelOnDrop {
     }
 }
 
-struct SubagentTool(Arc<SubagentManager>);
+/// One delegation implementation, instantiated twice like deepseek-harness's
+/// `tool-subagent`: `subagent` spawns a fresh-context child, `subagent_fork`
+/// delegates to a child seeded with the parent's completed turns.
+struct SubagentTool {
+    manager: Arc<SubagentManager>,
+    fork: bool,
+}
+impl SubagentTool {
+    fn spawn(manager: Arc<SubagentManager>) -> Self {
+        Self {
+            manager,
+            fork: false,
+        }
+    }
+    fn fork(manager: Arc<SubagentManager>) -> Self {
+        Self {
+            manager,
+            fork: true,
+        }
+    }
+}
 #[async_trait]
 impl Tool for SubagentTool {
     fn execution_boundary(&self) -> tool::ExecutionBoundary {
         tool::ExecutionBoundary::RuntimeOwned
     }
     fn name(&self) -> &'static str {
-        "subagent"
+        if self.fork {
+            "subagent_fork"
+        } else {
+            "subagent"
+        }
     }
     fn description(&self) -> &'static str {
-        "Delegate a genuinely independent, parallel, or separately-scoped subproblem with only necessary context. Do not delegate work one agent can complete. Returns its final result. Child tools may only be narrowed; children cannot delegate."
+        if self.fork {
+            "Delegate a task to a subagent that inherits this conversation: a child agent seeded with all completed turns so far (it does not see the current in-flight turn). Use this when the subtask builds on this conversation's context - a follow-up analysis, a review, a continuation - without consuming this conversation's context for the work itself. It shares the parent workspace and provider. You receive its result, not its intermediate steps. Children cannot delegate."
+        } else {
+            "Delegate a self-contained task to a subagent (a separate agent that works in its own context) to offload focused, independent work - research, a scoped implementation, an analysis - so it does not consume this conversation's context. The subagent returns its result, not its intermediate steps. Child tools may only be narrowed; children cannot delegate."
+        }
     }
     fn input_schema(&self) -> Value {
-        let mut schema = json!({"type":"object","properties":{"task":{"type":"string"},"context":{"type":"string"},"tools":{"type":"array","items":{"type":"string"}},"policy":{"type":"object","description":"ChildPolicy inheritance contract. Default: no parent context, isolated memory/workspace, no skills/MCP. Parent permission ceiling always applies."}},"required":["task"],"additionalProperties":false});
+        if self.fork {
+            return json!({"type":"object","properties":{"description":{"type":"string","description":"A short (3-5 word) description of the delegated task, for display."},"prompt":{"type":"string","description":"The task for the subagent. It already sees this conversation's completed turns, so build on them freely and state only what is new."}},"required":["prompt"],"additionalProperties":false});
+        }
+        let mut schema = json!({"type":"object","properties":{"task":{"type":"string","description":"The complete, self-contained task for the subagent. It does not share this conversation's context, so include everything it needs."},"context":{"type":"string"},"tools":{"type":"array","items":{"type":"string"}},"policy":{"type":"object","description":"ChildPolicy inheritance contract. Default: no parent context, isolated memory/workspace, no skills/MCP. Parent permission ceiling always applies."}},"required":["task"],"additionalProperties":false});
         schema["properties"]["policy"] = crate::ChildPolicy::schema();
-        if !self.0.templates.is_empty() {
-            schema["properties"]["agent"] = json!({"type":"string","enum":self.0.templates.iter().map(|a| &a.name).collect::<Vec<_>>(),"description":self.0.templates.iter().map(|a| format!("{}: {}", a.name, a.description)).collect::<Vec<_>>().join("; ")});
+        if !self.manager.templates.is_empty() {
+            schema["properties"]["agent"] = json!({"type":"string","enum":self.manager.templates.iter().map(|a| &a.name).collect::<Vec<_>>(),"description":self.manager.templates.iter().map(|a| format!("{}: {}", a.name, a.description)).collect::<Vec<_>>().join("; ")});
         }
         schema
     }
@@ -632,6 +670,7 @@ impl Tool for SubagentTool {
         #[serde(deny_unknown_fields)]
         struct Input {
             task: String,
+            description: Option<String>,
             agent: Option<String>,
             context: Option<String>,
             tools: Option<Vec<String>>,
@@ -640,9 +679,28 @@ impl Tool for SubagentTool {
         }
         let mut input: Input =
             serde_json::from_value(input).map_err(|e| ToolError::InvalidInput(e.to_string()))?;
+        if self.fork {
+            // The fork contract is fixed: completed-turn context, parent
+            // workspace, parent model. No model selection, no narrowing.
+            let label = input.description.unwrap_or_default();
+            let prompt = input.task;
+            input.task = if label.trim().is_empty() {
+                prompt
+            } else {
+                format!("{label}: {prompt}")
+            };
+            input.context = None;
+            input.tools = None;
+            input.agent = None;
+            input.policy = crate::ChildPolicy {
+                context: crate::child_policy::ContextInheritance::CompletedTurns,
+                workspace: crate::child_policy::WorkspaceInheritance::Shared,
+                ..crate::ChildPolicy::default()
+            };
+        }
         if let Some(name) = &input.agent {
             let template = self
-                .0
+                .manager
                 .templates
                 .iter()
                 .find(|a| &a.name == name)
@@ -671,21 +729,21 @@ impl Tool for SubagentTool {
                 (None, requested) => requested,
             };
         }
-        let result = match self.0.spawn_agent(
+        let result = match self.manager.spawn_agent(
             &input.task,
             SpawnOptions {
                 context: input.context,
                 tools: input.tools,
                 policy: input.policy,
-                timeout_secs: self.0.controller.child_execution_budget().turn_timeout_secs,
+                timeout_secs: self.manager.controller.child_execution_budget().turn_timeout_secs,
             },
         ) {
             Ok(id) => {
                 let _cancellation = CancelOnDrop {
-                    manager: Arc::clone(&self.0),
+                    manager: Arc::clone(&self.manager),
                     id: id.clone(),
                 };
-                self.0.wait_agent(&id).await
+                self.manager.wait_agent(&id).await
             }
             Err(error) => SubagentResult::failed("failed", error.to_string()),
         };
@@ -728,6 +786,7 @@ impl AgentKernel {
             manager.shutdown();
         }
         self.tools.remove("subagent");
+        self.tools.remove("subagent_fork");
     }
     pub fn configure_agent_templates(&mut self, templates: Vec<AgentTemplate>) {
         self.agent_templates = templates;
@@ -737,12 +796,10 @@ impl AgentKernel {
     pub fn subagent_manager(&self) -> Option<Arc<SubagentManager>> {
         self.subagent_manager.clone()
     }
-    /// Prepare enabled delegation without performing a model call or provisioning a child.
+    /// Prepare delegation without performing a model call or provisioning a
+    /// child. A depth budget of zero is the only off switch.
     pub fn prepare_subagents(&mut self) -> Option<mpsc::UnboundedReceiver<AgentEvent>> {
-        if !self.subagent_config.enabled
-            || self.subagent_config.max_depth == 0
-            || self.child_run.is_some()
-        {
+        if self.subagent_config.max_depth == 0 || self.child_run.is_some() {
             return None;
         }
         let host = self.child_host.clone()?;
@@ -765,7 +822,8 @@ impl AgentKernel {
             events,
         });
         self.subagent_manager = Some(Arc::clone(&manager));
-        self.tools.register(SubagentTool(manager));
+        self.tools.register(SubagentTool::spawn(Arc::clone(&manager)));
+        self.tools.register(SubagentTool::fork(manager));
         Some(receiver)
     }
 }

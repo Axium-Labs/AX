@@ -44,10 +44,10 @@ how to use it correctly *once the model has decided to use it*; the kernel
 assembles these into `[ax-capability-guidance]`. Guidance never implies the
 model should choose a tool. There is no global "tool use strategy" prompt.
 
-Alongside it, the neutral runtime prompt states that the current user request
-defines the task and that capabilities are options, not obligations, and the
-`[ax-delegation]` section states when a task queue, a subagent or a user
-question is actually warranted. See [agent-runtime.md](agent-runtime.md).
+Alongside it, the runtime prompt states that the current user request
+defines the work and that capabilities are options, not obligations. Queue and
+delegation discipline live in the `[ax-coding-harness]` policy. See
+[agent-runtime.md](agent-runtime.md).
 Communication guidance still applies: report related tool calls as one work
 phase, avoid narrating each routine result, and finish with one coherent answer.
 This guidance applies to CLI/TUI and ACP sessions used by AXCrew; it does not
@@ -458,9 +458,8 @@ Ordinary tool arguments may include `_ax_execution` with `goal_id`, `step`,
 `expected_output` and `scope`. The scheduler resolves result references first;
 the kernel validates the binding and declared path resources before execution,
 then strips runtime-only metadata. New steps may select directories within the
-initial workspace; embedded non-harness kernels allow the same step to narrow
-its scope. Coding-harness step subscopes are advisory. Scope expansion beyond
-that workspace is rejected. `_ax_observe` optionally names a JSON pointer to an
+initial workspace. Step subscopes are advisory; the workspace boundary itself is
+always enforced, and scope expansion beyond that workspace is rejected. `_ax_observe` optionally names a JSON pointer to an
 actual true boolean verifying output; repeated evidence does not reset stagnation.
 Every completed result is an observation, including empty/no-match and failure.
 
@@ -493,45 +492,51 @@ files and files larger than 4 MB, and stops at `max_results` (defaults 100 for
 than errors.
 
 
-## Optional subagents
+## Subagents
 
-Subagents are disabled by default. `/settings` toggles delegation and persists it
-in the existing AX config; `/settings subagent on` and `/settings subagent off`
-are also supported. CLI settings use `ax settings --subagent true|false`,
-`--max-concurrent 3`, and `--max-depth 1`. Changes are loaded before the next
-agent turn, including in a running TUI/ACP session. The JSON section is:
+Delegation is always available: there is no on/off switch, matching the
+deepseek-harness philosophy that composition — not configuration — decides what
+exists. One delegation implementation is instantiated as two tools:
+
+- `subagent(task, context?, tools?, policy?)` — spawns a **fresh-context**
+  child: no parent conversation, isolated memory/workspace by default. The
+  task must be self-contained. Agent templates narrow the child further.
+- `subagent_fork(prompt, description?)` — delegates to a child **seeded with
+  the parent's completed turns** (the current in-flight turn is never
+  inherited). It shares the parent workspace and provider, so the inherited
+  prefix stays eligible for provider-side cache reuse. The contract is fixed:
+  no model selection, no tool narrowing.
+
+Only the concurrency pool and the depth budget are tunable. `/settings` edits
+them and persists them in the existing AX config; `ax settings --max-concurrent
+8 --max-depth 1` is the CLI form. Changes are loaded before the next agent
+turn, including in a running TUI/ACP session. The JSON section is:
 
 ```json
-"subagent": { "enabled": false, "max_concurrent": 3, "max_depth": 1 }
+"subagent": { "max_concurrent": 8, "max_depth": 1 }
 ```
 
-Legacy `config.toml` supports the equivalent section and migrates through the
-existing config loader:
+Legacy `config.toml` sections that still carry an `enabled` key migrate through
+the existing config loader; the key is ignored.
 
-```ini
-[subagent]
-enabled = false
-max_concurrent = 3
-max_depth = 1
-```
-
-When disabled, no delegation tool, manager, child provisioning, extra prompt,
-planner request or model call is created. Enabling adds only
-`subagent(task, context?, tools?, policy?)`; the model decides whether to use it. The
-runtime primitives are `spawn_agent`, `wait_agent`, and `cancel_agent` on the
-kernel or its optional manager handle. Embedders attach a `ChildHost`, configure
-subagents and call `prepare_subagents` before direct primitive use; normal agent
-turns prepare the handle automatically.
+The runtime primitives are `spawn_agent`, `wait_agent`, and `cancel_agent` on
+the kernel or its optional manager handle. Embedders attach a `ChildHost` and
+call `prepare_subagents` before direct primitive use; normal agent turns
+prepare the handle automatically.
 
 Independent calls use the existing tool-round DAG and bounded concurrency.
-Delegation admission also limits children to `max_concurrent` (default 3,
+Delegation admission also limits children to `max_concurrent` (default 8,
 1–64); provisioning counts toward this bound. At most 64 tasks are admitted per
 turn, preventing unlimited spawn even with an unlimited execution budget.
-`max_depth` is 0 or 1; all children have delegation removed regardless of
-configuration. Tools are a whitelist intersected with the child's rebound
-registry; unknown or delegation tool requests are rejected. Empty tools disables
-all child tools. Provider/model/reasoning and the parent approval policy are
-inherited; tools and histories are not shared across child sessions.
+`max_depth` is 0 or 1: zero is the only way to disable delegation (no
+delegation tool is registered), and all children have delegation removed
+regardless of configuration. Tools are a whitelist intersected with the child's
+rebound registry; unknown or delegation tool requests are rejected. Empty tools
+disables all child tools. Provider/model/reasoning and the parent approval
+policy are inherited; tools and histories are not shared across child sessions.
+Every delegated child receives the delegation contract as context: its
+permission scope was fixed at start, denied operations must not be retried, and
+limitations belong in the reply to the delegating agent.
 
 Each tool returns `{status, summary, artifacts, error}`. Status is `completed`,
 `failed` or `cancelled`; artifacts identify the durable child state directory,
@@ -697,10 +702,9 @@ SandboxViolation and never triggers an automatic host retry. New local-effect to
 must declare a workspace worker boundary and use SandboxManager, rather than adding
 path-string checks or host spawn paths. See [security.md](security.md).
 
-Coding-harness kernels treat model-declared step subscopes as advisory while
-enforcing the initial workspace boundary. This prevents a guessed nested scope
-from locking recovery; embedded non-harness kernels retain declared scope checks.
-See [coding-harness.md](coding-harness.md).
+The runtime treats model-declared step subscopes as advisory while enforcing
+the initial workspace boundary. This prevents a guessed nested scope from
+locking recovery. See [coding-harness.md](coding-harness.md).
 
 ## SSH execution context
 

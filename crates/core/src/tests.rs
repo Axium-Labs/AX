@@ -245,8 +245,10 @@ async fn each_model_and_tool_message_is_checkpointed_in_order() {
         )
         .await
         .unwrap();
-    // Goal admission checkpoints the empty history before the first input.
-    assert_eq!(lengths, vec![0, 2, 3, 5, 6, 6]);
+    // Goal admission checkpoints the queue head before the first input; every
+    // goal runs on an active queue, and each queue mutation is checkpointed
+    // next to the model/tool messages it belongs to.
+    assert_eq!(lengths, vec![1, 3, 4, 5, 7, 8, 9, 10, 10]);
 }
 
 struct EchoProvider;

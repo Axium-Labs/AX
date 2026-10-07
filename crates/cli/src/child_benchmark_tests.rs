@@ -6,6 +6,10 @@
 //! ```bash
 //! cargo test -p cli --bin ax child_benchmark -- --ignored --nocapture --test-threads=1
 //! ```
+
+// Benchmark magnitudes sit far below f64 precision limits; the `as f64`
+// conversions are deliberate.
+#![allow(clippy::cast_precision_loss, clippy::cast_lossless)]
 //!
 //! The four numbers the child startup critical-path work is judged on:
 //! `workspace_create_ms`, `db_checkpoint_ms`, `quota_scan_ms`, `child_startup_ms`.
@@ -77,6 +81,7 @@ fn text(content: &str) -> ModelResponse {
     }
 }
 
+#[allow(clippy::needless_pass_by_value)] // fixture: literals only, readability over moves
 fn call(id: &str, name: &str, input: serde_json::Value) -> ModelResponse {
     ModelResponse {
         provider_metadata: None,

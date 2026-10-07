@@ -69,8 +69,6 @@ pub(crate) struct Cli {
 pub(crate) enum Command {
     /// Show or persist optional subagent settings; active agents reload next turn.
     Settings {
-        #[arg(long, action = clap::ArgAction::Set)]
-        subagent: Option<bool>,
         #[arg(long)]
         max_concurrent: Option<usize>,
         #[arg(long)]

@@ -18,6 +18,7 @@ fn git_test(path: &Path, args: &[&str]) -> String {
     );
     String::from_utf8_lossy(&output.stdout).trim().to_owned()
 }
+#[allow(clippy::needless_pass_by_value)] // fixture: literals only, readability over moves
 fn call(name: &str, input: Value) -> ModelResponse {
     ModelResponse {
         provider_metadata: None,
@@ -69,7 +70,7 @@ impl ModelProvider for Provider {
                 .unwrap()
                 .content
                 .clone();
-            let index = if task == "repo A" { 0 } else { 1 };
+            let index = usize::from(task != "repo A");
             let phase = request
                 .messages
                 .iter()
@@ -149,6 +150,7 @@ impl ModelProvider for Provider {
 }
 
 #[tokio::test]
+#[allow(clippy::too_many_lines)]
 async fn two_repositories_exact_revisions_partial_setup_failure_and_durable_patches() {
     let root = std::env::temp_dir().join(format!("ax-workspaces-{}", uuid::Uuid::new_v4()));
     let source = root.join("controller");
@@ -200,7 +202,7 @@ async fn two_repositories_exact_revisions_partial_setup_failure_and_durable_patc
         tools,
         Arc::new(AllowAll),
     )
-    .with_coding_harness()
+    
     .with_child_host(host)
     .with_execution_scope(source)
     .with_execution_budget(ExecutionBudget {
@@ -362,7 +364,7 @@ async fn empty_and_non_git_inherited_shell_edits_survive_cleanup_without_fabrica
     tools.register(tool::ShellTool);
     let mut runtime =
         AgentKernel::new(Arc::new(NoGitProvider { tasks }), tools, Arc::new(AllowAll))
-            .with_coding_harness()
+            
             .with_child_host(host)
             .with_execution_scope(source.clone());
     runtime.run_turn("write files", |_| {}).await.unwrap();

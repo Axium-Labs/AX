@@ -6,10 +6,10 @@ not inspect prompt keywords, task complexity, whether files changed, or whether
 tools, tests, shell commands or subagents were used earlier. Ordinary answers and
 code explanations require one execution model request and zero reviewer requests.
 
-Every turn is neutral by default: the user request defines the task, and the
-turn stops as soon as the request is satisfied. The neutral runtime prompt and
-the per-capability guidance are injected at the start of the turn; the coding
-harness is opt-in only. See [agent-runtime.md](agent-runtime.md).
+Every turn executes under the coding harness: the user request defines the
+work, and the runtime drives it to a terminal state. The runtime prompt and
+the per-capability guidance are injected at the start of the turn. See
+[agent-runtime.md](agent-runtime.md).
 
 ## Runtime state
 
@@ -60,7 +60,7 @@ resets when the call changes and at the start of each turn. See
 
 ## Optional Stop Guards
 
-No guard is installed by default. The coding harness is opt-in and only installs
+No guard is installed by default. The harness never installs
 execution policy/environment and typed task admission when explicitly enabled;
 enabling it does not enable review.
 
@@ -144,10 +144,11 @@ no default path generates them. Raw history remains intact.
 `test/harness/continuation.rs` and `subagent_continuation.rs` assert request counts,
 stream timing, real pending approval/retry/input, queued tasks, unfinished and
 unconsumed subagents, deterministic checks, model guard opt-in and denial/recovery.
-`test/harness/runtime_neutrality.rs` asserts the neutral default: a plain request
-is answered directly, context cannot hijack it, explicit investigation and fixes
-are allowed, long-running work is opt-in and resumable, and repeated identical
-calls are reminded rather than blocked.
+`test/harness/runtime_neutrality.rs` asserts the runtime contract: a plain request
+is answered directly and its goal queue completes, context cannot hijack it,
+explicit investigation and fixes run to completion, a long-running request
+creates a resumable queue, and repeated identical calls are reminded at 3/5/8
+rather than blocked.
 Existing frontend/workspace fixtures reject any default completion-review prompt.
 
 Design references: [OpenAI's Codex agent loop](https://openai.com/index/unrolling-the-codex-agent-loop/)

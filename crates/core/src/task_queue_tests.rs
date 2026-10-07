@@ -100,6 +100,32 @@ fn finish(status: &str, reason: &str) -> Result<ModelResponse, ModelError> {
     )
 }
 
+/// A fixture whose execution is classified as a runtime global blocker, so a
+/// scripted call produces an evidenced `ToolResult.global_blocker`.
+struct GlobalBlocker;
+
+#[async_trait]
+impl tool::Tool for GlobalBlocker {
+    fn name(&self) -> &'static str {
+        "blocker"
+    }
+    fn description(&self) -> &'static str {
+        "always fails with a global blocker"
+    }
+    fn input_schema(&self) -> Value {
+        serde_json::json!({"type":"object"})
+    }
+    fn safety(&self, _: &Value) -> SafetyLevel {
+        SafetyLevel::Safe
+    }
+    fn capability(&self, _: &Value) -> tool::Capability {
+        tool::Capability::FilesystemRead
+    }
+    async fn execute(&self, _: Value) -> Result<String, ToolError> {
+        Err(ToolError::GlobalBlocked("workspace globally inaccessible".into()))
+    }
+}
+
 fn provider(responses: Vec<Result<ModelResponse, ModelError>>) -> Arc<QueueProvider> {
     Arc::new(QueueProvider {
         requests: Mutex::new(vec![]),
@@ -556,18 +582,17 @@ async fn new_user_goal_supersedes_persisted_active_seventy_six_task_queue() {
 }
 
 #[tokio::test]
-async fn pending_work_text_cannot_end_goal_and_explicit_block_survives_reconnect() {
+async fn pending_work_text_cannot_end_goal_and_global_block_survives_reconnect() {
     let original = large_queue();
     let goal_id = original.goal_id.clone();
     let provider = provider(vec![
         text("Missing runner; stopping"),
-        call(
-            "block",
-            "task_queue",
-            serde_json::json!({"action":"block","reason":"all repository access denied"}),
-        ),
+        call("hit", "blocker", serde_json::json!({})),
     ]);
-    let mut runtime = kernel(provider.clone()).with_messages(vec![original.snapshot()]);
+    let mut tools = ToolRegistry::with_mode(tool::SandboxMode::Off);
+    tools.register(GlobalBlocker);
+    let mut runtime = AgentKernel::new(provider.clone(), tools, Arc::new(AllowAll))
+        .with_messages(vec![original.snapshot()]);
     let mut saved = vec![];
     let result = runtime
         .run_goal_turn_checkpointed(
@@ -581,10 +606,12 @@ async fn pending_work_text_cannot_end_goal_and_explicit_block_survives_reconnect
                 Ok(())
             },
         )
-        .await
-        .unwrap();
-    assert_eq!(provider.requests.lock().unwrap().len(), 2);
+        .await;
+    // Pending work keeps the goal alive after a text-only answer, and a real
+    // runtime blocker — not model prose — is what ends it as Blocked.
+    assert!(matches!(result, Err(AgentError::GlobalBlocked(_))));
     assert_eq!(runtime.task_queue().unwrap().state, QueueState::Blocked);
+    assert_eq!(provider.requests.lock().unwrap().len(), 2);
     let mut resumed = kernel(provider.clone()).with_messages(saved);
     assert_eq!(
         resumed
@@ -593,43 +620,26 @@ async fn pending_work_text_cannot_end_goal_and_explicit_block_survives_reconnect
             ))
             .await
             .unwrap(),
-        result
+        "global execution blocker: workspace globally inaccessible"
     );
     assert_eq!(provider.requests.lock().unwrap().len(), 2);
 }
 
 #[tokio::test]
 async fn explicit_global_stop_does_not_call_model_for_a_summary_or_remaining_tasks() {
-    let provider = provider(vec![call(
-        "blocked",
-        "task_queue",
-        serde_json::json!({"action":"block","reason":"workspace globally inaccessible"}),
-    )]);
-    let mut runtime = kernel(provider.clone());
-    let mut events = vec![];
-    assert_eq!(
-        runtime
-            .run_turn("Goal\n1. one\n2. two", |event| events.push(event))
-            .await
-            .unwrap(),
-        "workspace globally inaccessible"
-    );
+    let provider = provider(vec![call("hit", "blocker", serde_json::json!({}))]);
+    let mut tools = ToolRegistry::with_mode(tool::SandboxMode::Off);
+    tools.register(GlobalBlocker);
+    let mut runtime = AgentKernel::new(provider.clone(), tools, Arc::new(AllowAll));
+    let result = runtime
+        .run_turn("Goal\n1. one\n2. two", |_| {})
+        .await;
+    // A real runtime global blocker — not a model-declared one — ends the goal
+    // as Blocked without any summary model call for the remaining tasks.
+    assert!(matches!(result, Err(AgentError::GlobalBlocked(_))));
     assert_eq!(runtime.task_queue().unwrap().state, QueueState::Blocked);
+    // One planning request and the blocked execution; no summary request.
     assert_eq!(provider.requests.lock().unwrap().len(), 2);
-    assert_eq!(
-        events
-            .iter()
-            .filter(|e| matches!(e, AgentEvent::TurnFinished))
-            .count(),
-        1
-    );
-    assert_eq!(
-        events
-            .iter()
-            .filter(|e| matches!(e, AgentEvent::ContentDelta { .. }))
-            .count(),
-        1
-    );
 }
 
 #[tokio::test]
@@ -821,7 +831,11 @@ async fn factual_list_does_not_create_tasks_or_spawn_children() {
         "Compare:\n- fast\n- slow",
     ] {
         runtime.run_turn(prompt, |_| {}).await.unwrap();
-        assert!(runtime.task_queue().is_none());
+        // The goal queue exists (every goal runs tracked), but a factual list
+        // never registers tasks or spawns children.
+        let queue = runtime.task_queue().unwrap();
+        assert!(queue.tasks.is_empty());
+        assert!(!queue.active());
     }
 }
 #[test]

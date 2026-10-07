@@ -270,13 +270,8 @@ fn subagent_settings() -> Result<Box<dyn super::bottom_pane::PaneView>> {
         vec!["Subagent changes apply on the next agent turn.".into()],
         vec![
             SurfaceItem {
-                id: "enabled".into(),
-                label: "Subagents (toggle)".into(),
-                value: config.subagent.enabled.to_string(),
-            },
-            SurfaceItem {
                 id: "max_concurrent".into(),
-                label: "Maximum concurrent subagents (cycle 1–3)".into(),
+                label: "Maximum concurrent subagents (cycle 1–8)".into(),
                 value: config.subagent.max_concurrent.to_string(),
             },
             SurfaceItem {
@@ -287,16 +282,6 @@ fn subagent_settings() -> Result<Box<dyn super::bottom_pane::PaneView>> {
         ],
         "Enter change · Esc close",
     ))
-}
-fn save_subagent_setting(enabled: bool, app: &mut App) -> Result<()> {
-    let mut config = AxConfig::load()?;
-    config.subagent.enabled = enabled;
-    config.save()?;
-    app.push(
-        TranscriptKind::Status,
-        "Saved; applies on the next agent turn.",
-    );
-    Ok(())
 }
 
 fn execution_settings() -> Result<Box<dyn super::bottom_pane::PaneView>> {
@@ -396,8 +381,7 @@ pub(super) async fn execute_slash(
         "/status" => pane.push_view(status_panel(state, selection, app)),
         "/settings" => pane.push_view(capability_settings(state)),
         "/agents" => catalogs::open_agents(state, pane)?,
-        "/settings subagent on" => save_subagent_setting(true, app)?,
-        "/settings subagent off" => save_subagent_setting(false, app)?,
+        "/settings subagent" => pane.push_view(subagent_settings()?),
         "/environment" => pane.push_view(execution_settings()?),
         other => {
             if let Some(term) = other.strip_prefix("/model ") {
@@ -1060,9 +1044,8 @@ pub(super) async fn apply_modal_action(
             if surface == "subagent_settings" {
                 let mut config = AxConfig::load()?;
                 match id.as_str() {
-                    "enabled" => config.subagent.enabled = !config.subagent.enabled,
                     "max_concurrent" => {
-                        config.subagent.max_concurrent = config.subagent.max_concurrent % 3 + 1;
+                        config.subagent.max_concurrent = config.subagent.max_concurrent % 8 + 1;
                     }
                     "max_depth" => {
                         config.subagent.max_depth = usize::from(config.subagent.max_depth == 0);

@@ -137,7 +137,7 @@ Owns:
   concurrency.
 
 The core has no personality or task-classification prompt. Every run receives
-one neutral runtime prompt (`[ax-agent-runtime]` + `[ax-delegation]`), the
+one runtime prompt (`[ax-agent-runtime]`), the
 per-capability guidance owned by the registered tools (`[ax-capability-guidance]`)
 and bounded runtime context (`[ax-environment]`: cwd, workspace root, sandbox
 posture). These describe boundaries, the environment and how to use a capability
@@ -250,7 +250,7 @@ Guarantees:
 user task
   → compact eligible Skill metadata
   → retrieve memory and checkpoint user input
-  → inject neutral runtime + delegation + per-capability guidance + runtime context
+  → inject runtime prompt + per-capability guidance + environment snapshot + coding policy
   → context pressure check / layered compression
   → model streaming request
   → final + no continuation → optional StopGuard (default absent) → TurnFinished

@@ -44,7 +44,16 @@ fn recovery_stays_at_failed_step_and_returns_after_corrected_retry() {
         &tool::ToolResult::new(false, "missing input".into()),
     );
     assert_eq!(state.recovery_for.as_deref(), Some("load parquet"));
-    let outside = json!({"operation":"list","path":root.join("other-project")});
+    // Step subscopes are advisory: recovery may reach anywhere inside the
+    // workspace. The workspace boundary itself stays hard.
+    let elsewhere_in_workspace = json!({"operation":"list","path":root.join("other-project")});
+    assert!(
+        state
+            .prepare(&tool::FilesystemTool, elsewhere_in_workspace)
+            .is_ok()
+    );
+    let outside_root = temp();
+    let outside = json!({"operation":"list","path":outside_root.join("secret")});
     assert!(state.prepare(&tool::FilesystemTool, outside).is_err());
     assert_eq!(state.current_step, "load parquet");
     let mut retry = input.clone();
@@ -330,20 +339,22 @@ fn child_events_are_counted_once_and_keep_ui_ids_after_restore() {
     std::fs::remove_dir_all(root).unwrap();
 }
 #[test]
-fn search_scope_remains_enforced_but_recovery_can_replan_within_workspace() {
+fn step_subscopes_are_advisory_but_the_workspace_boundary_stays_hard() {
     let root = temp();
     let step_dir = root.join("data");
     std::fs::create_dir(&step_dir).unwrap();
     let mut state = state(&root);
     let input = json!({"operation":"read","path":step_dir.join("data.parquet"),"_ax_execution":binding("load parquet", &step_dir)});
     state.prepare(&tool::FilesystemTool, input).unwrap();
+    // A declared step may guide the work, but it does not fence the run:
+    // anywhere inside the workspace stays reachable for recovery or replanning.
     assert!(
         state
             .prepare(
                 &tool::SearchTool::default(),
                 json!({"path":root,"query":"parquet"})
             )
-            .is_err()
+            .is_ok()
     );
     assert!(
         state
@@ -352,6 +363,16 @@ fn search_scope_remains_enforced_but_recovery_can_replan_within_workspace() {
                 json!({"path":step_dir,"query":"parquet"})
             )
             .is_ok()
+    );
+    // The workspace boundary is still enforced.
+    let outside_root = temp();
+    assert!(
+        state
+            .prepare(
+                &tool::SearchTool::default(),
+                json!({"path":outside_root,"query":"parquet"})
+            )
+            .is_err()
     );
     state.record(
         "failure",
@@ -368,6 +389,7 @@ fn search_scope_remains_enforced_but_recovery_can_replan_within_workspace() {
             .is_ok()
     );
     std::fs::remove_dir_all(root).unwrap();
+    std::fs::remove_dir_all(outside_root).unwrap();
 }
 
 #[test]

@@ -47,7 +47,9 @@ async fn active_child_cannot_refresh_its_wall_deadline_and_next_item_continues()
         .kernel
         .with_child_host(Arc::new(DeadlineHost(fixture.host)));
     tokio::time::timeout(
-        Duration::from_secs(4),
+        // The one-time environment probe on the first turn of a test process
+        // shares this wall clock with the child deadline.
+        Duration::from_secs(20),
         kernel.run_turn("execute both", |_| {}),
     )
     .await

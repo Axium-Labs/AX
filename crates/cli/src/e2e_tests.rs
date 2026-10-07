@@ -41,6 +41,7 @@ fn text(content: &str) -> ModelResponse {
     }
 }
 
+#[allow(clippy::needless_pass_by_value)] // fixture: literals only, readability over moves
 fn call(id: &str, name: &str, input: serde_json::Value) -> ModelResponse {
     ModelResponse {
         provider_metadata: None,
@@ -267,6 +268,7 @@ impl Fixture {
         }
     }
 
+    #[allow(clippy::unused_self)]
     fn selection(&self) -> crate::model_selection::ModelSelection {
         crate::model_selection::ModelSelection {
             provider: crate::model_selection::ProviderKind::Compatible,
@@ -285,7 +287,7 @@ impl Fixture {
         let selection = self.selection();
         let approval: Arc<dyn ApprovalPolicy> = Arc::new(AllowAll);
         run_prompt_with(&mut self.state, &selection, approval, prompt, |event| {
-            events.push(event)
+            events.push(event);
         })
         .await
         .expect("prompt completes")
@@ -299,6 +301,8 @@ impl Drop for Fixture {
 }
 
 #[tokio::test]
+// One end-to-end transcript over four phases; the script is the scenario.
+#[allow(clippy::too_many_lines)]
 async fn instructions_then_parallel_children_then_a_question_then_one_final_answer() {
     let mut fixture = Fixture::new();
     let mut events = Vec::new();

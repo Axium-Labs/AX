@@ -43,20 +43,15 @@ impl AgentKernel {
                 {
                     return Err(AgentError::GoalMismatch("new goal ID must be nonempty and fresh; use explicit resume for the saved goal".into()));
                 }
-                let had_queue = self.task_queue.is_some();
-                // A durable empty head prevents restoring an archived queue when
-                // the replacement goal is a plain single task.
-                let next = if had_queue || self.coding_harness {
-                    let mut queue = task_queue::TaskQueue::new(input.into(), vec![]);
-                    if self.coding_harness {
-                        queue.state = QueueState::Active;
-                    }
-                    queue.goal_id.clone_from(&goal_id);
-                    queue.parent_goal_id.clone_from(&self.parent_goal_id);
-                    Some(queue)
-                } else {
-                    None
-                };
+                // Every goal runs on an active queue: the harness drives the
+                // queue to a terminal state, so a durable empty head prevents
+                // restoring an archived queue when the replacement goal is a
+                // plain single task.
+                let mut queue = task_queue::TaskQueue::new(input.into(), vec![]);
+                queue.state = QueueState::Active;
+                queue.goal_id.clone_from(&goal_id);
+                queue.parent_goal_id.clone_from(&self.parent_goal_id);
+                let next = Some(queue);
                 if let Some(previous) = &mut self.task_queue {
                     previous.stop(QueueState::Superseded, format!("superseded by {goal_id}"));
                     self.raw_turn_messages.push(Message::system(format!(

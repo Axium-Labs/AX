@@ -165,10 +165,7 @@ impl ChildHost for Host {
         })
     }
 }
-fn fixture(
-    enabled: bool,
-    max_concurrent: usize,
-) -> (AgentKernel, Arc<Provider>, Arc<Host>, Arc<AtomicUsize>) {
+fn fixture(max_concurrent: usize) -> (AgentKernel, Arc<Provider>, Arc<Host>, Arc<AtomicUsize>) {
     let provider = Arc::new(Provider::default());
     let host = Arc::new(Host::default());
     let writes = Arc::new(AtomicUsize::new(0));
@@ -179,7 +176,6 @@ fn fixture(
         AgentKernel::new(provider.clone(), tools, Arc::new(AllowAll)).with_child_host(host.clone());
     kernel.push_context(Message::system("parent-secret"));
     kernel.configure_subagents(SubagentConfig {
-        enabled,
         max_concurrent,
         max_depth: 1,
     });
@@ -187,27 +183,8 @@ fn fixture(
 }
 
 #[tokio::test]
-async fn disabled_has_no_tool_manager_initialization_or_extra_model_call() {
-    let (mut kernel, provider, host, _) = fixture(false, 3);
-    assert!(kernel.prepare_subagents().is_none());
-    assert!(kernel.subagent_manager().is_none());
-    assert!(!kernel.has_tool("subagent"));
-    assert!(!kernel.has_tool("spawn_agent"));
-    kernel.run_turn("plain", |_| {}).await.unwrap();
-    assert_eq!(host.prepared.load(Ordering::SeqCst), 0);
-    assert_eq!(provider.requests.lock().unwrap().len(), 1);
-    assert!(
-        provider.requests.lock().unwrap()[0]
-            .tools
-            .iter()
-            .all(|tool| !["subagent", "spawn_agent"].contains(&tool.function.name.as_str()))
-    );
-    assert!(kernel.subagent_manager().is_none());
-}
-
-#[tokio::test]
 async fn enabled_tool_reuses_loop_with_isolated_context_session_and_final_results() {
-    let (mut kernel, provider, host, _) = fixture(true, 3);
+    let (mut kernel, provider, host, _) = fixture(3);
     let mut events = vec![];
     assert_eq!(
         kernel.run_turn("parent", |e| events.push(e)).await.unwrap(),
@@ -278,7 +255,7 @@ async fn enabled_tool_reuses_loop_with_isolated_context_session_and_final_result
 
 #[tokio::test]
 async fn enabled_delegation_does_not_force_a_child_or_planner_request() {
-    let (mut kernel, provider, host, _) = fixture(true, 3);
+    let (mut kernel, provider, host, _) = fixture(3);
     kernel.run_turn("plain", |_| {}).await.unwrap();
     assert_eq!(host.prepared.load(Ordering::SeqCst), 0);
     assert_eq!(provider.requests.lock().unwrap().len(), 1);
@@ -287,7 +264,7 @@ async fn enabled_delegation_does_not_force_a_child_or_planner_request() {
 
 #[tokio::test]
 async fn named_agents_read_instructions_only_on_invocation_and_narrow_tools() {
-    let (mut kernel, provider, host, _) = fixture(true, 3);
+    let (mut kernel, provider, host, _) = fixture(3);
     let path = std::env::temp_dir().join(format!(
         "ax-agent-{}.md",
         std::time::SystemTime::now()
@@ -350,7 +327,7 @@ async fn named_agents_read_instructions_only_on_invocation_and_narrow_tools() {
 
 #[test]
 fn unnamed_delegation_has_no_empty_agent_enum() {
-    let (mut kernel, _, _, _) = fixture(true, 3);
+    let (mut kernel, _, _, _) = fixture(3);
     let _events = kernel.prepare_subagents().unwrap();
     assert!(
         kernel.tools.get("subagent").unwrap().input_schema()["properties"]
@@ -361,7 +338,7 @@ fn unnamed_delegation_has_no_empty_agent_enum() {
 
 #[tokio::test]
 async fn tools_only_narrow_and_children_cannot_spawn() {
-    let (mut kernel, provider, _, _) = fixture(true, 3);
+    let (mut kernel, provider, _, _) = fixture(3);
     let _events = kernel.prepare_subagents().unwrap();
     let manager = kernel.subagent_manager().unwrap();
     for name in ["unknown", "subagent", "spawn_agent"] {
@@ -417,7 +394,7 @@ impl ApprovalPolicy for StoreApproval {
 }
 #[tokio::test]
 async fn child_inherits_parent_permission_ceiling() {
-    let (mut kernel, _, _, writes) = fixture(true, 3);
+    let (mut kernel, _, _, writes) = fixture(3);
     let store = PermissionStore::default();
     store.set_capability(Capability::FilesystemWrite, PermissionDecision::Deny);
     kernel.approval = Arc::new(StoreApproval(store.clone()));
@@ -434,7 +411,7 @@ async fn child_inherits_parent_permission_ceiling() {
 
 #[tokio::test]
 async fn primitive_concurrency_is_bounded_and_wait_is_repeatable() {
-    let (mut kernel, provider, _, _) = fixture(true, 2);
+    let (mut kernel, provider, _, _) = fixture(2);
     let _events = kernel.prepare_subagents();
     let manager = kernel.subagent_manager().unwrap();
     let ids = (0..8)
@@ -453,7 +430,7 @@ async fn primitive_concurrency_is_bounded_and_wait_is_repeatable() {
 
 #[tokio::test]
 async fn cancel_timeout_and_failures_propagate_and_close_receipts() {
-    let (mut kernel, provider, host, _) = fixture(true, 1);
+    let (mut kernel, provider, host, _) = fixture(1);
     let _events = kernel.prepare_subagents();
     let manager = kernel.subagent_manager().unwrap();
     let id = manager
@@ -492,22 +469,24 @@ async fn cancel_timeout_and_failures_propagate_and_close_receipts() {
 }
 
 #[tokio::test]
-async fn toggle_off_removes_tool_and_manager_on_next_turn() {
-    let (mut kernel, _, host, _) = fixture(true, 3);
+async fn reconfiguration_keeps_delegation_available_on_the_next_turn() {
+    // There is no off switch any more: reconfiguring with default knobs keeps
+    // both delegation tools registered on the next turn.
+    let (mut kernel, _, host, _) = fixture(3);
     let _events = kernel.prepare_subagents();
     assert!(kernel.has_tool("subagent"));
     kernel.configure_subagents(SubagentConfig::default());
     kernel.run_turn("plain", |_| {}).await.unwrap();
-    assert!(!kernel.has_tool("subagent"));
-    assert!(kernel.subagent_manager().is_none());
+    assert!(kernel.has_tool("subagent"));
+    assert!(kernel.has_tool("subagent_fork"));
+    assert!(kernel.subagent_manager().is_some());
     assert_eq!(host.prepared.load(Ordering::SeqCst), 0);
 }
 
 #[tokio::test]
 async fn zero_depth_disables_delegation_without_initialization() {
-    let (mut kernel, _, host, _) = fixture(true, 3);
+    let (mut kernel, _, host, _) = fixture(3);
     kernel.configure_subagents(SubagentConfig {
-        enabled: true,
         max_depth: 0,
         ..SubagentConfig::default()
     });
@@ -518,10 +497,10 @@ async fn zero_depth_disables_delegation_without_initialization() {
 
 #[tokio::test]
 async fn model_tool_failure_preserves_structured_result_and_failure_status() {
-    let (mut kernel, _, _, _) = fixture(true, 3);
+    let (mut kernel, _, _, _) = fixture(3);
     let _events = kernel.prepare_subagents();
     let manager = kernel.subagent_manager().unwrap();
-    let tool = SubagentTool(manager);
+    let tool = SubagentTool::spawn(manager);
     let Err(ToolError::Execution(raw)) = tool.execute(json!({"task":"provider-failure"})).await
     else {
         panic!("child failure must fail the tool");
@@ -543,10 +522,10 @@ async fn model_tool_failure_preserves_structured_result_and_failure_status() {
 
 #[tokio::test]
 async fn dropping_parent_tool_cancels_child_and_closes_receipt() {
-    let (mut kernel, _, host, _) = fixture(true, 1);
+    let (mut kernel, _, host, _) = fixture(1);
     let _events = kernel.prepare_subagents();
     let manager = kernel.subagent_manager().unwrap();
-    let tool = SubagentTool(manager.clone());
+    let tool = SubagentTool::spawn(manager.clone());
     assert!(
         tokio::time::timeout(
             std::time::Duration::from_millis(50),
@@ -561,7 +540,7 @@ async fn dropping_parent_tool_cancels_child_and_closes_receipt() {
 
 #[tokio::test]
 async fn admission_is_finite_and_disabling_revokes_retained_handles() {
-    let (mut kernel, _, host, _) = fixture(true, 1);
+    let (mut kernel, _, host, _) = fixture(1);
     let _events = kernel.prepare_subagents();
     let manager = kernel.subagent_manager().unwrap();
     let ids = (0..64)
@@ -591,7 +570,7 @@ async fn admission_is_finite_and_disabling_revokes_retained_handles() {
 #[tokio::test]
 async fn explicit_child_inheritance_and_custom_allow_cannot_elevate() {
     use crate::child_policy::*;
-    let (mut kernel, provider, _, writes) = fixture(true, 1);
+    let (mut kernel, provider, _, writes) = fixture(1);
     kernel.push_context(Message::user("parent context marker"));
     let store = PermissionStore::default();
     store.set_capability(Capability::FilesystemWrite, PermissionDecision::Deny);
@@ -654,7 +633,7 @@ async fn explicit_child_inheritance_and_custom_allow_cannot_elevate() {
 #[tokio::test]
 async fn child_model_override_requires_parent_registration() {
     use crate::child_policy::*;
-    let (mut kernel, _, _, _) = fixture(true, 1);
+    let (mut kernel, _, _, _) = fixture(1);
     let alternate = Arc::new(Provider::default());
     kernel.register_child_model("approved".into(), alternate.clone());
     let _events = kernel.prepare_subagents();

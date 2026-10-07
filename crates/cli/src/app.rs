@@ -69,18 +69,14 @@ pub(crate) fn run_preflight(cli: &Cli) -> Result<bool> {
 /// command.
 fn run_settings(cli: &Cli) -> Result<bool> {
     let Some(Command::Settings {
-        subagent,
         max_concurrent,
         max_depth,
     }) = &cli.command
     else {
         return Ok(false);
     };
-    let (subagent, max_concurrent, max_depth) = (*subagent, *max_concurrent, *max_depth);
+    let (max_concurrent, max_depth) = (*max_concurrent, *max_depth);
     let mut config = config::AxConfig::load()?;
-    if let Some(value) = subagent {
-        config.subagent.enabled = value;
-    }
     if let Some(value) = max_concurrent {
         anyhow::ensure!((1..=64).contains(&value), "max_concurrent must be 1..=64");
         config.subagent.max_concurrent = value;
@@ -89,7 +85,7 @@ fn run_settings(cli: &Cli) -> Result<bool> {
         anyhow::ensure!(value <= 1, "max_depth must be 0 or 1");
         config.subagent.max_depth = value;
     }
-    if subagent.is_some() || max_concurrent.is_some() || max_depth.is_some() {
+    if max_concurrent.is_some() || max_depth.is_some() {
         config.save()?;
     }
     println!("{}", serde_json::to_string_pretty(&config.subagent)?);
@@ -155,6 +151,9 @@ pub(crate) async fn run_control_command(cli: &Cli, locations: &Locations) -> Res
 ///
 /// # Errors
 /// Returns whatever the selected command reports.
+// One dispatch table for every entry point: the ordering of the arms is the
+// CLI's contract, so the function length is the point.
+#[allow(clippy::too_many_lines)]
 pub(crate) async fn dispatch(
     cli: &Cli,
     locations: &Locations,

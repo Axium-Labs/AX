@@ -101,7 +101,7 @@ impl tool::Tool for Operation {
 fn kernel(provider: Arc<Script>) -> AgentKernel {
     let mut tools = tool::ToolRegistry::with_mode(tool::SandboxMode::Off);
     tools.register(Operation);
-    AgentKernel::new(provider, tools, Arc::new(AllowAll)).with_coding_harness()
+    AgentKernel::new(provider, tools, Arc::new(AllowAll))
 }
 
 #[tokio::test]

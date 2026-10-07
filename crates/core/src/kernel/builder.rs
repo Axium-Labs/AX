@@ -27,7 +27,6 @@ impl AgentKernel {
         // The kernel binds its own reader so children can rebind it.
         tools.register(result_reader.clone());
         Self {
-            coding_harness: false,
             guard_model_requests: 0,
             continuation: crate::TurnState::default(),
             activity: Arc::default(),
@@ -156,7 +155,6 @@ impl AgentKernel {
         tools.remove("spawn_agent");
         tools.register(result_reader.clone());
         let mut worker = Self {
-            coding_harness: self.coding_harness,
             guard_model_requests: 0,
             continuation: crate::TurnState::default(),
             activity: Arc::default(),

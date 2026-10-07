@@ -8,6 +8,9 @@ pub enum ContextInheritance {
     Summary,
     LastN,
     Full,
+    /// Every completed turn of the parent conversation, excluding the current
+    /// in-flight turn: the `subagent_fork` seed.
+    CompletedTurns,
 }
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -102,6 +105,15 @@ impl ChildPolicy {
                 .cloned()
                 .collect(),
             ContextInheritance::Full => messages.to_vec(),
+            // Completed turns end where the current in-flight turn starts, so
+            // the fork child never sees the turn that is delegating it.
+            ContextInheritance::CompletedTurns => {
+                let start = messages
+                    .iter()
+                    .rposition(|m| m.role == Role::User)
+                    .unwrap_or(messages.len());
+                messages[..start].to_vec()
+            }
             ContextInheritance::LastN => {
                 if self.last_n == 0 {
                     return Err("last_n requires a positive count");

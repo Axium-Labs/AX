@@ -85,9 +85,8 @@ mod harness_tests;
 #[path = "../../../test/harness/continuation.rs"]
 mod continuation_tests;
 
-// Local-only acceptance suite for the neutral runtime (A–G). The committed
-// lib.rs omits this block (tests are not committed in this workspace); keep it
-// locally to run `cargo test -p runtime-core`.
+// Acceptance suite for the runtime (A–G). The suite drives the real kernel
+// loop with scripted providers.
 #[cfg(test)]
 #[path = "../../../test/harness/runtime_neutrality.rs"]
 mod runtime_neutrality_tests;

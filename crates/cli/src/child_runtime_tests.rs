@@ -184,10 +184,7 @@ async fn optional_subagent_uses_local_child_session_and_durable_artifact() {
     let provider = provider(false, false, false);
     let mut kernel = fixture.kernel(provider.clone());
     kernel.push_context(model::Message::system("controller secret"));
-    kernel.configure_subagents(runtime_core::SubagentConfig {
-        enabled: true,
-        ..runtime_core::SubagentConfig::default()
-    });
+    kernel.configure_subagents(runtime_core::SubagentConfig::default());
     let _events = kernel.prepare_subagents().unwrap();
     let id = kernel
         .spawn_agent("child 1", runtime_core::SpawnOptions::default())
@@ -609,7 +606,7 @@ async fn durable_child_receipt_prevents_reexecution_after_controller_checkpoint_
                     });
                 if queue
                     .as_ref()
-                    .is_some_and(|q| q.tasks[0].status == TaskStatus::Completed)
+                    .is_some_and(|q| q.tasks.first().is_some_and(|t| t.status == TaskStatus::Completed))
                 {
                     return Err(AgentError::Persistence(
                         "simulated disconnect before controller commit".into(),
