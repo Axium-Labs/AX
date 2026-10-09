@@ -212,9 +212,15 @@ async fn a_plain_question_is_answered_directly() {
 #[tokio::test]
 async fn b_retrieval_request_does_not_touch_the_workspace() {
     // Branch 1: existing knowledge is enough — a direct answer.
-    let provider = Script::new(vec![response("鲁迅的代表作有《呐喊》《彷徨》《朝花夕拾》。", vec![])]);
+    let provider = Script::new(vec![response(
+        "鲁迅的代表作有《呐喊》《彷徨》《朝花夕拾》。",
+        vec![],
+    )]);
     let mut runtime = kernel(Arc::clone(&provider));
-    runtime.run_turn("找一下鲁迅有哪些代表作", |_| {}).await.unwrap();
+    runtime
+        .run_turn("找一下鲁迅有哪些代表作", |_| {})
+        .await
+        .unwrap();
     let requests = provider.requests();
     assert_eq!(requests.len(), 1);
     let text = all_messages(&requests);
@@ -227,7 +233,10 @@ async fn b_retrieval_request_does_not_touch_the_workspace() {
 #[tokio::test]
 async fn b_retrieval_may_search_the_web_without_touching_the_workspace() {
     let provider = Script::new(vec![
-        response("", vec![call("search", "web", json!({"queries":["鲁迅 代表作"]}))]),
+        response(
+            "",
+            vec![call("search", "web", json!({"queries":["鲁迅 代表作"]}))],
+        ),
         response("鲁迅的代表作有《呐喊》《彷徨》《朝花夕拾》。", vec![]),
     ]);
     let mut runtime = kernel_with_web(Arc::clone(&provider));
@@ -416,10 +425,7 @@ async fn f_long_running_work_is_explicit_and_resumable() {
             json!({"action":"cancel","reason":"user stopped the refactor"}),
         )],
     ));
-    runtime
-        .run_goal_turn("main", intent, |_| {})
-        .await
-        .unwrap();
+    runtime.run_goal_turn("main", intent, |_| {}).await.unwrap();
     let queue = runtime.task_queue().expect("queue survives the resume");
     assert_eq!(queue.tasks.len(), 2);
     assert!(!queue.active());
@@ -437,10 +443,7 @@ async fn g_repeated_identical_calls_are_reminded_not_blocked() {
         response("Done after changing approach.", vec![]),
     ]);
     let mut runtime = kernel(Arc::clone(&provider));
-    let result = runtime
-        .run_turn("work", |_| {})
-        .await
-        .unwrap();
+    let result = runtime.run_turn("work", |_| {}).await.unwrap();
     assert_eq!(result, "Done after changing approach.");
     let requests = provider.requests();
     assert_eq!(requests.len(), 4);
@@ -466,7 +469,12 @@ async fn g_repeated_identical_calls_are_reminded_not_blocked() {
 async fn g_every_repeat_threshold_fires_in_the_real_loop() {
     let same = json!({"step": 1});
     let mut replies = (1..=8)
-        .map(|n| response("", vec![call(format!("c{n}").as_str(), "capability", same.clone())]))
+        .map(|n| {
+            response(
+                "",
+                vec![call(format!("c{n}").as_str(), "capability", same.clone())],
+            )
+        })
         .collect::<Vec<_>>();
     replies.push(response("Done.", vec![]));
     let provider = Script::new(replies);
@@ -487,7 +495,10 @@ async fn g_every_repeat_threshold_fires_in_the_real_loop() {
     // A reminder is injected once per threshold hit and then persists in the
     // transcript, so the last request carries all three.
     for request in &requests[0..3] {
-        assert!(reminders(request).is_empty(), "no reminder before the 3rd call");
+        assert!(
+            reminders(request).is_empty(),
+            "no reminder before the 3rd call"
+        );
     }
     assert_eq!(reminders(&requests[3]).len(), 1);
     let gentle = &reminders(&requests[3])[0];
@@ -496,7 +507,11 @@ async fn g_every_repeat_threshold_fires_in_the_real_loop() {
     assert!(reminders(&requests[4])[0] == *gentle);
     let fifth = reminders(&requests[5]);
     assert_eq!(fifth.len(), 2);
-    assert!(fifth.iter().any(|text| text.contains("consecutive_calls: 5")));
+    assert!(
+        fifth
+            .iter()
+            .any(|text| text.contains("consecutive_calls: 5"))
+    );
     for request in &requests[6..8] {
         assert_eq!(reminders(request).len(), 2);
     }

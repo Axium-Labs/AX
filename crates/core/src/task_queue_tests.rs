@@ -122,7 +122,9 @@ impl tool::Tool for GlobalBlocker {
         tool::Capability::FilesystemRead
     }
     async fn execute(&self, _: Value) -> Result<String, ToolError> {
-        Err(ToolError::GlobalBlocked("workspace globally inaccessible".into()))
+        Err(ToolError::GlobalBlocked(
+            "workspace globally inaccessible".into(),
+        ))
     }
 }
 
@@ -631,9 +633,7 @@ async fn explicit_global_stop_does_not_call_model_for_a_summary_or_remaining_tas
     let mut tools = ToolRegistry::with_mode(tool::SandboxMode::Off);
     tools.register(GlobalBlocker);
     let mut runtime = AgentKernel::new(provider.clone(), tools, Arc::new(AllowAll));
-    let result = runtime
-        .run_turn("Goal\n1. one\n2. two", |_| {})
-        .await;
+    let result = runtime.run_turn("Goal\n1. one\n2. two", |_| {}).await;
     // A real runtime global blocker — not a model-declared one — ends the goal
     // as Blocked without any summary model call for the remaining tasks.
     assert!(matches!(result, Err(AgentError::GlobalBlocked(_))));

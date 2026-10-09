@@ -945,6 +945,16 @@ impl ChildHost for LocalChildHost {
         Ok(child)
     }
 
+    fn fork_for_child(&self, run: &ChildRun) -> Option<std::sync::Arc<dyn ChildHost>> {
+        Some(std::sync::Arc::new(Self {
+            sandbox: std::sync::OnceLock::new(),
+            source: run.cwd.clone(),
+            root: self.root.clone(),
+            excluded: self.excluded.clone(),
+            policy: self.policy,
+        }))
+    }
+
     async fn prepare_task(
         &self,
         controller: &AgentKernel,

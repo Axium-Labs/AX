@@ -55,3 +55,7 @@ workspace = true
 [[test]]
 name = "linux_child_sandbox"
 harness = false
+
+[[test]]
+name = "provider_removal"
+path = "../../test/providers/removal_cli.rs"

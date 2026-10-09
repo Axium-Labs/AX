@@ -61,6 +61,11 @@ pub struct PreparedChild {
 /// The composition root owns workspace/session/memory provisioning.
 #[async_trait]
 pub trait ChildHost: Send + Sync {
+    /// Rebind lazy child provisioning to the delegated child's workspace.
+    fn fork_for_child(&self, _run: &ChildRun) -> Option<std::sync::Arc<dyn ChildHost>> {
+        None
+    }
+
     /// Persist a task-local setup failure even when no child session could be
     /// created. A missing workspace must not make this receipt overwrite a sibling.
     /// # Errors

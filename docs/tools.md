@@ -148,9 +148,18 @@ including after restore. Typed DAG references still resolve the original value.
 
 Nonzero shell exits fail. ACP live updates and replay retain failure status,
 result envelopes, original call IDs and tool names. ACP `turn_changes` lists
-changed files using current Git diff counts and is persisted through the existing
-history; it never stages/reverts files and is excluded from model context. Counts
-may include pre-existing edits to the same changed file. `AX_EVENT_LOG` optionally
+changed files by comparing file contents before and after the current execution,
+including creations, deletions, clean tracked files and ordinary non-Git files.
+It persists unified diffs in existing history, never stages/reverts files and is
+excluded from model context. Pre-existing edits are the baseline, so untouched
+user changes are excluded. An empty final snapshot clears incremental tool edits.
+Binary/non-UTF-8 changes are marked explicitly without invented text counts.
+Git supplies minimal text hunks; without Git the fallback is a valid full-file
+replacement diff. Git ignore rules and runtime/build folders (`.git`, `.ax`,
+`AX_HOME`, `target`, `node_modules`, `__pycache__`) are excluded. Snapshots measure
+content changes during the run, so concurrent external edits within that interval
+can also appear. A failed snapshot is reported, not presented as no changes.
+`AX_EVENT_LOG` optionally
 records runtime JSONL for measurement without normal startup work. The workspace
 `benchmark/README.md` documents the fixed local benchmark and limitations.
 
@@ -494,9 +503,9 @@ than errors.
 
 ## Subagents
 
-Delegation is always available: there is no on/off switch, matching the
-deepseek-harness philosophy that composition — not configuration — decides what
-exists. One delegation implementation is instantiated as two tools:
+Delegation tools are registered by default when a `ChildHost` is attached.
+One delegation implementation is instantiated as two tools; `max_depth = 0`
+disables both without initializing named-Agent metadata or provisioning children:
 
 - `subagent(task, context?, tools?, policy?)` — spawns a **fresh-context**
   child: no parent conversation, isolated memory/workspace by default. The
@@ -507,9 +516,13 @@ exists. One delegation implementation is instantiated as two tools:
   prefix stays eligible for provider-side cache reuse. The contract is fixed:
   no model selection, no tool narrowing.
 
-Only the concurrency pool and the depth budget are tunable. `/settings` edits
-them and persists them in the existing AX config; `ax settings --max-concurrent
-8 --max-depth 1` is the CLI form. Changes are loaded before the next agent
+The concurrency pool and depth budget are tunable. `/settings` edits global
+defaults; `ax settings --max-concurrent 8 --max-depth 2` is the CLI form.
+`--scope project` reads or writes overrides in the discovered project's
+`.ax/config.toml`; omitted fields inherit the global settings. `--reset` restores
+global defaults (8 / 1), or removes the project's two overrides without touching
+other configuration. AXCrew exposes these controls under Settings → Plugins →
+Agents, using the selected global/project scope. Changes are loaded before the next agent
 turn, including in a running TUI/ACP session. The JSON section is:
 
 ```json
@@ -525,14 +538,17 @@ call `prepare_subagents` before direct primitive use; normal agent turns
 prepare the handle automatically.
 
 Independent calls use the existing tool-round DAG and bounded concurrency.
-Delegation admission also limits children to `max_concurrent` (default 8,
-1–64); provisioning counts toward this bound. At most 64 tasks are admitted per
-turn, preventing unlimited spawn even with an unlimited execution budget.
-`max_depth` is 0 or 1: zero is the only way to disable delegation (no
-delegation tool is registered), and all children have delegation removed
-regardless of configuration. Tools are a whitelist intersected with the child's
-rebound registry; unknown or delegation tool requests are rejected. Empty tools
-disables all child tools. Provider/model/reasoning and the parent approval
+All levels share `max_concurrent` (default 8, 1–64); provisioning and ancestors
+waiting for their descendants count toward this bound. Root tasks can queue;
+nested tasks reject exhausted capacity instead of waiting on an occupied ancestor.
+At most 64 tasks are admitted across the turn's whole delegation tree.
+`max_depth` accepts non-negative integers: 0 disables delegation, 1 permits direct
+children, and larger values permit further delegation up to that absolute depth.
+At the cap, both delegation tools are absent. The model chooses whether to call
+them; changing the limit does not spawn children or stop an already running turn.
+Tools are a whitelist intersected with the child's rebound registry; unknown
+tools and delegation requests beyond the depth budget are rejected. Empty tools
+disables all child tools, including delegation. Provider/model/reasoning and the parent approval
 policy are inherited; tools and histories are not shared across child sessions.
 Every delegated child receives the delegation contract as context: its
 permission scope was fixed at start, denied operations must not be retried, and
@@ -545,8 +561,10 @@ parent. Only the final receipt is returned; raw history remains in the child
 store. Runtime events are `subagent_started`, `subagent_progress`,
 `subagent_completed`, `subagent_failed` and `subagent_cancelled`. TUI renders
 brief lifecycle notices without child text, tool inputs or reasoning.
-Cancellation and timeouts stop the existing child loop and close the child
-receipt. Primitive timeouts include admission/provisioning; model-tool children
+Cancellation and timeouts stop the existing child loop, cancel descendants and
+close their receipts. Shared-workspace children acquire resource leases through
+their own effect tools; the delegating call never holds a lease while awaiting them.
+Primitive timeouts include admission/provisioning; model-tool children
 inherit the configured child timeout. Dropping a parent tool round cancels its
 outstanding delegated calls. Provider, provisioning, receipt and worker failures
 are returned locally in the result envelope.

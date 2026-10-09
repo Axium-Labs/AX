@@ -73,6 +73,37 @@ pub(crate) enum Command {
         max_concurrent: Option<usize>,
         #[arg(long)]
         max_depth: Option<usize>,
+        /// Global defaults or overrides for the current project.
+        #[arg(long, default_value = "global", value_parser = ["global", "project"])]
+        scope: String,
+        /// Reset global defaults, or inherit global values in this project.
+        #[arg(long, conflicts_with_all = ["max_concurrent", "max_depth"])]
+        reset: bool,
+    },
+    /// Show or change memory, custom instructions and the writing-style folder.
+    Personalize {
+        /// Master memory switch: retrieval, `remember` declarations and the memory tool.
+        #[arg(long, action = clap::ArgAction::Set)]
+        memory: Option<bool>,
+        /// Allow tool-driven memory creation and automatic Experience learning.
+        #[arg(long, action = clap::ArgAction::Set)]
+        tool_memory: Option<bool>,
+        #[arg(long, action = clap::ArgAction::Set)]
+        writing: Option<bool>,
+        /// Folder of the user's own documents used as a writing-style reference.
+        #[arg(long, conflicts_with = "clear_writing_folder")]
+        writing_folder: Option<std::path::PathBuf>,
+        #[arg(long)]
+        clear_writing_folder: bool,
+        /// Replace the global custom instructions with this file's text; empty clears them.
+        #[arg(long)]
+        instructions_file: Option<std::path::PathBuf>,
+        /// Reject a save if custom instructions no longer match this baseline.
+        #[arg(long, requires = "instructions_file")]
+        expected_instructions_file: Option<std::path::PathBuf>,
+        /// Delete all remembered facts on this installation. Raw history is kept.
+        #[arg(long)]
+        clear_memories: bool,
     },
     /// Show or select the agent environment and Crew terminal shell.
     Environment {
@@ -160,6 +191,8 @@ pub(crate) enum CapabilityCommand {
 }
 #[derive(Subcommand)]
 pub(crate) enum AuthCommand {
+    /// Remove a provider from AX, including automatic environment credential fallback.
+    Remove { provider: String },
     /// Sign in through the system browser.
     Login {
         provider: String,

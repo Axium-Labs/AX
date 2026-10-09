@@ -411,6 +411,10 @@ fn files(source: &Path, child_root: &Path, excluded: &[PathBuf]) -> io::Result<V
         .git_global(false)
         .git_exclude(false)
         .add_custom_ignore_filename(".axignore");
+    // Exclude runtime descendants when copying an ordinary project. A delegated
+    // parent's workspace is itself below child_root; excluding that whole root
+    // would discard every file in the next generation's snapshot.
+    let exclude_child_root = child_root.starts_with(source);
     let child_root = child_root.to_path_buf();
     let excluded = excluded.to_vec();
     walk.filter_entry(move |entry| {
@@ -429,7 +433,7 @@ fn files(source: &Path, child_root: &Path, excluded: &[PathBuf]) -> io::Result<V
                 | "dist"
                 | "build"
                 | ".venv"
-        ) && !entry.path().starts_with(&child_root)
+        ) && (!exclude_child_root || !entry.path().starts_with(&child_root))
             && !excluded.iter().any(|root| entry.path().starts_with(root))
             && !entry.path_is_symlink()
     });

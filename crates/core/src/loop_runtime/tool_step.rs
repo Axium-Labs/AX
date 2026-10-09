@@ -135,7 +135,7 @@ impl AgentKernel {
         }
         if tool_calls.is_empty() {
             // Input may arrive while an explicitly blocking guard is running.
-            if crate::needs_follow_up(&self.turn_state()) {
+            if crate::needs_follow_up(&self.turn_state()) || !self.turn_input.close_if_empty() {
                 return Ok(ToolStep::Continue);
             }
             if self.child_run.is_some()

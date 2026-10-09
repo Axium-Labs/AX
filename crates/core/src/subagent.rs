@@ -29,8 +29,8 @@ pub struct SubagentConfig {
     /// Maximum live children sharing the concurrency pool (deepseek-harness's
     /// `maxActiveSubagents`).
     pub max_concurrent: usize,
-    /// Delegation budget: `0` disables delegation entirely; `1` (default) is
-    /// the single delegation level this runtime supports.
+    /// Absolute delegation-depth limit. `0` disables delegation; `1` (default)
+    /// permits direct children, and larger values permit nested delegation.
     pub max_depth: usize,
 }
 impl Default for SubagentConfig {
@@ -84,13 +84,32 @@ pub struct SubagentManager {
     templates: Vec<AgentTemplate>,
     parent_messages: Vec<model::Message>,
     host: Arc<dyn ChildHost>,
-    slots: Semaphore,
-    next: AtomicU64,
+    pool: Arc<SubagentPool>,
     accepting: AtomicBool,
     pending: Mutex<std::collections::HashMap<String, Arc<Pending>>>,
     events: mpsc::UnboundedSender<AgentEvent>,
 }
+/// Shared by all descendants of one turn. Ancestors waiting for children still
+/// occupy slots, so nested admission must reject exhaustion instead of queueing.
+pub(crate) struct SubagentPool {
+    slots: Semaphore,
+    next: AtomicU64,
+    admitted: AtomicU64,
+}
 impl SubagentManager {
+    fn child_tool_allowed(&self, name: &str) -> bool {
+        if ["subagent", "subagent_fork"].contains(&name) {
+            self.controller.subagent_depth.saturating_add(1)
+                < self.controller.subagent_config.max_depth
+                && self
+                    .controller
+                    .subagent_tools
+                    .iter()
+                    .any(|tool| tool == name)
+        } else {
+            self.controller.has_tool(name)
+        }
+    }
     fn event(&self, event: AgentEvent) {
         let _ = self.events.send(event);
     }
@@ -128,7 +147,7 @@ impl SubagentManager {
         results
     }
 
-    /// Admit an isolated task. Unknown or recursive tools are rejected, never added.
+    /// Admit an isolated task. Tools can only narrow the parent's capabilities.
     ///
     /// # Errors
     /// Returns an error for disabled delegation, invalid input or exhausted admission.
@@ -140,6 +159,9 @@ impl SubagentManager {
         if !self.accepting.load(Ordering::Acquire) {
             return Err(ToolError::Execution("subagents are disabled for this turn".into()).into());
         }
+        if self.controller.subagent_depth >= self.controller.subagent_config.max_depth {
+            return Err(ToolError::Execution("subagent maximum depth reached".into()).into());
+        }
         let runtime = tokio::runtime::Handle::try_current()
             .map_err(|error| AgentError::WorkerJoin(error.to_string()))?;
         if task.trim().is_empty() {
@@ -147,7 +169,7 @@ impl SubagentManager {
         }
         if let Some(names) = &options.tools {
             for name in names {
-                if name == "subagent" || name == "spawn_agent" || !self.controller.has_tool(name) {
+                if !self.child_tool_allowed(name) {
                     return Err(ToolError::PermissionDenied(name.clone()).into());
                 }
             }
@@ -162,7 +184,7 @@ impl SubagentManager {
             .iter()
             .chain(&options.policy.selected_mcp)
         {
-            if name == "subagent" || name == "spawn_agent" || !self.controller.has_tool(name) {
+            if !self.child_tool_allowed(name) {
                 return Err(ToolError::PermissionDenied(name.clone()).into());
             }
         }
@@ -178,7 +200,10 @@ impl SubagentManager {
             )
             .into());
         }
-        let id = format!("subagent-{}", self.next.fetch_add(1, Ordering::Relaxed));
+        let id = format!(
+            "subagent-{}",
+            self.pool.next.fetch_add(1, Ordering::Relaxed)
+        );
         let input = options.context.as_ref().map_or_else(
             || task.to_owned(),
             |context| format!("{task}\n\nContext:\n{context}"),
@@ -190,7 +215,14 @@ impl SubagentManager {
         if !self.accepting.load(Ordering::Acquire) {
             return Err(ToolError::Execution("subagents are disabled for this turn".into()).into());
         }
-        if entries.len() >= 64 {
+        if self
+            .pool
+            .admitted
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
+                (count < 64).then_some(count + 1)
+            })
+            .is_err()
+        {
             return Err(ToolError::Execution(
                 "subagent admission limit reached for this turn".into(),
             )
@@ -281,11 +313,20 @@ impl SubagentManager {
         id: &str,
         pending: &Pending,
     ) -> Result<SubagentResult, AgentError> {
-        let _slot = self
-            .slots
-            .acquire()
-            .await
-            .map_err(|e| AgentError::WorkerJoin(e.to_string()))?;
+        let _slot = if self.controller.subagent_depth == 0 {
+            self.pool
+                .slots
+                .acquire()
+                .await
+                .map_err(|e| AgentError::WorkerJoin(e.to_string()))?
+        } else {
+            self.pool.slots.try_acquire().map_err(|_| {
+                ToolError::Execution(
+                    "subagent concurrency limit reached; waiting ancestors count toward the limit"
+                        .into(),
+                )
+            })?
+        };
         // The timeout bounds child execution only. Waiting behind the
         // concurrency limit is queueing, and must not consume the child's own
         // execution time or report a timeout for work that never started.
@@ -398,6 +439,7 @@ impl SubagentManager {
                     .as_ref()
                     .is_some_and(|names| !names.contains(&name))
                 || name == "subagent"
+                || name == "subagent_fork"
                 || name == "spawn_agent"
             {
                 child.kernel.tools.remove(&name);
@@ -470,6 +512,37 @@ impl SubagentManager {
                 }
             }
         }
+        // Rebind delegation to this child, never copy a tool bound to its parent.
+        child.kernel.subagent_config = self.controller.subagent_config;
+        child.kernel.subagent_depth = self.controller.subagent_depth + 1;
+        child.kernel.subagent_pool = Some(Arc::clone(&self.pool));
+        child.kernel.subagent_tools = self
+            .controller
+            .subagent_tools
+            .iter()
+            .filter(|name| {
+                let selected = match policy.tools {
+                    crate::child_policy::Selection::None => false,
+                    crate::child_policy::Selection::Selected => {
+                        policy.selected_tools.contains(name)
+                    }
+                    crate::child_policy::Selection::Inherit => true,
+                };
+                selected
+                    && pending
+                        .options
+                        .tools
+                        .as_ref()
+                        .is_none_or(|tools| tools.contains(name))
+            })
+            .cloned()
+            .collect();
+        child.kernel.agent_templates.clone_from(&self.templates);
+        child.kernel.child_host = Some(
+            self.host
+                .fork_for_child(child.kernel.child_run.as_ref().unwrap_or(&child.run))
+                .unwrap_or_else(|| Arc::clone(&self.host)),
+        );
         self.event(AgentEvent::SubagentStarted { id: id.into() });
         let mut result: ChildResult = if let Some(outcome) = child.terminal.take() {
             outcome
@@ -478,6 +551,17 @@ impl SubagentManager {
                 &mut child.kernel,
                 &pending.input,
                 Box::new(|event| {
+                    if matches!(
+                        &event,
+                        AgentEvent::SubagentStarted { .. }
+                            | AgentEvent::SubagentProgress { .. }
+                            | AgentEvent::SubagentCompleted { .. }
+                            | AgentEvent::SubagentFailed { .. }
+                            | AgentEvent::SubagentCancelled { .. }
+                    ) {
+                        self.event(event);
+                        return;
+                    }
                     let phase = match event {
                         AgentEvent::ModelStarted { .. } => Some("model"),
                         AgentEvent::ToolStarted { .. } => Some("tool"),
@@ -571,6 +655,9 @@ struct ChildGuard {
 }
 impl Drop for ChildGuard {
     fn drop(&mut self) {
+        if let Some(manager) = &self.child.kernel.subagent_manager {
+            manager.shutdown();
+        }
         if !self.finished {
             let mut result = ChildResult::new(
                 self.child.run.session_id.clone(),
@@ -629,9 +716,9 @@ impl Tool for SubagentTool {
     }
     fn description(&self) -> &'static str {
         if self.fork {
-            "Delegate a task to a subagent that inherits this conversation: a child agent seeded with all completed turns so far (it does not see the current in-flight turn). Use this when the subtask builds on this conversation's context - a follow-up analysis, a review, a continuation - without consuming this conversation's context for the work itself. It shares the parent workspace and provider. You receive its result, not its intermediate steps. Children cannot delegate."
+            "Delegate a task to a subagent that inherits this conversation: a child agent seeded with all completed turns so far (it does not see the current in-flight turn). Use this when the subtask builds on this conversation's context - a follow-up analysis, a review, a continuation - without consuming this conversation's context for the work itself. It shares the parent workspace and provider. You receive its result, not its intermediate steps. Further delegation is limited by the configured depth and shared concurrency budget."
         } else {
-            "Delegate a self-contained task to a subagent (a separate agent that works in its own context) to offload focused, independent work - research, a scoped implementation, an analysis - so it does not consume this conversation's context. The subagent returns its result, not its intermediate steps. Child tools may only be narrowed; children cannot delegate."
+            "Delegate a self-contained task to a subagent (a separate agent that works in its own context) to offload focused, independent work - research, a scoped implementation, an analysis - so it does not consume this conversation's context. The subagent returns its result, not its intermediate steps. Child tools may only be narrowed. Further delegation is limited by the configured depth and shared concurrency budget."
         }
     }
     fn input_schema(&self) -> Value {
@@ -651,24 +738,16 @@ impl Tool for SubagentTool {
     fn capability(&self, _: &Value) -> Capability {
         Capability::Process
     }
-    fn resources(&self, input: &Value) -> Vec<ResourceAccess> {
-        // A child that shares the parent workspace writes into the same tree as
-        // sibling tools, so it must be serialized against them instead of being
-        // declared side-effect free. An isolated or snapshot child owns a
-        // disposable workspace and conflicts with nothing here.
-        let shares_parent_workspace = input["policy"]["workspace"]
-            .as_str()
-            .is_some_and(|value| value == "shared");
-        if shares_parent_workspace {
-            vec![ResourceAccess::exclusive()]
-        } else {
-            vec![]
-        }
+    fn resources(&self, _: &Value) -> Vec<ResourceAccess> {
+        // Child effect tools acquire process-wide resource leases themselves.
+        // Holding a parent lease while awaiting a shared child would deadlock.
+        vec![]
     }
     async fn execute(&self, input: Value) -> Result<String, ToolError> {
         #[derive(Deserialize)]
         #[serde(deny_unknown_fields)]
         struct Input {
+            #[serde(alias = "prompt")]
             task: String,
             description: Option<String>,
             agent: Option<String>,
@@ -735,7 +814,11 @@ impl Tool for SubagentTool {
                 context: input.context,
                 tools: input.tools,
                 policy: input.policy,
-                timeout_secs: self.manager.controller.child_execution_budget().turn_timeout_secs,
+                timeout_secs: self
+                    .manager
+                    .controller
+                    .child_execution_budget()
+                    .turn_timeout_secs,
             },
         ) {
             Ok(id) => {
@@ -799,7 +882,10 @@ impl AgentKernel {
     /// Prepare delegation without performing a model call or provisioning a
     /// child. A depth budget of zero is the only off switch.
     pub fn prepare_subagents(&mut self) -> Option<mpsc::UnboundedReceiver<AgentEvent>> {
-        if self.subagent_config.max_depth == 0 || self.child_run.is_some() {
+        if self.subagent_depth >= self.subagent_config.max_depth
+            || self.subagent_tools.is_empty()
+            || (self.child_run.is_some() && self.subagent_pool.is_none())
+        {
             return None;
         }
         let host = self.child_host.clone()?;
@@ -808,22 +894,41 @@ impl AgentKernel {
         }
         let mut controller = self.fork_with_messages(vec![]);
         controller.tools.remove("subagent");
+        controller.tools.remove("subagent_fork");
         controller.child_budget = self.child_budget;
+        controller.subagent_config = self.subagent_config;
+        controller.subagent_depth = self.subagent_depth;
+        controller.subagent_tools.clone_from(&self.subagent_tools);
+        let pool = self.subagent_pool.clone().unwrap_or_else(|| {
+            Arc::new(SubagentPool {
+                slots: Semaphore::new(self.subagent_config.max_concurrent.clamp(1, 64)),
+                next: AtomicU64::new(1),
+                admitted: AtomicU64::new(0),
+            })
+        });
         let (events, receiver) = mpsc::unbounded_channel();
         let manager = Arc::new(SubagentManager {
             controller,
             templates: self.agent_templates.clone(),
             parent_messages: self.messages.clone(),
             host,
-            slots: Semaphore::new(self.subagent_config.max_concurrent.clamp(1, 64)),
-            next: AtomicU64::new(1),
+            pool,
             accepting: AtomicBool::new(true),
             pending: Mutex::new(std::collections::HashMap::new()),
             events,
         });
         self.subagent_manager = Some(Arc::clone(&manager));
-        self.tools.register(SubagentTool::spawn(Arc::clone(&manager)));
-        self.tools.register(SubagentTool::fork(manager));
+        if self.subagent_tools.iter().any(|name| name == "subagent") {
+            self.tools
+                .register(SubagentTool::spawn(Arc::clone(&manager)));
+        }
+        if self
+            .subagent_tools
+            .iter()
+            .any(|name| name == "subagent_fork")
+        {
+            self.tools.register(SubagentTool::fork(manager));
+        }
         Some(receiver)
     }
 }

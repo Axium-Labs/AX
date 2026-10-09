@@ -148,8 +148,8 @@ impl Runtime {
             messages.insert(0, Message::system(ssh.instructions()));
         }
         let config = AxConfig::load()?;
-        let mut kernel = AgentKernel::new(self.provider, self.tools, approval)
-            .with_messages(messages);
+        let mut kernel =
+            AgentKernel::new(self.provider, self.tools, approval).with_messages(messages);
         for (name, child) in config.child_models {
             let child_selection = model_selection::selection_for_provider_id(
                 &child.provider,
@@ -239,6 +239,15 @@ pub(crate) fn build_provider(
     auth_path: &Path,
 ) -> Result<Arc<dyn ModelProvider>> {
     let auth = AuthStorage::new(auth_path);
+    if auth
+        .disabled_provider_ids()?
+        .contains(&selection.provider_id)
+    {
+        return Err(anyhow!(
+            "Provider {} was removed; add credentials or sign in again to enable it",
+            selection.provider_id
+        ));
+    }
     let provider: Arc<dyn ModelProvider> = match selection.provider {
         ProviderKind::Deepseek => {
             let key = auth

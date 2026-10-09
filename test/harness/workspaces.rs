@@ -202,7 +202,6 @@ async fn two_repositories_exact_revisions_partial_setup_failure_and_durable_patc
         tools,
         Arc::new(AllowAll),
     )
-    
     .with_child_host(host)
     .with_execution_scope(source)
     .with_execution_budget(ExecutionBudget {
@@ -364,7 +363,6 @@ async fn empty_and_non_git_inherited_shell_edits_survive_cleanup_without_fabrica
     tools.register(tool::ShellTool);
     let mut runtime =
         AgentKernel::new(Arc::new(NoGitProvider { tasks }), tools, Arc::new(AllowAll))
-            
             .with_child_host(host)
             .with_execution_scope(source.clone());
     runtime.run_turn("write files", |_| {}).await.unwrap();

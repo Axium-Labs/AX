@@ -14,6 +14,8 @@ pub(crate) struct MemoryTool {
     pub project: String,
     pub session: String,
     pub user_input: String,
+    /// Personalized recall remains available when tool-driven creation is off.
+    pub creation_disabled: bool,
 }
 
 #[derive(Deserialize)]
@@ -80,6 +82,7 @@ impl Tool for MemoryTool {
             project: context.memory_scope.clone(),
             session: context.session_id.clone(),
             user_input: context.input.clone(),
+            creation_disabled: self.creation_disabled,
         }))
     }
     fn resources(&self, input: &Value) -> Vec<tool::ResourceAccess> {
@@ -124,6 +127,11 @@ impl Tool for MemoryTool {
         }
         let input: Input = serde_json::from_value(input)
             .map_err(|error| ToolError::InvalidInput(error.to_string()))?;
+        if self.creation_disabled && input.action == "set" {
+            return Err(ToolError::Execution(
+                "Creating memories through tools is disabled in Personalization settings".into(),
+            ));
+        }
         let path = if input.scope == MemoryScope::Global {
             &self.global_database
         } else {
@@ -329,6 +337,7 @@ mod tests {
             project: "p".into(),
             session: session.id,
             user_input: input.into(),
+            creation_disabled: false,
         };
         let readonly = parent.fork_memory(input, true).unwrap();
         let write = json!({"action":"set","scope":"project","key":"build","value":"cargo check","evidence":input});
@@ -386,6 +395,7 @@ mod tests {
             project: "p".into(),
             session: session.id,
             user_input: "Remember the build command".into(),
+            creation_disabled: false,
         };
         let write = json!({"action":"set","scope":"project","key":"build","value":body,"memory_type":"decision","confidence":90,"tags":["测试"],"evidence":tool.user_input});
         tool.execute(write).await.unwrap();
@@ -456,6 +466,7 @@ mod tests {
             project: "project-id".into(),
             session: session.id.clone(),
             user_input: "For this task, explain using two examples".into(),
+            creation_disabled: false,
         };
         let write = json!({"action":"set","scope":"session","key":"response.examples","value":"two examples","evidence":tool.user_input});
         assert!(tool.execute(write.clone()).await.is_ok());

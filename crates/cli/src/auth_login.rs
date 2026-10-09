@@ -70,6 +70,16 @@ fn selected_region(
 }
 pub(crate) async fn run(command: &AuthCommand) -> Result<()> {
     match command {
+        AuthCommand::Remove { provider } => {
+            if !model::PROVIDERS.iter().any(|spec| spec.id == provider) {
+                return Err(anyhow!("Unknown provider: {provider}"));
+            }
+            model::AuthStorage::new(crate::bootstrap::ax_auth_path()).disable_provider(provider)?;
+            eprintln!(
+                "Provider {provider} removed from AX; system environment credentials are unchanged"
+            );
+            Ok(())
+        }
         AuthCommand::Login { provider, region } => {
             if provider == "openai-codex" {
                 if region.is_some() {

@@ -26,7 +26,7 @@ The adapter accepts `initialize`, `session/new`, `session/load`, `session/resume
 
 `AgentEvent` deltas and tool start/finish events become `session/update` notifications. Lifecycle updates use the model's original `tool_call_id`, so parallel calls to the same tool remain distinct. The adapter's `ApprovalPolicy` maps `session/request_permission` responses into the existing `PermissionStore`. Explicit Deny remains authoritative. `session/cancel` aborts the current turn future and returns `stopReason: cancelled`; it does not promise to undo a tool's external effects. The next resume uses AX's existing interrupted-tool recovery and never replays a tool automatically.
 
-ACP `mcpServers` stdio and HTTP entries are converted in memory to AX `McpConfig` and passed to the existing lazy `McpManager`. No MCP credentials are written to Crew's database. ACP prompt text and resource links are supported. Other content blocks return an error instead of being silently dropped. AX-specific read-only methods include `_ax/status`, `_ax/models`, `_ax/capabilities`, `_ax/skills` (the project and global skill catalogs, with any missing required tools per skill), `_ax/mcp` (configured servers with description, enabled flag and declared capabilities), and `_ax/tools` (AX's built-in tool catalog). `_ax/tools` lists only the tools AX ships: MCP-provided tools exist per session only after connecting to a server, so `_ax/mcp` reports the servers instead.
+ACP `mcpServers` stdio and HTTP entries are converted in memory to AX `McpConfig` and passed to the existing lazy `McpManager`. No MCP credentials are written to Crew's database. ACP prompt text and resource links are supported. Other content blocks return an error instead of being silently dropped. AX-specific read-only methods include `_ax/status`, `_ax/models`, `_ax/capabilities`, `_ax/skills` (the project and global skill catalogs, with any missing required tools per skill), `_ax/mcp` (configured servers with description, enabled flag and declared capabilities), `_ax/mods` (metadata-only installed JavaScript Mods), and `_ax/tools` (AX's built-in tool catalog). `_ax/tools` lists only the tools AX ships: MCP-provided tools exist per session only after connecting to a server, so `_ax/mcp` reports the servers instead.
 
 Crew supplies optional `_ax` session metadata. `skills` is an allowlist of locally installed AX skill names, `mcpServers` is an allowlist of locally configured AX MCP server names, and `permissionProfile` is `ask`, `allow`, or `deny`. Crew stores names and policy, never MCP environment values or provider credentials. The adapter applies these to `ReplState` and `PermissionStore` without changing the kernel. ACP clients that omit `_ax` use normal AX skill and MCP behavior.
 
@@ -47,3 +47,11 @@ mode and cannot switch away from their bound root through ACP requests. See
 ## Distributed worker adapter
 
 `ax crew worker worker.json` is an additional outbound pull adapter, separate from `ax crew connect`. It executes durable distributed assignments through the existing ACP process and isolated workspace, with optional `collaboration` Tool bindings. `session/prompt` now additively includes `_meta.axGoal.waiting_for_user`; unattended workers treat an unresolved user interaction as failure instead of publishing successful completion. Full ACP/Session/Memory state stays local; selected task summaries, checkpoints and explicitly published artifacts cross to Crew. See [distributed collaboration](distributed-collaboration.md).
+
+## Executable Mods
+
+ACP exposes Mod management through `_ax/scopedCapabilities` with kind `mods`.
+Catalog queries do not evaluate JavaScript. Enabled Mods run through the shared
+prompt runner, with per-session Node state surviving ACP turn reconstructions.
+Session deletion and ACP EOF dispose their workers. See [Mods](mods.md) for
+commands, hooks, tool permission checks and compatibility requirements.

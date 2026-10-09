@@ -32,11 +32,15 @@ pub(crate) fn is_supported_provider(provider_id: &str) -> bool {
 /// unsupported instead of dropping a saved key without a word.
 pub(crate) fn credentialed_providers(codex_auth: Option<&PathBuf>) -> Vec<String> {
     let auth = AuthStorage::new(crate::bootstrap::ax_auth_path());
+    let disabled = auth.disabled_provider_ids().unwrap_or_default();
     let mut credentialed = Vec::new();
     for id in auth.provider_ids().unwrap_or_default() {
         push_unique(&mut credentialed, &id);
     }
     for spec in PROVIDERS {
+        if disabled.iter().any(|id| id == spec.id) {
+            continue;
+        }
         if model::ambient_credentials_configured(spec.id) {
             push_unique(&mut credentialed, spec.id);
         }
@@ -46,7 +50,10 @@ pub(crate) fn credentialed_providers(codex_auth: Option<&PathBuf>) -> Vec<String
             push_unique(&mut credentialed, spec.id);
         }
     }
-    if codex_auth.is_some() && OpenAiConfig::from_codex_auth(None, codex_auth.cloned()).is_ok() {
+    if !disabled.iter().any(|id| id == "openai-codex")
+        && codex_auth.is_some()
+        && OpenAiConfig::from_codex_auth(None, codex_auth.cloned()).is_ok()
+    {
         push_unique(&mut credentialed, "openai-codex");
     }
     credentialed

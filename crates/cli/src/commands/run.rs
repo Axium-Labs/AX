@@ -90,6 +90,15 @@ pub(crate) async fn run_prompt_with<F>(
 where
     F: FnMut(AgentEvent) + Send,
 {
+    let revision = crate::mods::revision(state)?;
+    if state
+        .mod_revision
+        .as_ref()
+        .is_some_and(|previous| *previous != revision)
+    {
+        state.invalidate_runtime();
+    }
+    state.mod_revision = Some(revision);
     if state.runtime.is_none() {
         refresh_codex_credential_if_needed(selection).await?;
         // One provider and one final tool registry per run. The prepared parts
@@ -99,18 +108,43 @@ where
         let prepared = state
             .take_prepared()
             .expect("runtime prepared for this run");
-        let runtime =
-            prepared.into_kernel(approval, state.loaded_messages.clone(), &ax_auth_path())?;
+        let runtime = prepared.into_kernel(
+            approval.clone(),
+            state.loaded_messages.clone(),
+            &ax_auth_path(),
+        )?;
         state.ensure_session(prompt)?;
-        state.runtime = Some(
-            runtime
-                .with_tool(mcp::McpGateway::new(state.mcp()?))
-                .with_execution_budget(state.execution_budget),
-        );
+        let mut runtime = runtime
+            .with_tool(mcp::McpGateway::new(state.mcp()?))
+            .with_execution_budget(state.execution_budget);
+        if let Some((extension, tools)) =
+            crate::mods::ModHost::load(state, runtime.tool_registry(), approval, &selection.model)
+                .await?
+        {
+            for tool in tools {
+                runtime.register_tool(tool);
+            }
+            runtime = runtime.with_runtime_extension(Arc::new(extension));
+        }
+        state.runtime = Some(runtime);
     } else {
         state.ensure_session(prompt)?;
     }
     child_runtime::configure_controller(state)?;
+    if let Some(input) = state.turn_input.take() {
+        state
+            .runtime
+            .as_mut()
+            .expect("runtime initialized")
+            .set_turn_input(input);
+    } else {
+        // Each ordinary turn gets a new admission gate; completed handles stay closed.
+        state
+            .runtime
+            .as_mut()
+            .expect("runtime initialized")
+            .set_turn_input(runtime_core::TurnInput::default());
+    }
     if let Some((goal_id, answer)) = answer_intent(state, prompt)? {
         // The submission is the answer to the parked question: resume the same
         // goal from the exact tool call that asked, instead of planning again.
@@ -201,26 +235,41 @@ fn prepare_turn_context(
 ) -> Result<()> {
     let global_root = config::ax_home();
     fs::create_dir_all(&global_root)?;
+    // Reread each turn so a Personalization change applies on the next turn.
+    let personalization = config::AxConfig::load_from_home(&global_root)?.personalization;
     let memory_tool = memory_tool::MemoryTool {
         database: database_path(&state.data_dir),
         global_database: global_root.join("memory.sqlite3"),
         project: state.project_id.clone(),
         session: state.current_session_id()?.to_owned(),
         user_input: prompt.to_owned(),
+        creation_disabled: !personalization.tool_memory,
     };
     let runtime = state.runtime.as_mut().expect("runtime initialized");
-    runtime.register_tool(memory_tool);
+    if personalization.memory_enabled {
+        runtime.register_tool(memory_tool);
+    } else {
+        runtime.remove_tool("memory");
+    }
     let budget = runtime.context_budget();
     runtime.set_context("[retrieved-memory]", None);
     let _timer = tool::telemetry::Timer::new("context.prepare");
-    let memory_context = state
-        .memory_context(prompt, budget.memory_budget_tokens())
-        .context("retrieving scoped memory")?;
-    state
-        .runtime
-        .as_mut()
-        .expect("runtime initialized")
-        .set_context("[retrieved-memory]", memory_context);
+    let memory_context = if personalization.memory_enabled {
+        state
+            .memory_context(prompt, budget.memory_budget_tokens())
+            .context("retrieving scoped memory")?
+    } else {
+        None
+    };
+    let runtime = state.runtime.as_mut().expect("runtime initialized");
+    runtime.set_context("[retrieved-memory]", memory_context);
+    runtime.set_context(
+        crate::personalization::WRITING_CONTEXT_PREFIX,
+        crate::personalization::writing_context(
+            &personalization,
+            budget.writing_style_budget_tokens(),
+        ),
+    );
     // Project instructions come from the repository, never from memory or the
     // skill catalog, and occupy their own context slot.
     let segments =

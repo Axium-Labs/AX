@@ -604,10 +604,11 @@ async fn durable_child_receipt_prevents_reexecution_after_controller_checkpoint_
                     .map(|s| {
                         serde_json::from_str::<runtime_core::task_queue::TaskQueue>(s).unwrap()
                     });
-                if queue
-                    .as_ref()
-                    .is_some_and(|q| q.tasks.first().is_some_and(|t| t.status == TaskStatus::Completed))
-                {
+                if queue.as_ref().is_some_and(|q| {
+                    q.tasks
+                        .first()
+                        .is_some_and(|t| t.status == TaskStatus::Completed)
+                }) {
                     return Err(AgentError::Persistence(
                         "simulated disconnect before controller commit".into(),
                     ));

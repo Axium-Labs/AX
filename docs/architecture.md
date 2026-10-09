@@ -498,19 +498,25 @@ See [context.md](context.md), [tools.md](tools.md),
 
 ### Optional model-selected delegation
 
-`SubagentConfig` defaults to disabled. The enabled turn registers a single
-`subagent` tool backed by a turn-scoped admission/cancellation adapter. Runtime
+`SubagentConfig` defaults to depth 1 and concurrency 8. Turns with a `ChildHost`
+register `subagent` and `subagent_fork` through a turn-scoped admission/cancellation
+adapter; depth 0 disables delegation. Runtime
 `spawn_agent` / `wait_agent` / `cancel_agent` reuse `ChildHost::prepare` and
 `AgentSupervisor::run_child`; the latter is the existing checkpointed Agent Loop.
 There is no second loop or planner request. The adapter enforces bounded child
 admission and suppresses child content/reasoning in parent events, forwarding
-only compact lifecycle events. Worker forks remove delegation and controller
-history. CLI reloads the existing persisted settings before each turn. See
-[tools.md](tools.md#optional-subagents) and [ADR 0010](adr/0010-optional-subagents.md).
+only compact lifecycle events. Delegated children rebind their own delegation
+tools only below the absolute depth cap and within inherited tool restrictions.
+All descendants share a concurrency pool, finite admission count and unique IDs;
+nested admission rejects capacity exhaustion to avoid ancestor deadlocks.
+Child hosts rebind provisioning to the immediate parent's workspace.
+CLI reloads global defaults plus project overrides before each turn. See
+[tools.md](tools.md#subagents), [ADR 0010](adr/0010-optional-subagents.md) and
+[ADR 0023](adr/0023-scoped-subagent-depth.md).
 
 ## Capability scope composition
 
-Skill, MCP and named Agent metadata resolve through one `scoped::ScopedRegistry<T>`.
+Skill, MCP, named Agent and Mod metadata resolve through one `scoped::ScopedRegistry<T>`.
 The CLI supplies source adapters and a shared manager. Global and project sources
 merge by name/ID before explicit project overrides and inherited-global masks;
 only enabled entries reach execution. Crew consumes AX's ACP scope rows and
@@ -518,6 +524,14 @@ management boundary. Named Agent instructions are read at invocation. Portable
 project capability config carries the existing project UUID; runtime stores keep
 their existing ownership and migration rules. See [capabilities.md](capabilities.md)
 and [ADR 0011](adr/0011-scoped-capabilities.md).
+
+The optional core `RuntimeExtension` boundary synchronizes effective context,
+adapts prompts, wraps approved tools and observes turn completion. CLI's
+`mods` module implements it with a lazy session-owned Node worker; commands and
+custom tools execute through this boundary. Metadata queries never import JS.
+The no-Mod path starts no worker. Node Mods require sandbox off and are rejected
+in local SSH execution contexts. See [mods.md](mods.md) and
+[ADR 0022](adr/0022-lazy-session-mods.md).
 
 ## Workspace runtime boundary
 

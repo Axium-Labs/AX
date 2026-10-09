@@ -52,6 +52,17 @@ pub(super) fn open_agents(state: &ReplState, pane: &mut BottomPane) -> Result<()
     Ok(())
 }
 
+pub(super) fn open_mods(state: &ReplState, pane: &mut BottomPane) -> Result<()> {
+    pane.push_view(SurfaceView::manager(
+        "Mods",
+        "mods",
+        vec!["Name | Scope | Status".into()],
+        capability_items(state, crate::capabilities::Kind::Mods)?,
+        "Enter toggle in selected scope | Esc back",
+    ));
+    Ok(())
+}
+
 pub(super) fn open_skills(state: &mut ReplState, pane: &mut BottomPane) -> Result<()> {
     let items = skill_items(state)?;
     let mut help = vec![

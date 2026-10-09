@@ -675,6 +675,7 @@ mod tests {
             sandbox: sandbox::SandboxMode::default(),
             subagent: runtime_core::SubagentConfig::default(),
             execution: crate::config::ExecutionConfig::default(),
+            personalization: crate::personalization::PersonalizationConfig::default(),
             model: Some(ModelConfig {
                 provider: "deepseek".to_owned(),
                 model: "deepseek-flash".to_owned(),

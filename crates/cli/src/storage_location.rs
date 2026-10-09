@@ -89,7 +89,12 @@ pub(crate) fn migrate_project(root: &Path, target: &Path) -> Result<()> {
 }
 
 fn copy_missing(source: &Path, target: &Path) -> Result<()> {
-    if !source.is_dir() || source == target || target.starts_with(source) {
+    // canonicalize returns verbatim paths on Windows; callers may mix those
+    // with ordinary drive paths. Compare normalized components before staging
+    // so a home workspace never recursively copies its own projects/stage.
+    let source_key = PathBuf::from(path_key(source));
+    let target_key = PathBuf::from(path_key(target));
+    if !source.is_dir() || target_key.starts_with(&source_key) {
         return Ok(());
     }
     fs::create_dir_all(target)?;
@@ -222,6 +227,10 @@ fn copy_files(source: &Path, target: &Path) -> Result<()> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "../../../test/storage_location.rs"]
+mod regression_tests;
 
 #[cfg(test)]
 mod tests {

@@ -103,6 +103,12 @@ impl ContextBudget {
     pub fn instructions_budget_tokens(&self) -> usize {
         self.usable().min(self.pool.instructions_maximum)
     }
+    /// Writing-style excerpts from the user's chosen reference folder; like
+    /// instructions, a demand on the shared pool, not a separate allowance.
+    #[must_use]
+    pub fn writing_style_budget_tokens(&self) -> usize {
+        self.usable().min(self.pool.writing_style_maximum)
+    }
     /// Project the next request including expected tool results, with hard reply/schema reserves.
     #[must_use]
     pub const fn needs_compaction(&self, current: usize, next_request_growth: usize) -> bool {
@@ -120,6 +126,7 @@ pub struct ContextPoolPolicy {
     pub memory_maximum: usize,
     pub skill_metadata_maximum: usize,
     pub instructions_maximum: usize,
+    pub writing_style_maximum: usize,
 }
 impl ContextPoolPolicy {
     pub const DEFAULT: Self = Self {
@@ -129,6 +136,7 @@ impl ContextPoolPolicy {
         memory_maximum: 8192,
         skill_metadata_maximum: 4096,
         instructions_maximum: 4096,
+        writing_style_maximum: 1536,
     };
 }
 impl Default for ContextPoolPolicy {

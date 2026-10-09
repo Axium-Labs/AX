@@ -19,6 +19,7 @@ discoverable.
 - [0008 — Durable lightweight Task Queue](0008-durable-task-queue.md)
 - [0009 — Goal-bound execution invariants](0009-execution-invariants.md)
 - [0010 — Optional model-selected subagents](0010-optional-subagents.md)
+  (depth/default behavior superseded by [0023](0023-scoped-subagent-depth.md)).
 
 ## Adding an ADR
 
@@ -72,3 +73,5 @@ What becomes easier, what becomes harder, and what we accepted.
 - [0020 — Native model providers](0020-native-model-providers.md) — native protocols/authentication, shared dispatch, signed replay and separate resource configuration status.
 
 - [0021 — Durable distributed collaboration](0021-durable-distributed-collaboration.md) — optional CLI worker, fenced ownership and checkpoint-based recovery.
+
+- [0022 — Lazy session Mods](0022-lazy-session-mods.md) — executable extensions with scoped metadata, session-owned Node state and explicit confinement limits.

@@ -59,7 +59,6 @@ fn kernel() -> AgentKernel {
         tool::ToolRegistry::with_mode(tool::SandboxMode::Off),
         Arc::new(AllowAll),
     )
-    
 }
 
 #[tokio::test]
@@ -327,7 +326,6 @@ async fn recoverable_setup_uses_fallback_without_global_stop_or_user_question() 
     let mut tools = tool::ToolRegistry::with_mode(tool::SandboxMode::Off);
     tools.register(SetupFixture);
     let mut runtime = AgentKernel::new(Arc::new(SetupProvider), tools, Arc::new(AllowAll))
-        
         .with_execution_budget(ExecutionBudget {
             max_steps: 10,
             ..ExecutionBudget::default()

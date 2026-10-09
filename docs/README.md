@@ -25,7 +25,8 @@ design decisions that shaped the code are recorded as ADRs in
 | [web-latency.md](web-latency.md) | Reproducible web scheduling latency benchmark |
 | [mcp.md](mcp.md) | MCP integration: configuration, transports, lazy connection |
 | [skills.md](skills.md) | Skills: package format, routing, enable/disable |
-| [capabilities.md](capabilities.md) | Shared Global/Project registry and Skill/MCP/Agent management |
+| [capabilities.md](capabilities.md) | Shared Global/Project registry and Skill/MCP/Agent/Mod management |
+| [mods.md](mods.md) | Executable JavaScript Mods, loading, hooks, commands, tools and compatibility |
 | [evolution.md](evolution.md) | Low-frequency Experience learning and evolved Skill lifecycle |
 | [providers.md](providers.md) | Models, providers, authentication |
 | [development.md](development.md) | Building, testing, extending and releasing AX |
@@ -38,6 +39,9 @@ design decisions that shaped the code are recorded as ADRs in
 
 ## TUI features
 
+- **Active guidance** — Enter sends additional instructions to the current
+  task while it works, preserving its goal and tool results. Stop remains
+  separate. See [agent-runtime.md](agent-runtime.md).
 - **Project file references** — Type `@README` to fuzzy-search project files.
   Select one with Enter to include its text in the model context when sending
   the message. See [context.md](context.md).

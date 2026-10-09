@@ -34,3 +34,7 @@ workspace = true
 [[test]]
 name = "reasoning_catalogue"
 path = "../../test/providers/reasoning_catalogue.rs"
+
+[[test]]
+name = "provider_removal"
+path = "../../test/providers/removal.rs"

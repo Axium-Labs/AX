@@ -60,6 +60,29 @@ user request
 There is one agent loop. No hardcoded simple/retrieval/coding/long-task loops,
 and no extra model call for intent classification.
 
+### Guidance while a turn is running
+
+The TUI composer remains editable during work. Enter sends ordinary text as
+guidance to the current execution; it does not cancel the model stream, restart
+tools or create another goal. The kernel consumes messages in arrival order at
+the next model/tool boundary, checkpoints them as user messages and continues
+with the same goal and completed results. Slash commands remain queued until
+work finishes. A submission arriving after the final admission boundary is an
+ordinary next turn.
+
+Embedders use `TurnInput::try_steer` and `AgentKernel::with_turn_input` or
+`set_turn_input`; a returned message ID confirms acceptance. Closing the turn
+and accepting input share a lock, so a successful final response cannot strand
+an accepted message. Completed/cancelled handles remain closed. Guidance does
+not change the active model, reasoning effort or permission policy.
+
+ACP exposes `_ax/steer` for the active session on the same connection. It accepts
+`sessionId` plus the usual `prompt` content blocks and replies with
+`{accepted:true,messageId}`. A wrong/finished session returns an error. Live and
+replayed `user_message_chunk` updates carry `_ax.steering:true` and a stable ID;
+history keeps guidance within the original turn. `_ax/capabilities.steering`
+advertises this extension. `session/cancel` remains a separate operation.
+
 ## Trigger conditions
 
 | Mechanism | Used when | Not used when |

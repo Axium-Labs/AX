@@ -15,7 +15,7 @@ use crate::{
     args::{Cli, Command},
     auth_login,
     bootstrap::{Globals, Locations},
-    capabilities, capability_import, commands, config, crew_device, evolution, model_selection,
+    capabilities, capability_import, commands, crew_device, evolution, model_selection,
     repl::ReplState,
     tui::run_tui,
 };
@@ -50,6 +50,33 @@ pub(crate) fn run_preflight(cli: &Cli) -> Result<bool> {
     if run_settings(cli)? {
         return Ok(true);
     }
+    if let Some(Command::Personalize {
+        memory,
+        tool_memory,
+        writing,
+        writing_folder,
+        clear_writing_folder,
+        instructions_file,
+        expected_instructions_file,
+        clear_memories,
+    }) = &cli.command
+    {
+        let state = crate::personalization::manage(
+            &crate::config::ax_home(),
+            &crate::personalization::Changes {
+                memory_enabled: *memory,
+                tool_memory: *tool_memory,
+                writing_enabled: *writing,
+                writing_folder: writing_folder.as_deref(),
+                clear_writing_folder: *clear_writing_folder,
+                instructions_file: instructions_file.as_deref(),
+                expected_instructions_file: expected_instructions_file.as_deref(),
+                clear_memories: *clear_memories,
+            },
+        )?;
+        println!("{}", serde_json::to_string_pretty(&state)?);
+        return Ok(true);
+    }
     if let Some(Command::Environment {
         environment,
         terminal_shell,
@@ -71,24 +98,16 @@ fn run_settings(cli: &Cli) -> Result<bool> {
     let Some(Command::Settings {
         max_concurrent,
         max_depth,
+        scope,
+        reset,
     }) = &cli.command
     else {
         return Ok(false);
     };
-    let (max_concurrent, max_depth) = (*max_concurrent, *max_depth);
-    let mut config = config::AxConfig::load()?;
-    if let Some(value) = max_concurrent {
-        anyhow::ensure!((1..=64).contains(&value), "max_concurrent must be 1..=64");
-        config.subagent.max_concurrent = value;
-    }
-    if let Some(value) = max_depth {
-        anyhow::ensure!(value <= 1, "max_depth must be 0 or 1");
-        config.subagent.max_depth = value;
-    }
-    if max_concurrent.is_some() || max_depth.is_some() {
-        config.save()?;
-    }
-    println!("{}", serde_json::to_string_pretty(&config.subagent)?);
+    let root = crate::bootstrap::discover_project_root(&std::env::current_dir()?);
+    let settings =
+        crate::subagent_settings::manage(&root, scope, *max_concurrent, *max_depth, *reset)?;
+    println!("{}", serde_json::to_string_pretty(&settings)?);
     Ok(true)
 }
 /// Credential, capability and gateway subcommands. None of them enters the
@@ -166,6 +185,7 @@ pub(crate) async fn dispatch(
             Command::Acp
             | Command::Environment { .. }
             | Command::Settings { .. }
+            | Command::Personalize { .. }
             | Command::Crew { .. }
             | Command::Auth { .. }
             | Command::Skill { .. }

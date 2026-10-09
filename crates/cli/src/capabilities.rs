@@ -16,6 +16,7 @@ pub(crate) enum Kind {
     Skills,
     Mcp,
     Agents,
+    Mods,
 }
 impl Kind {
     pub fn parse(value: &str) -> Result<Self> {
@@ -23,6 +24,7 @@ impl Kind {
             "skill" | "skills" => Ok(Self::Skills),
             "mcp" => Ok(Self::Mcp),
             "agent" | "agents" => Ok(Self::Agents),
+            "mod" | "mods" => Ok(Self::Mods),
             _ => bail!("Unknown capability kind: {value}"),
         }
     }
@@ -31,6 +33,7 @@ impl Kind {
             Self::Skills => "skills",
             Self::Mcp => "mcp",
             Self::Agents => "agents",
+            Self::Mods => "mods",
         }
     }
 }
@@ -116,6 +119,7 @@ fn definitions(
     mcp_path: &Path,
 ) -> Result<Definitions> {
     match kind {
+        Kind::Mods => crate::mods::definitions(root),
         Kind::Skills => skill_definitions(skill_roots),
         Kind::Mcp => Ok(McpConfig::load(mcp_path)?
             .servers
@@ -183,7 +187,7 @@ fn definitions(
         }
     }
 }
-fn validate_name(name: &str) -> Result<()> {
+pub(crate) fn validate_name(name: &str) -> Result<()> {
     if name.is_empty()
         || !name
             .chars()
@@ -204,6 +208,7 @@ fn remove_definition(
     skill_roots: &[PathBuf],
 ) -> Result<()> {
     match kind {
+        Kind::Mods => crate::mods::remove(root, entry)?,
         Kind::Skills => {
             let path = fs::canonicalize(&entry.source)?;
             let allowed = skill_roots
@@ -251,6 +256,7 @@ fn add_definition(
     source: &Path,
 ) -> Result<()> {
     match kind {
+        Kind::Mods => crate::mods::install(source, root, name)?,
         Kind::Skills => {
             let catalog = skill::SkillCatalog::index(
                 source.parent().context("Skill directory has no parent")?,
@@ -328,17 +334,10 @@ fn add_definition(
 impl ReplState {
     pub(crate) fn configure_scoped_subagents(&mut self) -> Result<()> {
         let state = self;
-        let mut subagent_config = crate::config::AxConfig::load()?.subagent;
-        if let Some(project) =
-            scoped::read_document(&state.project_root.join(".ax/config.toml"))?.get("subagent")
-        {
-            let mut effective = toml::Value::try_from(subagent_config)?;
-            if let (Some(effective), Some(project)) = (effective.as_table_mut(), project.as_table())
-            {
-                effective.extend(project.clone());
-            }
-            subagent_config = effective.try_into()?;
-        }
+        let subagent_config = crate::subagent_settings::effective(
+            crate::config::AxConfig::load()?.subagent,
+            &state.project_root,
+        )?;
         let templates = if subagent_config.max_depth > 0 {
             state
                 .capability_registry(Kind::Agents)?
@@ -426,7 +425,7 @@ impl ReplState {
         } else {
             self.capability_registry(kind)?
         };
-        Ok(registry.entries().map(|entry| json!({"name":entry.name,"scope":entry.scope,"enabled":entry.enabled,"status":entry.status(),"description":entry.value.description,"source":entry.value.source,"missing_tools":entry.value.data.get("missing_tools").unwrap_or(&json!([])),"capabilities":entry.value.data.get("capabilities").unwrap_or(&json!([]))})).collect())
+        Ok(registry.entries().map(|entry| json!({"name":entry.name,"scope":entry.scope,"enabled":entry.enabled,"status":entry.status(),"description":entry.value.description,"source":entry.value.source,"version":entry.value.data.get("version"),"userConfig":entry.value.data.get("userConfig"),"missing_tools":entry.value.data.get("missing_tools").unwrap_or(&json!([])),"capabilities":entry.value.data.get("capabilities").unwrap_or(&json!([]))})).collect())
     }
     pub(crate) fn effective_mcp_config(&self) -> Result<McpConfig> {
         let registry = self.capability_registry(Kind::Mcp)?;

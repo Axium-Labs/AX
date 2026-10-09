@@ -57,6 +57,8 @@ pub(crate) struct ReplState {
     pub(crate) current_session: Option<Session>,
     pub(crate) loaded_messages: Vec<Message>,
     pub(crate) runtime: Option<AgentKernel>,
+    pub(crate) mod_revision: Option<String>,
+    pub(crate) turn_input: Option<runtime_core::TurnInput>,
     /// Provider and final tool registry prepared for the next run, built once.
     pub(crate) prepared: Option<Runtime>,
     /// Schema cost measured from that same registry, so a pre-kernel budget
@@ -140,6 +142,8 @@ impl ReplState {
             current_session: None,
             loaded_messages: Vec::new(),
             runtime: None,
+            mod_revision: None,
+            turn_input: None,
             prepared: None,
             tool_schema_tokens: None,
             permissions: PermissionStore::default(),
@@ -725,6 +729,9 @@ impl ReplState {
     }
 
     pub(crate) fn reset_new_session(&mut self) {
+        if let Some(session) = &self.current_session {
+            crate::mods::close_session(&session.id);
+        }
         self.evolution_end_session();
         self.permissions.reset_session();
         self.current_session = None;

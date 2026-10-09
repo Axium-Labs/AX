@@ -354,6 +354,29 @@ impl MemoryStore {
         self.connection.execute("UPDATE scoped_memories SET usage_count=min(usage_count+1,4294967295),last_used_at=unixepoch() WHERE scope=?1 AND owner=?2 AND key=?3 AND superseded=0 AND expired=0", params![scope.key(), owner, key])?;
         Ok(())
     }
+    /// Remove every remembered fact in this store: all scoped memories and the
+    /// legacy long-term table they were migrated from. Raw session history,
+    /// summaries and Evolution evidence are untouched. Legacy categories are
+    /// marked migrated so the old table cannot resurrect a deleted fact.
+    ///
+    /// # Errors
+    /// Returns a database error; the deletion is all-or-nothing.
+    pub fn clear_all_memories(&self) -> Result<usize, MemoryError> {
+        let tx = rusqlite::Transaction::new_unchecked(
+            &self.connection,
+            rusqlite::TransactionBehavior::Immediate,
+        )?;
+        let scoped = tx.execute("DELETE FROM scoped_memories", [])?;
+        let legacy = tx.execute("DELETE FROM long_term_memory", [])?;
+        for category in ["project", "global"] {
+            tx.execute(
+                "INSERT OR IGNORE INTO memory_migrations(category) VALUES (?1)",
+                [category],
+            )?;
+        }
+        tx.commit()?;
+        Ok(scoped + legacy)
+    }
     /// Remove one fact without affecting other scopes.
     ///
     /// # Errors

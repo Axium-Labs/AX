@@ -242,7 +242,7 @@ mod tests {
             .map(|command| command.name)
             .collect::<Vec<_>>();
         assert!(names.contains(&"/model"));
-        assert_eq!(names, vec!["/model", "/memory"]);
+        assert_eq!(names, vec!["/model", "/memory", "/mods"]);
         assert!(!names.contains(&"/exit"));
         popup.move_down();
         popup.close();

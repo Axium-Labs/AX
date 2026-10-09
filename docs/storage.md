@@ -12,6 +12,12 @@ under `AX_HOME` when explicitly configured. Working directories contain user
 project files and optional user-authored skills, not default runtime state.
 `--data-dir` remains an explicit override for a selected project store.
 
+Legacy-copy guards compare normalized path components, including Windows drive
+paths and `\\?\` canonical paths. Migration skips identical destinations and
+destinations inside the source before creating a staging directory. Opening the
+user home as an ACP workspace therefore cannot recursively copy its own AX home,
+project stores or migration staging directories; original data remains in place.
+
 ```text
 <install-dir>/
 ├── ax(.exe)

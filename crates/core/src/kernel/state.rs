@@ -21,6 +21,7 @@ use crate::{
 };
 
 pub struct AgentKernel {
+    pub(crate) extension: Option<Arc<dyn crate::RuntimeExtension>>,
     pub(crate) turn_input: crate::continuation::TurnInput,
     pub(crate) activity: Arc<crate::continuation::RuntimeActivity>,
     pub(crate) continuation: crate::TurnState,
@@ -53,6 +54,9 @@ pub struct AgentKernel {
     /// Whether the receipt index needs one durable write.
     pub(crate) receipts_dirty: bool,
     pub(crate) subagent_config: SubagentConfig,
+    pub(crate) subagent_depth: usize,
+    pub(crate) subagent_pool: Option<Arc<crate::subagent::SubagentPool>>,
+    pub(crate) subagent_tools: Vec<String>,
     pub(crate) agent_templates: Vec<AgentTemplate>,
     pub(crate) subagent_manager: Option<Arc<SubagentManager>>,
     /// Advisory loop hygiene: consecutive identical tool calls for this turn.
@@ -97,6 +101,12 @@ impl AgentKernel {
     #[must_use]
     pub fn tool_names(&self) -> Vec<String> {
         self.tools.names().into_iter().map(str::to_owned).collect()
+    }
+
+    /// Snapshot for an extension host; wrappers are added only after this snapshot.
+    #[must_use]
+    pub fn tool_registry(&self) -> ToolRegistry {
+        self.tools.clone()
     }
 
     /// Schema cost of exactly this kernel's registry.

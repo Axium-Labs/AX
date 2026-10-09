@@ -30,6 +30,7 @@ struct ActivePrompt {
     request_id: Value,
     session_id: String,
     task: JoinHandle<()>,
+    input: runtime_core::TurnInput,
 }
 
 fn cancel_saved_goal(state: &mut ReplState, session_id: &str) -> Result<()> {
@@ -160,7 +161,8 @@ fn builtin_tools() -> Vec<Value> {
 /// it in the private `_ax` object clients already use for vendor extensions.
 fn stamp(mut body: Value, at: i64) -> Value {
     if let Value::Object(ref mut map) = body {
-        map.insert("_ax".to_owned(), json!({"createdAt": at}));
+        let meta = map.entry("_ax").or_insert_with(|| json!({}));
+        meta["createdAt"] = json!(at);
     }
     body
 }
@@ -536,7 +538,7 @@ fn replay_store(
                 if tools_only {
                     continue;
                 }
-                json!({"sessionUpdate":"user_message_chunk","messageId":message.id.to_string(),"content":{"type":"text","text":message.content}})
+                json!({"sessionUpdate":"user_message_chunk","messageId":message.metadata.pointer("/provider_metadata/axMessageId").and_then(Value::as_str).map_or_else(||message.id.to_string(),str::to_owned),"content":{"type":"text","text":message.content},"_ax":{"steering":message.metadata.pointer("/provider_metadata/axSteering").and_then(Value::as_bool).unwrap_or(false)}})
             }
             MessageRole::Assistant => {
                 if let Some(calls) = message.metadata.get("tool_calls").and_then(Value::as_array) {
@@ -712,7 +714,10 @@ pub async fn run(cli: &Cli, data_dir: PathBuf, skills_dir: PathBuf) -> Result<()
                 )
                 .and_then(|mut state| Ok(state.store()?.delete_session(session_id)?))
                 {
-                    Ok(deleted) => reply(&out, id, json!({"deleted":deleted})),
+                    Ok(deleted) => {
+                        crate::mods::close_session(session_id);
+                        reply(&out, id, json!({"deleted":deleted}));
+                    }
                     Err(err) => error(&out, id, -32603, err.to_string()),
                 }
             }
@@ -953,6 +958,8 @@ pub async fn run(cli: &Cli, data_dir: PathBuf, skills_dir: PathBuf) -> Result<()
                 let task_cwd = cwd.clone();
                 let task_budget = crate::runtime::execution_budget(cli);
                 let task_child_timeout = cli.child_timeout_secs;
+                let input = runtime_core::TurnInput::default();
+                let task_input = input.clone();
                 let task = tokio::spawn(async move {
                     let result: Result<(String, bool)> = async {
                         let mut state =
@@ -968,6 +975,7 @@ pub async fn run(cli: &Cli, data_dir: PathBuf, skills_dir: PathBuf) -> Result<()
                         if !state.open_session(&task_session, &budget)? {
                             return Err(anyhow!("AX session not found"));
                         }
+                        state.turn_input = Some(task_input);
                         apply_permission_profile(&state.permissions, task_profile.as_deref());
                         let approval: Arc<dyn ApprovalPolicy> = Arc::new(AcpApproval {
                             out: task_out.clone(),
@@ -979,16 +987,16 @@ pub async fn run(cli: &Cli, data_dir: PathBuf, skills_dir: PathBuf) -> Result<()
                         let outcome=run_session_prompt(&mut state, &selection, approval, &prompt, &task_out, &task_session)
                         .await;
                         let files = match (before, crate::worktree_changes::snapshot(&task_cwd)) {
-                            (Ok(before), Ok(after)) => crate::worktree_changes::changed(&before, after),
+                            (Ok(before), Ok(after)) => Some(crate::worktree_changes::changed(&before, &after)),
                             (Err(error), _) | (_, Err(error)) => {
                                 // A failed snapshot is not an unchanged workspace.
                                 state.persist_messages(&[model::Message::system(format!(
                                     "[ax-changes]\nworkspace snapshot failed: {error}"
                                 ))])?;
-                                Vec::new()
+                                None
                             }
                         };
-                        if !files.is_empty() {
+                        if let Some(files) = files {
                             state.persist_messages(&[model::Message::system(format!("[ax-changes]\n{}",json!(files)))])?;
                             let body=stamp(json!({"sessionUpdate":"turn_changes","changedFiles":files}),now_seconds());
                             task_out.send(json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":task_session,"update":body}})).ok();
@@ -1018,7 +1026,41 @@ pub async fn run(cli: &Cli, data_dir: PathBuf, skills_dir: PathBuf) -> Result<()
                     request_id: id,
                     session_id,
                     task,
+                    input,
                 });
+            }
+            "_ax/steer" => {
+                let session_id = params
+                    .get("sessionId")
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+                let prompt = match prompt_text(params) {
+                    Ok(text) if !text.trim().is_empty() => text,
+                    _ => {
+                        error(&out, id, -32602, "nonempty prompt required");
+                        continue;
+                    }
+                };
+                let slot = active.lock().unwrap();
+                let accepted = slot
+                    .as_ref()
+                    .filter(|turn| turn.session_id == session_id)
+                    .and_then(|turn| turn.input.try_steer(prompt.clone()));
+                if let Some(message_id) = accepted {
+                    let update = stamp(
+                        json!({"sessionUpdate":"user_message_chunk","messageId":message_id,"content":{"type":"text","text":prompt},"_ax":{"steering":true}}),
+                        now_seconds(),
+                    );
+                    out.send(json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":session_id,"update":update}})).ok();
+                    reply(&out, id, json!({"accepted":true,"messageId":message_id}));
+                } else {
+                    error(
+                        &out,
+                        id,
+                        -32002,
+                        "this session has no active turn accepting guidance",
+                    );
+                }
             }
             "session/cancel" => {
                 let session_id = params
@@ -1054,20 +1096,16 @@ pub async fn run(cli: &Cli, data_dir: PathBuf, skills_dir: PathBuf) -> Result<()
                     reply(&out, id, json!({}));
                 }
             }
-            "_ax/status" => reply(
-                &out,
-                id,
-                json!({"version":env!("CARGO_PKG_VERSION"),"protocolVersion":1,"active":active.lock().unwrap().is_some()}),
-            ),
             "_ax/capabilities" => reply(
                 &out,
                 id,
                 json!({
-                    "scopedCapabilities":{"method":"_ax/scopedCapabilities","scopes":["global","project"],"kinds":["skills","mcp","agents"],"actions":["list","enable","disable","add","remove"]},
+                    "scopedCapabilities":{"method":"_ax/scopedCapabilities","scopes":["global","project"],"kinds":["skills","mcp","agents","mods"],"actions":["list","enable","disable","add","remove"]},
                     "sessions":true,
                     "resume":true,
                     "streaming":true,
                     "cancel":"abort_turn",
+                    "steering":{"method":"_ax/steer","scope":"active_turn","interrupts":false},
                     "goals":{"promptMetadata":"_meta.axGoal","actions":["new","start","resume","cancel"]},
                     "permissions":true,
                     "workspace":{"method":"_ax/workspace","readOnly":true},
@@ -1141,7 +1179,7 @@ pub async fn run(cli: &Cli, data_dir: PathBuf, skills_dir: PathBuf) -> Result<()
                     ),
                 }
             }
-            "_ax/skills" | "_ax/mcp" | "_ax/agents" | "_ax/scopedCapabilities" => {
+            "_ax/skills" | "_ax/mcp" | "_ax/agents" | "_ax/mods" | "_ax/scopedCapabilities" => {
                 let result = (|| -> Result<Value> {
                     let root = crate::bootstrap::discover_project_root(&std::env::current_dir()?);
                     let mut state = ReplState::new_in_project(
@@ -1157,6 +1195,7 @@ pub async fn run(cli: &Cli, data_dir: PathBuf, skills_dir: PathBuf) -> Result<()
                             .unwrap_or(match method {
                                 "_ax/skills" => "skills",
                                 "_ax/mcp" => "mcp",
+                                "_ax/mods" => "mods",
                                 _ => "agents",
                             }),
                     )?;
@@ -1207,6 +1246,7 @@ pub async fn run(cli: &Cli, data_dir: PathBuf, skills_dir: PathBuf) -> Result<()
     }
     drop(out);
     writer.await??;
+    crate::mods::close_all().await;
     Ok(())
 }
 

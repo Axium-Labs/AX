@@ -41,7 +41,10 @@ impl Recorder {
             },
             calls: HashMap::new(),
             skill_calls: HashMap::new(),
-            sink: state.evolution.as_ref().and_then(::evolution::Handle::sink),
+            sink: crate::config::AxConfig::load()
+                .ok()
+                .filter(|config| config.personalization.tool_memory_active())
+                .and_then(|_| state.evolution.as_ref().and_then(::evolution::Handle::sink)),
             completed: false,
             instruction_paths: state
                 .skill_catalog
@@ -216,6 +219,11 @@ impl ReplState {
         }
     }
     pub(crate) fn evolution_prepare(&mut self, selection: &ModelSelection) {
+        if !crate::config::AxConfig::load()
+            .is_ok_and(|config| config.personalization.tool_memory_active())
+        {
+            return;
+        }
         if self.evolution.is_none() {
             if let Err(error) = self.skills() {
                 eprintln!("Evolution skill index: {error}");

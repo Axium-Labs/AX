@@ -13,6 +13,7 @@ use crate::ModelError;
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum Credential {
+    Disabled,
     ApiKey {
         key: String,
     },
@@ -57,7 +58,36 @@ impl AuthStorage {
     ///
     /// Returns an error when the credential file cannot be read or parsed.
     pub fn provider_ids(&self) -> Result<Vec<String>, ModelError> {
-        Ok(self.load()?.into_keys().collect())
+        Ok(self
+            .load()?
+            .into_iter()
+            .filter_map(|(id, credential)| {
+                (!matches!(credential, Credential::Disabled)).then_some(id)
+            })
+            .collect())
+    }
+
+    /// Provider opt-outs that suppress environment and ambient credential fallback.
+    ///
+    /// # Errors
+    /// Returns an error when the credential file cannot be read or parsed.
+    pub fn disabled_provider_ids(&self) -> Result<Vec<String>, ModelError> {
+        Ok(self
+            .load()?
+            .into_iter()
+            .filter_map(|(id, credential)| matches!(credential, Credential::Disabled).then_some(id))
+            .collect())
+    }
+
+    /// Removes credentials and persistently opts out of automatic discovery.
+    /// Saving a new API key or OAuth login replaces this marker.
+    ///
+    /// # Errors
+    /// Returns an error when the credential file cannot be read or rewritten.
+    pub fn disable_provider(&self, provider: &str) -> Result<(), ModelError> {
+        let mut credentials = self.load()?;
+        credentials.insert(provider.to_owned(), Credential::Disabled);
+        self.save(&credentials)
     }
 
     /// Resolve stored credentials before falling back to the provider's
@@ -71,8 +101,10 @@ impl AuthStorage {
         provider: &str,
         environment: &str,
     ) -> Result<Option<String>, ModelError> {
-        if let Some(Credential::ApiKey { key }) = self.load()?.remove(provider) {
-            return Ok(Some(resolve_key(&key)));
+        match self.load()?.remove(provider) {
+            Some(Credential::Disabled) => return Ok(None),
+            Some(Credential::ApiKey { key }) => return Ok(Some(resolve_key(&key))),
+            _ => {}
         }
         Ok(std::env::var(environment)
             .ok()

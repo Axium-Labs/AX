@@ -1,6 +1,6 @@
 # Scoped capabilities
 
-Skills, MCP servers and named Agents share `scoped::ScopedRegistry<T>`, the
+Skills, MCP servers, named Agents and Mods share `scoped::ScopedRegistry<T>`, the
 same configuration parser and the same management operations. The CLI supplies
 only their metadata adapters; Crew uses AX's ACP interface instead of merging
 configuration itself.
@@ -12,12 +12,14 @@ $AX_HOME/
   skills/<name>/SKILL.md
   agents/<name>.toml
   agents/<name>.md
+  mods/<name>/mod.json
   mcp.toml
   config.toml
 <project>/.ax/
   skills/<name>/SKILL.md
   agents/<name>.toml
   agents/<name>.md
+  mods/<name>/mod.json
   mcp.toml
   config.toml
   project.json
@@ -59,10 +61,15 @@ issues = true
 
 [agents]
 disabled_global = ["reviewer"]
+
+[mods]
+disabled_global = ["notes"]
+[mods.overrides]
+metrics = false
 ```
 
 An optional top-level `disabled_global = ["name"]` masks that name in all
-three kinds. Prefer kind-specific masks when names overlap. Enable removes
+four kinds. Prefer kind-specific masks when names overlap. Enable removes
 the matching mask. Project enable/disable of inherited entries never rewrites
 global config. A project definition is unaffected by the global-name mask.
 `overrides` persists explicit booleans separately from definitions, preserving
@@ -71,14 +78,14 @@ fallback; new explicit policy takes priority.
 
 ## Management
 
-`/skills`, `/mcp` and `/agents` display Name, Scope and Status, including
+`/skills`, `/mcp`, `/agents` and `/mods` display Name, Scope and Status, including
 `[global]`, `[project]`, `enabled`, `disabled`, and `disabled here`.
 Space toggles in the selected configuration scope. `/settings` offers
 **Global configuration** and **Current project configuration**, then each kind.
 The current project view includes inherited globals; global configuration
 shows global definitions even if the current project shadows them.
 
-All three slash commands accept the same syntax:
+All four slash commands accept the same syntax:
 
 ```text
 /skills list
@@ -106,13 +113,18 @@ sources are TOML manifests with a relative instruction file. Existing Skill/MCP
 Removing an inherited global entry from Project creates a local mask. Removing
 a project definition reveals the global definition if one exists.
 
-ACP provides `_ax/skills`, `_ax/mcp`, `_ax/agents` and the common
+ACP provides `_ax/skills`, `_ax/mcp`, `_ax/agents`, `_ax/mods` and the common
 `_ax/scopedCapabilities` method. The common method accepts `kind`, `scope`,
 `action`, `name` and optional `source`. Mutations require an explicit scope;
 listing without scope returns the effective view including disabled metadata.
 Rows include `name`, `scope`, `status`, `enabled`, `description`, `source` and
 the adapter's metadata. Responses expose the existing `project_id` UUID.
 Crew settings use these rows and call AX for every mutation.
+
+Mod sources are directories with `mod.json` and a relative JavaScript entry.
+Catalogs only read metadata; enabled Mods execute lazily inside a session-owned
+Node host. See [Mods](mods.md) for packaging, hooks, commands, persistent state,
+Node requirements and API compatibility limits.
 
 ## Named Agents and lazy loading
 
@@ -135,6 +147,12 @@ Global execution defaults still live in the existing `AxConfig` JSON file.
 Project `[subagent]` settings in `.ax/config.toml` partially override those
 defaults, for example `max_concurrent = 2` for this project alone. When the
 depth budget is zero, no named Agent registry is initialized for a model turn.
+AXCrew Settings → Plugins → Agents reads and writes these limits through
+`ax settings --scope global|project`. Depth 0 disables delegation; 1 permits
+direct children; greater values permit descendants. `--reset` restores global
+defaults or removes project overrides. Descendants retain the parent's enabled
+named-Agent catalog, load instructions only on invocation, and cannot widen the
+parent's tool or permission scope. See [delegation limits](tools.md#subagents).
 
 Skill frontmatter and MCP/Agent definitions are metadata only. Disabled Skills
 never load bodies or enter routing/catalog context; disabled MCP servers never

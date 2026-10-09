@@ -27,6 +27,7 @@ impl AgentKernel {
         // The kernel binds its own reader so children can rebind it.
         tools.register(result_reader.clone());
         Self {
+            extension: None,
             guard_model_requests: 0,
             continuation: crate::TurnState::default(),
             activity: Arc::default(),
@@ -56,6 +57,9 @@ impl AgentKernel {
             pending_question: None,
             receipts_dirty: false,
             subagent_config: SubagentConfig::default(),
+            subagent_depth: 0,
+            subagent_pool: None,
+            subagent_tools: vec!["subagent".into(), "subagent_fork".into()],
             agent_templates: Vec::new(),
             subagent_manager: None,
             repeat_calls: crate::loop_hygiene::RepeatCallChain::default(),
@@ -101,13 +105,33 @@ impl AgentKernel {
 
     #[must_use]
     pub fn with_tool(mut self, tool: impl tool::Tool + 'static) -> Self {
-        self.tools.register(tool);
+        self.register_tool(tool);
         self
+    }
+
+    /// Withdraw a tool before the next turn; absent names are ignored.
+    pub fn remove_tool(&mut self, name: &str) {
+        self.tools.remove(name);
     }
 
     /// Register or replace a tool before the next turn.
     pub fn register_tool(&mut self, tool: impl tool::Tool + 'static) {
-        self.tools.register(tool);
+        let tool: Arc<dyn tool::Tool> = Arc::new(tool);
+        self.tools.register_arc(self.extension.as_ref().map_or_else(
+            || tool.clone(),
+            |extension| extension.wrap_tool(tool.clone()),
+        ));
+    }
+
+    /// Extensions wrap execution after the scheduler's approval and confinement checks.
+    #[must_use]
+    pub fn with_runtime_extension(mut self, extension: Arc<dyn crate::RuntimeExtension>) -> Self {
+        let tools = self.tools.iter().cloned().collect::<Vec<_>>();
+        for tool in tools {
+            self.tools.register_arc(extension.wrap_tool(tool));
+        }
+        self.extension = Some(extension);
+        self
     }
 
     /// Seeds the kernel with a previously loaded session context.
@@ -152,9 +176,11 @@ impl AgentKernel {
         let result_reader = tool::ResultReader::default();
         let mut tools = self.tools.clone();
         tools.remove("subagent");
+        tools.remove("subagent_fork");
         tools.remove("spawn_agent");
         tools.register(result_reader.clone());
         let mut worker = Self {
+            extension: None,
             guard_model_requests: 0,
             continuation: crate::TurnState::default(),
             activity: Arc::default(),
@@ -184,6 +210,9 @@ impl AgentKernel {
             pending_question: None,
             receipts_dirty: false,
             subagent_config: SubagentConfig::default(),
+            subagent_depth: 0,
+            subagent_pool: None,
+            subagent_tools: vec!["subagent".into(), "subagent_fork".into()],
             agent_templates: Vec::new(),
             subagent_manager: None,
             repeat_calls: crate::loop_hygiene::RepeatCallChain::default(),

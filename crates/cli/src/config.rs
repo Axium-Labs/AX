@@ -91,6 +91,8 @@ pub struct AxConfig {
     pub subagent: runtime_core::SubagentConfig,
     #[serde(default)]
     pub execution: ExecutionConfig,
+    #[serde(default)]
+    pub personalization: crate::personalization::PersonalizationConfig,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<ModelConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

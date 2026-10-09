@@ -121,6 +121,12 @@ pub static SLASH_COMMANDS: &[SlashCommandDef] = &[
         None,
     ),
     cmd(
+        "/mods",
+        "manage scoped JavaScript Mods",
+        SlashPresentation::Manager,
+        None,
+    ),
+    cmd(
         "/agents",
         "manage scoped agents",
         SlashPresentation::Manager,
@@ -213,6 +219,7 @@ fn capability_scope_settings(state: &ReplState) -> Box<dyn super::bottom_pane::P
             item("skills", "Skills", ""),
             item("mcp", "MCP", ""),
             item("agents", "Agents", ""),
+            item("mods", "Mods", ""),
         ],
         "Enter manage | Esc back",
     )
@@ -228,6 +235,7 @@ fn capability_slash(
         "/skills" => crate::capabilities::Kind::Skills,
         "/mcp" => crate::capabilities::Kind::Mcp,
         "/agents" => crate::capabilities::Kind::Agents,
+        "/mods" => crate::capabilities::Kind::Mods,
         _ => return Ok(None),
     };
     let mut args = rest.split_whitespace();
@@ -276,8 +284,8 @@ fn subagent_settings() -> Result<Box<dyn super::bottom_pane::PaneView>> {
             },
             SurfaceItem {
                 id: "max_depth".into(),
-                label: "Maximum depth (children cannot delegate)".into(),
-                value: config.subagent.max_depth.min(1).to_string(),
+                label: "Maximum depth (cycle 0–8; 0 disables)".into(),
+                value: config.subagent.max_depth.to_string(),
             },
         ],
         "Enter change · Esc close",
@@ -318,6 +326,7 @@ pub(super) async fn execute_slash(
             crate::capabilities::Kind::Skills => open_skills(state, pane)?,
             crate::capabilities::Kind::Mcp => open_mcp(state, pane).await?,
             crate::capabilities::Kind::Agents => catalogs::open_agents(state, pane)?,
+            crate::capabilities::Kind::Mods => catalogs::open_mods(state, pane)?,
         }
         return Ok(true);
     }
@@ -381,6 +390,7 @@ pub(super) async fn execute_slash(
         "/status" => pane.push_view(status_panel(state, selection, app)),
         "/settings" => pane.push_view(capability_settings(state)),
         "/agents" => catalogs::open_agents(state, pane)?,
+        "/mods" => catalogs::open_mods(state, pane)?,
         "/settings subagent" => pane.push_view(subagent_settings()?),
         "/environment" => pane.push_view(execution_settings()?),
         other => {
@@ -1014,18 +1024,24 @@ pub(super) async fn apply_modal_action(
                     "skills" => open_skills(state, pane)?,
                     "mcp" => open_mcp(state, pane).await?,
                     "agents" => catalogs::open_agents(state, pane)?,
+                    "mods" => catalogs::open_mods(state, pane)?,
                     _ => {}
                 }
                 return Ok(());
             }
-            if surface == "agents" {
+            if surface == "agents" || surface == "mods" {
+                let kind = if surface == "mods" {
+                    crate::capabilities::Kind::Mods
+                } else {
+                    crate::capabilities::Kind::Agents
+                };
                 let row = state
-                    .capability_rows(crate::capabilities::Kind::Agents, state.capability_scope)?
+                    .capability_rows(kind, state.capability_scope)?
                     .into_iter()
                     .find(|row| row["name"] == id)
                     .ok_or_else(|| anyhow::anyhow!("Unknown agent"))?;
                 state.manage_capability(
-                    crate::capabilities::Kind::Agents,
+                    kind,
                     state.capability_scope.unwrap_or(scoped::Scope::Project),
                     if row["enabled"] == true {
                         "disable"
@@ -1035,10 +1051,7 @@ pub(super) async fn apply_modal_action(
                     &id,
                     None,
                 )?;
-                pane.refresh_surface(
-                    "agents",
-                    &catalogs::capability_items(state, crate::capabilities::Kind::Agents)?,
-                );
+                pane.refresh_surface(&surface, &catalogs::capability_items(state, kind)?);
                 return Ok(());
             }
             if surface == "subagent_settings" {
@@ -1048,7 +1061,7 @@ pub(super) async fn apply_modal_action(
                         config.subagent.max_concurrent = config.subagent.max_concurrent % 8 + 1;
                     }
                     "max_depth" => {
-                        config.subagent.max_depth = usize::from(config.subagent.max_depth == 0);
+                        config.subagent.max_depth = config.subagent.max_depth.saturating_add(1) % 9;
                     }
                     _ => {}
                 }

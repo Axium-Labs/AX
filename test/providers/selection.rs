@@ -1,6 +1,33 @@
 use super::*;
 
 #[test]
+fn removed_providers_cannot_be_constructed_even_with_explicit_selection() {
+    let root = std::env::temp_dir().join(format!("ax-removed-selection-{}", uuid::Uuid::new_v4()));
+    let path = root.join("auth.json");
+    let auth = model::AuthStorage::new(&path);
+    for id in ["openai", "google-vertex", "amazon-bedrock", "openai-codex"] {
+        auth.disable_provider(id).unwrap();
+        let info = ModelInfo {
+            id: "test-model".into(),
+            display_name: "Test".into(),
+            provider: id.into(),
+            context_window: 128_000,
+            max_output_tokens: None,
+            reasoning_efforts: Vec::new(),
+            default_reasoning_effort: None,
+            supports_tools: true,
+            endpoint: None,
+        };
+        let selection = selection_from_info(&info).unwrap();
+        let Err(error) = crate::runtime::build_provider(&selection, &path) else {
+            panic!("removed provider must not be constructed");
+        };
+        assert!(error.to_string().contains("was removed"));
+    }
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn native_ids_select_the_native_adapter_and_keep_catalog_limits() {
     for id in [
         "anthropic",

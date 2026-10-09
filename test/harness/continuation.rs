@@ -105,6 +105,133 @@ fn kernel(provider: Arc<Script>) -> AgentKernel {
 }
 
 #[tokio::test]
+async fn guidance_during_streaming_continues_the_same_goal_and_closes_admission() {
+    let provider = Script::new(vec![
+        response("first answer", vec![]),
+        response("updated answer", vec![]),
+        response("next turn", vec![]),
+    ]);
+    let mut runtime = kernel(provider.clone());
+    let input = runtime.turn_input();
+    let mut sent = false;
+    let mut starts = 0;
+    let mut ends = 0;
+    let mut saved = vec![];
+    let answer = runtime
+        .run_turn_checkpointed(
+            "original task",
+            |event| {
+                if matches!(event, AgentEvent::TurnStarted) {
+                    starts += 1;
+                }
+                if matches!(event, AgentEvent::TurnFinished) {
+                    ends += 1;
+                }
+                if matches!(event, AgentEvent::ContentDelta { .. }) && !sent {
+                    assert!(input.try_steer("also cover Chinese filenames").is_some());
+                    assert!(input.try_steer("keep the original scope").is_some());
+                    sent = true;
+                }
+            },
+            |messages| {
+                saved = messages.to_vec();
+                Ok(())
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(answer, "updated answer");
+    assert_eq!((starts, ends), (1, 1));
+    let goal = runtime.goal_id().unwrap().to_owned();
+    {
+        let requests = provider.requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        let users: Vec<_> = requests[1]
+            .messages
+            .iter()
+            .filter(|m| m.role == model::Role::User)
+            .map(|m| m.content.as_str())
+            .collect();
+        assert_eq!(
+            users,
+            vec![
+                "original task",
+                "also cover Chinese filenames",
+                "keep the original scope"
+            ]
+        );
+    }
+
+    assert_eq!(
+        saved
+            .iter()
+            .filter(|m| m
+                .provider_metadata
+                .as_ref()
+                .is_some_and(|v| v["axSteering"] == true))
+            .count(),
+        2
+    );
+    assert!(input.try_steer("too late").is_none());
+    assert_eq!(
+        runtime
+            .run_turn("ordinary next turn", |_| {})
+            .await
+            .unwrap(),
+        "next turn"
+    );
+    assert_ne!(runtime.goal_id().unwrap(), goal);
+    assert!(input.try_steer("old handle stays closed").is_none());
+}
+
+#[tokio::test]
+async fn guidance_during_tool_execution_preserves_the_tool_result_and_goal() {
+    let provider = Script::new(vec![
+        response(
+            "",
+            vec![call("once", "operation", json!({"work":"original"}))],
+        ),
+        response("done", vec![]),
+    ]);
+    let mut runtime = kernel(provider.clone());
+    let input = runtime.turn_input();
+    let mut tools = 0;
+    runtime
+        .run_turn("work", |event| {
+            if matches!(event, AgentEvent::ToolStarted { .. }) {
+                tools += 1;
+                assert!(input.try_steer("additional detail").is_some());
+            }
+        })
+        .await
+        .unwrap();
+    assert_eq!(tools, 1);
+    let requests = provider.requests.lock().unwrap();
+    assert!(
+        requests[1]
+            .messages
+            .iter()
+            .any(|m| m.tool_call_id.as_deref() == Some("once"))
+    );
+    assert!(
+        requests[1]
+            .messages
+            .iter()
+            .any(|m| m.role == model::Role::User && m.content == "additional detail")
+    );
+}
+
+#[test]
+fn final_admission_boundary_cannot_strand_accepted_guidance() {
+    let input = TurnInput::default();
+    assert!(input.try_steer("accepted").is_some());
+    assert!(!input.close_if_empty());
+    assert_eq!(input.drain().len(), 1);
+    assert!(input.close_if_empty());
+    assert!(input.try_steer("late").is_none());
+}
+
+#[tokio::test]
 async fn ordinary_answers_and_code_explanations_stream_in_one_request() {
     for input in [
         "hello",

@@ -15,6 +15,14 @@ configured": AX's own `auth.json`, conventional environment variables, and an
 explicit legacy Codex auth path. Both CLI startup resolution and the TUI's
 `/model` catalog refresh delegate to it.
 
+`ax auth remove <provider-id>` removes that provider from AX by replacing its
+credential with a provider-scoped `{"type":"disabled"}` marker in `auth.json`.
+This suppresses stored, environment, ambient and explicit legacy credential
+discovery and rejects explicit runtime selection. System environment variables
+and unrelated providers are preserved. Saving a new key or completing OAuth
+login replaces the marker and re-enables the provider. The existing TUI logout
+action still only removes stored credentials; it does not create an opt-out.
+
 ## Provider abstraction
 
 The `model` crate defines the provider-neutral `ModelProvider` trait, message

@@ -156,6 +156,7 @@ impl ChannelApproval {
 /// Handle to the running agent turn.
 struct ActiveTurn {
     done: oneshot::Receiver<(ReplState, Result<String>)>,
+    input: runtime_core::TurnInput,
 }
 
 struct App {
@@ -624,7 +625,7 @@ pub(super) async fn run_tui(
             }
 
             // Normal composer editing. The composer stays editable while a turn
-            // runs; a submission is queued and handled once the agent frees up.
+            // runs; a submission steers that same execution at its next boundary.
             let key_outcome = pane.composer_mut().handle_key(key);
             match key_outcome {
                 bottom_pane::ComposerKey::Ignored => {}
@@ -644,9 +645,20 @@ pub(super) async fn run_tui(
                     }
                     app.transcript.scroll_from_bottom = 0;
                     app.unseen_output = false;
-                    // While a turn is running, queue the input; it is dispatched
-                    // once the agent frees up.
                     if app.working {
+                        if !submitted.starts_with('/')
+                            && active_turn.as_ref().is_some_and(|turn| {
+                                turn.input.try_steer(submitted.clone()).is_some()
+                            })
+                        {
+                            app.push(TranscriptKind::User, submitted);
+                            app.push(
+                                TranscriptKind::Status,
+                                "Guidance sent — the current task continues",
+                            );
+                            continue;
+                        }
+                        // Commands and submissions arriving after the final boundary run next.
                         app.push(TranscriptKind::User, submitted.clone());
                         app.pending.push_back(submitted);
                         app.push(
@@ -660,7 +672,7 @@ pub(super) async fn run_tui(
                         || state
                             .as_ref()
                             .is_some_and(|state| state.pending_question().is_some());
-                    if submitted.starts_with('/') && !answering {
+                    if submitted.starts_with('/') && !submitted.starts_with("/mod:") && !answering {
                         let keep_running = commands::execute_slash(
                             &submitted,
                             state.as_mut().expect("state available"),
@@ -803,7 +815,7 @@ pub(super) async fn run_tui(
                     // The agent is free: run any input queued while it was busy.
                     if let Some(next) = app.pending.pop_front() {
                         app.transcript.mark_next_queued_running();
-                        if next.starts_with('/') {
+                        if next.starts_with('/') && !next.starts_with("/mod:") {
                             let keep = commands::execute_slash(
                                 &next,
                                 state.as_mut().expect("state returned"),
@@ -830,7 +842,10 @@ pub(super) async fn run_tui(
                     }
                 }
                 Err(oneshot::error::TryRecvError::Empty) => {
-                    active_turn = Some(ActiveTurn { done: turn.done });
+                    active_turn = Some(ActiveTurn {
+                        done: turn.done,
+                        input: turn.input,
+                    });
                 }
                 Err(oneshot::error::TryRecvError::Closed) => {
                     updated = true;
@@ -1052,6 +1067,8 @@ fn start_turn(
         return;
     };
     let (done_tx, done_rx) = oneshot::channel();
+    let input = runtime_core::TurnInput::default();
+    owned_state.turn_input = Some(input.clone());
     let tx = worker_tx.clone();
     let active_selection = selection.clone();
     let approval: Arc<dyn ApprovalPolicy> = if allow_dangerous {
@@ -1076,7 +1093,10 @@ fn start_turn(
         .await;
         let _ = done_tx.send((owned_state, result));
     });
-    *active_turn = Some(ActiveTurn { done: done_rx });
+    *active_turn = Some(ActiveTurn {
+        done: done_rx,
+        input,
+    });
     app.working = true;
     app.streaming = false;
 }

@@ -30,6 +30,8 @@ mod file_reference;
 mod memory_context;
 mod memory_tool;
 mod model_selection;
+mod mods;
+mod personalization;
 mod project_identity;
 mod project_instructions;
 mod providers;
@@ -40,6 +42,7 @@ mod session_restore;
 mod skill_invocation;
 mod skill_settings;
 mod storage_location;
+mod subagent_settings;
 mod tui;
 mod update;
 mod worktree_changes;
@@ -72,5 +75,7 @@ async fn main() -> Result<()> {
     if app::run_control_command(&cli, &locations).await? {
         return Ok(());
     }
-    app::dispatch(&cli, &locations, budget, &globals).await
+    let result = app::dispatch(&cli, &locations, budget, &globals).await;
+    mods::close_all().await;
+    result
 }

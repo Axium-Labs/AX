@@ -26,10 +26,12 @@ mod context;
 pub mod continuation;
 pub mod stop_guard;
 pub use continuation::{
-    ContinuationReason, TurnContinuation, TurnState, WaitReason, needs_follow_up,
+    ContinuationReason, TurnContinuation, TurnInput, TurnState, WaitReason, needs_follow_up,
 };
 pub use stop_guard::{StopDecision, StopGuard, Verification, VerificationConfig};
 mod error;
+mod extension;
+pub use extension::{ExtensionPrompt, RuntimeExtension};
 mod event;
 pub mod execution;
 mod harness;

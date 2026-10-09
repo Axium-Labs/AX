@@ -84,6 +84,8 @@ impl AgentKernel {
     ///
     /// # Errors
     /// Returns lifecycle, runtime or checkpoint failures.
+    // Keep the persistence, timeout and extension completion boundaries together.
+    #[allow(clippy::too_many_lines)]
     pub async fn run_goal_turn_checkpointed<F, H>(
         &mut self,
         input: impl Into<String>,
@@ -95,6 +97,10 @@ impl AgentKernel {
         F: FnMut(AgentEvent) + Send,
         H: FnMut(&[Message]) -> Result<(), AgentError> + Send,
     {
+        if self.turn_input.closed() {
+            self.turn_input = crate::TurnInput::default();
+        }
+        let _input_lease = crate::continuation::TurnInputLease(self.turn_input.clone());
         self.raw_turn_messages.clear();
         self.continuation = crate::TurnState::default();
         self.guard_model_requests = 0;
@@ -193,7 +199,28 @@ impl AgentKernel {
         {
             self.checkpoint_queue(&mut checkpoint)?;
         }
+        self.turn_input.close();
+        // Preserve accepted guidance even when the provider fails before the next boundary.
+        for message in self.turn_input.drain() {
+            self.messages.push(message.clone());
+            self.raw_turn_messages.push(message);
+        }
         checkpoint(&self.raw_turn_messages)?;
+        if let Some(extension) = &self.extension {
+            let error = result.as_ref().err().map(ToString::to_string);
+            let completion = async {
+                extension
+                    .sync_context(&self.messages, self.provider.context_window())
+                    .await?;
+                extension
+                    .after_turn(result.as_ref().ok().map(String::as_str), error.as_deref())
+                    .await
+            }
+            .await;
+            if result.is_ok() {
+                completion?;
+            }
+        }
         result
     }
 
@@ -250,9 +277,27 @@ impl AgentKernel {
         } else if self.child_run.is_none()
             || !self.messages.iter().any(|m| m.role == model::Role::User)
         {
-            let user = Message::user(input);
-            self.messages.push(user.clone());
-            self.raw_turn_messages.push(user);
+            self.raw_turn_messages.push(Message::user(input.clone()));
+            if let Some(extension) = &self.extension {
+                extension
+                    .sync_context(&self.messages, self.provider.context_window())
+                    .await?;
+                let adapted = extension.before_turn(&input).await?;
+                self.messages.push(Message::user(adapted.text));
+                for context in adapted.context {
+                    let message = Message::system(format!("[ax-mod-context]\n{context}"));
+                    self.messages.push(message.clone());
+                    self.raw_turn_messages.push(message);
+                }
+                if let Some(response) = adapted.response {
+                    if let Some(queue) = &mut self.task_queue {
+                        queue.stop(QueueState::Completed, "Mod command completed".into());
+                    }
+                    return self.finish_goal_response(response, &emit, checkpoint);
+                }
+            } else {
+                self.messages.push(Message::user(input));
+            }
         }
         if self.child_run.is_some() {
             // Never replay an interrupted call whose side effects are unknown.
@@ -308,14 +353,28 @@ impl AgentKernel {
         let mut calls_used = 0;
         let mut steps_used = 0usize;
         loop {
-            for steer in self.turn_input.drain() {
-                let message = Message::user(steer);
+            let guidance = self.turn_input.drain();
+            if !guidance.is_empty()
+                && let Some(queue) = self
+                    .task_queue
+                    .as_mut()
+                    .filter(|q| q.state == QueueState::Completed)
+            {
+                queue.state = QueueState::Active;
+                queue.final_response = None;
+                queue.summarized = false;
+            }
+            for message in guidance {
                 self.messages.push(message.clone());
                 self.raw_turn_messages.push(message);
                 checkpoint(&self.raw_turn_messages)?;
             }
             self.touch_progress();
             if let Some(queue) = self.task_queue.as_ref().filter(|q| !q.active()) {
+                // A terminal control action closes input at the same admission boundary.
+                if !self.turn_input.close_if_empty() {
+                    continue;
+                }
                 let content = queue
                     .final_response
                     .clone()

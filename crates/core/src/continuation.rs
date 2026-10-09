@@ -6,29 +6,88 @@ use std::sync::{
 };
 
 /// A host can steer an active turn without creating a second execution loop.
+#[derive(Default)]
+struct Inputs {
+    messages: Vec<model::Message>,
+    closed: bool,
+}
 #[derive(Clone, Default)]
-pub struct TurnInput(Arc<std::sync::Mutex<Vec<String>>>);
+pub struct TurnInput(Arc<std::sync::Mutex<Inputs>>);
+static STEER_ID: AtomicUsize = AtomicUsize::new(0);
 impl TurnInput {
     pub fn steer(&self, input: impl Into<String>) {
+        let _ = self.try_steer(input);
+    }
+    /// Returns a stable transcript ID only when the current execution accepts input.
+    pub fn try_steer(&self, input: impl Into<String>) -> Option<String> {
+        let mut inputs = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if inputs.closed {
+            return None;
+        }
+        let id = format!(
+            "steer-{}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos(),
+            STEER_ID.fetch_add(1, Ordering::Relaxed)
+        );
+        let mut message = model::Message::user(input);
+        message.provider_metadata = Some(serde_json::json!({"axSteering":true,"axMessageId":id}));
+        inputs.messages.push(message);
+        Some(id)
+    }
+    /// Closing and admission share a lock: a final answer cannot strand accepted input.
+    pub(crate) fn close_if_empty(&self) -> bool {
+        let mut inputs = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !inputs.messages.is_empty() {
+            return false;
+        }
+        inputs.closed = true;
+        true
+    }
+    pub(crate) fn close(&self) {
         self.0
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .push(input.into());
+            .closed = true;
+    }
+    pub(crate) fn closed(&self) -> bool {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .closed
     }
     pub(crate) fn pending(&self) -> bool {
         !self
             .0
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .messages
             .is_empty()
     }
-    pub(crate) fn drain(&self) -> Vec<String> {
+    pub(crate) fn drain(&self) -> Vec<model::Message> {
         std::mem::take(
-            &mut *self
+            &mut self
                 .0
                 .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner),
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .messages,
         )
+    }
+}
+
+pub(crate) struct TurnInputLease(pub TurnInput);
+impl Drop for TurnInputLease {
+    fn drop(&mut self) {
+        self.0.close();
     }
 }
 
@@ -186,6 +245,14 @@ pub fn needs_follow_up(state: &TurnState) -> bool {
 }
 
 impl crate::AgentKernel {
+    #[must_use]
+    pub fn with_turn_input(mut self, input: TurnInput) -> Self {
+        self.turn_input = input;
+        self
+    }
+    pub fn set_turn_input(&mut self, input: TurnInput) {
+        self.turn_input = input;
+    }
     #[must_use]
     pub fn turn_input(&self) -> TurnInput {
         self.turn_input.clone()
