@@ -676,6 +676,7 @@ mod tests {
             subagent: runtime_core::SubagentConfig::default(),
             execution: crate::config::ExecutionConfig::default(),
             personalization: crate::personalization::PersonalizationConfig::default(),
+            computer_use: tool::DesktopSettings::default(),
             model: Some(ModelConfig {
                 provider: "deepseek".to_owned(),
                 model: "deepseek-flash".to_owned(),

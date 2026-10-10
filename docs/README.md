@@ -6,6 +6,11 @@ design decisions that shaped the code are recorded as ADRs in
 
 ## Documentation map
 
+Native Windows desktop automation and its AXCrew settings contract are documented
+in [computer-use.md](computer-use.md).
+Independent application/site access, browser sessions and sandbox/approval boundaries
+are documented in [host-permissions.md](host-permissions.md).
+
 | Document | Topic |
 |---|---|
 | [agent-runtime.md](agent-runtime.md) | The runtime contract: request/context/capability boundary, turn flow, trigger conditions |
@@ -23,6 +28,7 @@ design decisions that shaped the code are recorded as ADRs in
 | [tools.md](tools.md) | Tools, permissions, safety |
 | [security.md](security.md) | Runtime Workspace Sandbox, OS enforcement and escape tests |
 | [web-latency.md](web-latency.md) | Reproducible web scheduling latency benchmark |
+| [web-search-architecture.md](web-search-architecture.md) | Web search: two-tier native-first routing, provider capabilities, configuration |
 | [mcp.md](mcp.md) | MCP integration: configuration, transports, lazy connection |
 | [skills.md](skills.md) | Skills: package format, routing, enable/disable |
 | [capabilities.md](capabilities.md) | Shared Global/Project registry and Skill/MCP/Agent/Mod management |
@@ -39,6 +45,10 @@ design decisions that shaped the code are recorded as ADRs in
 
 ## TUI features
 
+- **System resources** — `/system` takes a fresh local CPU/memory snapshot
+  and shows each supported NVIDIA GPU's name, usage and used/total VRAM.
+  Capacities use GiB; unavailable fields remain explicit. See
+  [architecture.md](architecture.md#local-system-resources).
 - **Active guidance** — Enter sends additional instructions to the current
   task while it works, preserving its goal and tool results. Stop remains
   separate. See [agent-runtime.md](agent-runtime.md).

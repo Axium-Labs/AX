@@ -29,6 +29,14 @@ pub enum ProviderProtocol {
     PiMessages,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SearchCapability {
+    /// No native web search capability
+    None,
+    /// Provider supports native web search (e.g., via browsing tool)
+    Native,
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct ProviderSpec {
     pub id: &'static str,
@@ -36,6 +44,7 @@ pub struct ProviderSpec {
     pub environment: Option<&'static str>,
     pub auth: ProviderAuthKind,
     pub protocol: ProviderProtocol,
+    pub search_capability: SearchCapability,
 }
 
 macro_rules! key {
@@ -46,6 +55,20 @@ macro_rules! key {
             environment: Some($env),
             auth: ProviderAuthKind::ApiKey,
             protocol: ProviderProtocol::$protocol,
+            search_capability: SearchCapability::None,
+        }
+    };
+}
+
+macro_rules! key_with_search {
+    ($id:literal, $name:literal, $env:literal, $protocol:ident, $search:ident) => {
+        ProviderSpec {
+            id: $id,
+            name: $name,
+            environment: Some($env),
+            auth: ProviderAuthKind::ApiKey,
+            protocol: ProviderProtocol::$protocol,
+            search_capability: SearchCapability::$search,
         }
     };
 }
@@ -58,6 +81,7 @@ pub static PROVIDERS: &[ProviderSpec] = &[
         environment: None,
         auth: ProviderAuthKind::ExternalOAuth,
         protocol: ProviderProtocol::Managed,
+        search_capability: SearchCapability::None,
     },
     ProviderSpec {
         id: "workbuddy",
@@ -65,6 +89,7 @@ pub static PROVIDERS: &[ProviderSpec] = &[
         environment: None,
         auth: ProviderAuthKind::ExternalOAuth,
         protocol: ProviderProtocol::Managed,
+        search_capability: SearchCapability::None,
     },
     ProviderSpec {
         id: "amazon-bedrock",
@@ -72,9 +97,10 @@ pub static PROVIDERS: &[ProviderSpec] = &[
         environment: Some("AWS_BEARER_TOKEN_BEDROCK"),
         auth: ProviderAuthKind::Ambient,
         protocol: ProviderProtocol::Bedrock,
+        search_capability: SearchCapability::None,
     },
     key!("ant-ling", "Ant Ling", "ANT_LING_API_KEY", OpenAiCompatible),
-    key!("anthropic", "Anthropic", "ANTHROPIC_API_KEY", Anthropic),
+    key_with_search!("anthropic", "Anthropic", "ANTHROPIC_API_KEY", Anthropic, Native),
     key!(
         "azure-openai-responses",
         "Azure OpenAI",
@@ -108,14 +134,16 @@ pub static PROVIDERS: &[ProviderSpec] = &[
         environment: Some("COPILOT_GITHUB_TOKEN"),
         auth: ProviderAuthKind::ExternalOAuth,
         protocol: ProviderProtocol::Managed,
+        search_capability: SearchCapability::None,
     },
-    key!("google", "Google Gemini", "GEMINI_API_KEY", Google),
+    key_with_search!("google", "Google Gemini", "GEMINI_API_KEY", Google, Native),
     ProviderSpec {
         id: "google-vertex",
         name: "Google Vertex",
         environment: Some("GOOGLE_CLOUD_API_KEY"),
         auth: ProviderAuthKind::Ambient,
         protocol: ProviderProtocol::Google,
+        search_capability: SearchCapability::Native,
     },
     key!("groq", "Groq", "GROQ_API_KEY", OpenAiCompatible),
     key!("huggingface", "Hugging Face", "HF_TOKEN", OpenAiCompatible),
@@ -147,13 +175,14 @@ pub static PROVIDERS: &[ProviderSpec] = &[
         OpenAiCompatible
     ),
     key!("nvidia", "NVIDIA", "NVIDIA_API_KEY", OpenAiCompatible),
-    key!("openai", "OpenAI", "OPENAI_API_KEY", OpenAiResponses),
+    key_with_search!("openai", "OpenAI", "OPENAI_API_KEY", OpenAiResponses, Native),
     ProviderSpec {
         id: "openai-codex",
         name: "OpenAI Codex",
         environment: None,
         auth: ProviderAuthKind::CodexOAuth,
         protocol: ProviderProtocol::OpenAiResponses,
+        search_capability: SearchCapability::Native,
     },
     key!("opencode", "OpenCode", "OPENCODE_API_KEY", OpenAiCompatible),
     key!(

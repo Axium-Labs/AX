@@ -55,6 +55,13 @@ execute on their own servers and cannot promise local workspace confinement for
 remote side effects. Trusted, compiled runtime-owned tools persist AX state through
 narrow service APIs; native extension code is part of AX's trusted computing base.
 
+Desktop/browser tools declare `AuthorizedHost`, a separate application/site service
+boundary. They do not disable, modify or inherit the file/terminal sandbox policy.
+Unknown app/site access needs independent approval and cannot be granted by a
+generic Process/Network rule. Explicit task ceilings still apply. See
+[host-permissions.md](host-permissions.md) and [ADR 0024](adr/0024-independent-host-access.md)
+for trusted identities, session scope, browser restrictions and platform limits.
+
 A manager is retained by bound tools and MCP transports and shared by workspace.
 It prepares one persistent broker with one namespace set, then sends commands over
 an inherited private listener. Calls reuse this broker, filesystem and temporary

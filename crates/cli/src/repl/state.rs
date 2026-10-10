@@ -687,10 +687,11 @@ impl ReplState {
         if self.runtime.is_some() || self.prepared.is_some() {
             return Ok(());
         }
-        let prepared = Runtime::build(
+        let prepared = Runtime::build_in_session(
             selection,
             &self.mcp_tools,
             &crate::bootstrap::ax_auth_path(),
+            &self.permissions.host_session(),
         )?;
         self.tool_schema_tokens = Some(prepared.tool_schema_tokens());
         self.prepared = Some(prepared);

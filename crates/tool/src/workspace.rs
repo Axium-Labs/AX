@@ -82,4 +82,20 @@ impl Tool for WorkspaceTool {
     async fn execute_output(&self, input: Value) -> Result<ToolOutput, ToolError> {
         self.tool.execute_output(self.resolve(input)).await
     }
+    async fn host_access(
+        &self,
+        input: &Value,
+    ) -> Result<Option<crate::HostAccessRequest>, ToolError> {
+        self.tool.host_access(&self.resolve(input.clone())).await
+    }
+    async fn execute_output_authorized(
+        &self,
+        input: Value,
+        profiles: &[crate::PermissionProfile],
+        authorization: Option<&crate::HostAuthorization>,
+    ) -> Result<ToolOutput, ToolError> {
+        self.tool
+            .execute_output_authorized(self.resolve(input), profiles, authorization)
+            .await
+    }
 }

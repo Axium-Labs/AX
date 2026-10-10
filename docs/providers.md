@@ -70,6 +70,28 @@ ids work with `--provider anthropic`, `--provider google`, etc. For Radius with
 no cache, the interactive startup opens discovery/model selection; noninteractive
 use requires an explicit provider and model.
 
+## Native Web Search Capabilities
+
+AX's web search tool uses a two-tier routing system that automatically prioritizes
+native search when available. Providers marked with native web search capabilities
+will have their search features used directly, with no additional API keys required.
+
+| Provider | Native Search | Notes |
+|----------|---------------|-------|
+| `openai` | ✓ Yes | GPT-4 and GPT-4o models support web access through vision/reasoning |
+| `anthropic` | ✓ Yes | Claude models with native search (version-dependent) |
+| `google` | ✓ Yes | Gemini models include built-in search integration |
+| `google-vertex` | ✓ Yes | Vertex AI Gemini deployments with search |
+| All others | — | Use remote search providers (Brave, Bocha, SearXNG, DuckDuckGo) |
+
+When native search is unavailable or fails, AX automatically falls back to remote
+search providers. Users can optionally configure API keys for faster, more reliable
+remote search, but a working search experience is available out-of-the-box with zero
+configuration (using DuckDuckGo fallback).
+
+See [web-search-architecture.md](web-search-architecture.md) for complete details on
+search routing, configuration, and resilience patterns.
+
 Azure resource roots normalize to `/openai/v1/responses`; configured API bases
 and full Responses paths are also accepted. Model identity stays unchanged
 when `AZURE_OPENAI_DEPLOYMENT_NAME_MAP` maps `model-id=deployment-name` (comma

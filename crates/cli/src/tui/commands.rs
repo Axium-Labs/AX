@@ -168,6 +168,12 @@ pub static SLASH_COMMANDS: &[SlashCommandDef] = &[
         SlashPresentation::Manager,
         None,
     ),
+    cmd(
+        "/system",
+        "show system resources",
+        SlashPresentation::InfoPanel,
+        None,
+    ),
     cmd("/exit", "exit AX", SlashPresentation::DirectAction, None),
 ];
 
@@ -388,6 +394,7 @@ pub(super) async fn execute_slash(
         "/mcp" => open_mcp(state, pane).await?,
         "/permissions" => pane.push_view(permissions(&state.permissions)),
         "/status" => pane.push_view(status_panel(state, selection, app)),
+        "/system" => pane.push_view(system_panel().await?),
         "/settings" => pane.push_view(capability_settings(state)),
         "/agents" => catalogs::open_agents(state, pane)?,
         "/mods" => catalogs::open_mods(state, pane)?,
@@ -551,6 +558,8 @@ fn permission_items(config: &tool::PermissionStore) -> Vec<SurfaceItem> {
             &config.get("filesystem-read").to_string(),
         ),
         item("network", "Network", &config.get("network").to_string()),
+        item("computer-use", "Computer Use actions", &config.get("computer-use").to_string()),
+        item("browser-use", "Browser Use actions", &config.get("browser-use").to_string()),
         item("mcp", "MCP", &config.get("mcp").to_string()),
         item(
             "process",
@@ -658,6 +667,72 @@ fn status_panel(
         ));
     }
     SurfaceView::info("AX Status", lines)
+}
+
+async fn system_panel() -> Result<Box<dyn super::bottom_pane::PaneView>> {
+    let info = tokio::task::spawn_blocking(crate::system_info::get_system_info).await?;
+    let mut lines = vec![
+        "System Resources".into(),
+        String::new(),
+        "CPU".into(),
+        format!(
+            "Logical CPUs      {}",
+            info.cpu_cores
+                .map_or_else(|| "Unavailable".into(), |value| value.to_string())
+        ),
+        format!(
+            "Usage             {}",
+            info.cpu_usage
+                .map_or_else(|| "Unavailable".into(), |value| format!("{value:.1}%"))
+        ),
+        String::new(),
+        "Memory".into(),
+        format!(
+            "Total             {}",
+            capacity_display(info.memory_total_mb)
+        ),
+        format!(
+            "Used              {}",
+            capacity_display(info.memory_used_mb)
+        ),
+        format!(
+            "Usage             {}",
+            info.memory_usage
+                .map_or_else(|| "Unavailable".into(), |value| format!("{value:.1}%"))
+        ),
+    ];
+
+    for gpu in info.gpus.as_ref().into_iter().flatten() {
+        lines.push(String::new());
+        lines.push("GPU".into());
+        lines.push(format!("Name              {}", gpu.name));
+        lines.push(format!(
+            "VRAM total        {}",
+            capacity_display(gpu.memory_total_mb)
+        ));
+        lines.push(format!(
+            "VRAM used         {}",
+            capacity_display(gpu.memory_used_mb)
+        ));
+        lines.push(format!(
+            "Usage             {}",
+            gpu.usage
+                .map_or_else(|| "Unavailable".into(), |value| format!("{value}%"))
+        ));
+    }
+    if info.gpus.as_ref().is_none_or(Vec::is_empty) {
+        lines.push("GPU               Unavailable (NVIDIA driver telemetry)".into());
+    }
+
+    Ok(SurfaceView::info("System Resources", lines))
+}
+
+#[allow(clippy::cast_precision_loss)]
+fn capacity_display(value: Option<u64>) -> String {
+    value.map_or_else(
+        || "Unavailable".into(),
+        |value| format!("{:.1} GiB", value as f64 / 1024.0),
+    )
 }
 
 fn limit_display(value: usize) -> String {

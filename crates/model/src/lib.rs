@@ -37,7 +37,7 @@ pub type DeepSeekConfig = OpenAiCompatibleConfig;
 pub type DeepSeekProvider = OpenAiCompatibleProvider;
 pub use openai::{FALLBACK_MODEL as OPENAI_FALLBACK_MODEL, OpenAiConfig, OpenAiProvider};
 pub use providers::{
-    PROVIDERS, ProviderAuthKind, ProviderProtocol, ProviderSpec, builtin_models, provider,
+    PROVIDERS, ProviderAuthKind, ProviderProtocol, ProviderSpec, SearchCapability, builtin_models, provider,
     provider_base_url, provider_chat_endpoint, provider_configuration_reason, provider_supported,
     provider_supports_oauth, provider_unsupported_reason,
 };

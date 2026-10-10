@@ -75,3 +75,5 @@ What becomes easier, what becomes harder, and what we accepted.
 - [0021 — Durable distributed collaboration](0021-durable-distributed-collaboration.md) — optional CLI worker, fenced ownership and checkpoint-based recovery.
 
 - [0022 — Lazy session Mods](0022-lazy-session-mods.md) — executable extensions with scoped metadata, session-owned Node state and explicit confinement limits.
+
+- [0024 — Independent host access](0024-independent-host-access.md) — workspace confinement, app/site access and action approvals remain separate.

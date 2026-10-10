@@ -62,6 +62,8 @@ pub struct SearchConfig {
     pub hedge_delay: Duration,
     pub circuit_failure_threshold: u32,
     pub circuit_cooldown: Duration,
+    /// Current provider ID, if available. Used to detect native search capability.
+    pub current_provider: Option<String>,
 }
 impl Default for SearchConfig {
     fn default() -> Self {
@@ -79,6 +81,7 @@ impl Default for SearchConfig {
             hedge_delay: Duration::from_millis(500),
             circuit_failure_threshold: 3,
             circuit_cooldown: Duration::from_secs(30),
+            current_provider: None,
         }
     }
 }
@@ -93,8 +96,18 @@ impl SearchConfig {
             brave_timeout: ProviderTimeout::from_env("BRAVE"),
             searxng_timeout: ProviderTimeout::from_env("SEARXNG"),
             duckduckgo_timeout: ProviderTimeout::from_env("DUCKDUCKGO"),
+            current_provider: env("AX_PROVIDER_ID"),
             ..Self::default()
         }
+    }
+    
+    /// Returns true if the current provider supports native web search.
+    /// Used to prioritize native search over remote search providers.
+    pub fn supports_native_search(&self) -> bool {
+        matches!(
+            self.current_provider.as_deref(),
+            Some("openai") | Some("anthropic") | Some("google") | Some("google-vertex")
+        )
     }
 }
 pub struct BochaSearch {

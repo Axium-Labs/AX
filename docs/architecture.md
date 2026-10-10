@@ -24,7 +24,7 @@ cli ───────────────┬──> runtime-core ──>
 | Crate | Responsibility |
 |---|---|
 | `model` | Provider-neutral `ModelProvider`, text/image message parts, capabilities, tool calls, response types. One streaming entry point (`complete_stream`) with a non-streaming fallback. |
-| `tool` | `Tool`, `ToolRegistry`, JSON Schema, `SafetyLevel`, plus built-ins: `shell`, `filesystem`, `find_files`/`glob`, `patch`, `search`, `web`, `view_image`. Owns the `PermissionStore`. |
+| `tool` | `Tool`, `ToolRegistry`, JSON Schema, `SafetyLevel`, plus built-ins: `shell`, `filesystem`, `find_files`/`glob`, `patch`, `search`, `web`, `view_image`, `browser`, and opt-in native Windows `desktop`. Owns the `PermissionStore`. |
 | `runtime-core` | The model → tool → model agent loop, `AgentEvent` stream, context selection, `ContextBudget`, compaction, and `AgentSupervisor` for bounded-concurrency tasks. |
 | `mcp` | MCP client for stdio / Streamable HTTP / WebSocket, lazy connection, capability catalog, `McpToolProxy` and `McpGateway`. |
 | `skill` | `SKILL.md` frontmatter indexing, precomputed Unicode routing features, and language-independent similarity routing; Markdown body is loaded only when a route hits. Legacy packages remain supported. |
@@ -39,6 +39,23 @@ The explicit `ax --update` path belongs to the CLI and exits before normal
 runtime setup. It checks the latest GitHub Release, verifies its archive against
 `SHA256SUMS`, and replaces the current executable. On Windows replacement is
 deferred until the running process exits. It never touches user or project data.
+
+### Local system resources
+
+The CLI's `/system` info panel gathers CPU and physical RAM with `sysinfo` on
+demand. CPU is calculated across two refreshes separated by the library's
+minimum update interval. The slash-command path awaits a blocking-pool task;
+no monitoring work or GPU driver loading is added to normal startup. This is a
+snapshot: reopening the panel takes a new reading.
+
+The optional `nvml-wrapper` collector lazily loads NVIDIA's installed NVML
+driver and keeps its handle for later snapshots. Each supported GPU reports its
+name, utilization and dedicated VRAM used/total; individual query failures
+leave just that field unavailable. Missing drivers and unsupported vendors
+(including Intel/AMD) show unavailable GPU telemetry, not invented capacity or
+a claim that the host has no GPU. RAM and VRAM use GiB (internal `_mb` values
+are MiB). This CLI module does not supply AXCrew's independently collected
+System settings or the distributed worker's hardware inventory.
 
 ### `model`
 
@@ -537,6 +554,11 @@ in local SSH execution contexts. See [mods.md](mods.md) and
 
 The independent `sandbox` crate sits below ToolRegistry and MCP stdio transport.
 Agent, subagent and Skill execution reach SandboxManager before local OS effects.
+The opt-in desktop and owned-browser tools instead use a declared `AuthorizedHost`
+service boundary, with exact application/site grants independent of file/terminal
+confinement and ordinary action approval. Neither access grant nor action approval
+changes the sandbox. Host services remain outside child registries unless explicitly
+bound. See [host-permissions.md](host-permissions.md) and [ADR 0024](adr/0024-independent-host-access.md).
 Bound tools retain a manager and reuse a persistent Linux namespace broker; child
 registries bind their own workspace. Permission remains independent. See
 [security.md](security.md) and [ADR 0013](adr/0013-workspace-runtime-sandbox.md)

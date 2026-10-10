@@ -1,4 +1,7 @@
 //! Dependency DAG, bounded in-task futures, and process-wide resource leases.
+#[cfg(test)]
+#[path = "../../../test/host_scheduler.rs"]
+mod host_authorization_tests;
 use crate::{AgentError, AgentEvent, ApprovalPolicy, event::fetch_diagnostics, tool_activity};
 use futures_util::{StreamExt, future::BoxFuture, stream::FuturesUnordered};
 use model::{Message, ToolCall};
@@ -450,14 +453,29 @@ async fn execute<F: FnMut(AgentEvent) + Send>(
     if !approved {
         return Err(ToolError::PermissionDenied(job.name.clone()));
     }
+    let host = tool.host_access(&input).await?;
+    let authorization = if let Some(request) = host.as_ref() {
+        let grant = match request.decision {
+            tool::PermissionDecision::Deny => tool::HostGrant::Deny,
+            tool::PermissionDecision::Allow => tool::HostGrant::Once,
+            tool::PermissionDecision::Ask => {
+                let _guard = approval_gate.lock().await;
+                approval.host_access(request).await
+            }
+        };
+        Some(tool::HostAuthorization::approved(request, grant)?)
+    } else {
+        None
+    };
     let _lease = locks().acquire(tool.resources(&input)).await;
     let _timer = tool::telemetry::Timer::new(format!("tool.{}", tool.name()));
     if timeout_secs == 0 {
-        tool.execute_output_constrained(input, &profiles).await
+        tool.execute_output_authorized(input, &profiles, authorization.as_ref())
+            .await
     } else {
         tokio::time::timeout(
             std::time::Duration::from_secs(timeout_secs),
-            tool.execute_output_constrained(input, &profiles),
+            tool.execute_output_authorized(input, &profiles, authorization.as_ref()),
         )
         .await
         .unwrap_or_else(|_| Err(ToolError::Execution("tool timeout".into())))

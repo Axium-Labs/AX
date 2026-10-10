@@ -67,6 +67,30 @@ pub(crate) struct Cli {
 }
 #[derive(Subcommand)]
 pub(crate) enum Command {
+    /// Manage independent application/site access; never weakens the workspace sandbox.
+    HostPermissions {
+        #[arg(long, value_parser = ["computer", "browser"])]
+        surface: Option<String>,
+        #[arg(long)]
+        target: Option<String>,
+        #[arg(long, value_parser = ["allow", "ask", "deny"], conflicts_with = "remove")]
+        decision: Option<String>,
+        #[arg(long)]
+        remove: bool,
+        #[arg(long, action = clap::ArgAction::Set)]
+        browser_enabled: Option<bool>,
+    },
+    /// Show or persist host Computer Use settings; tools cannot change these.
+    ComputerUse {
+        #[arg(long, action = clap::ArgAction::Set)]
+        enabled: Option<bool>,
+        #[arg(long, action = clap::ArgAction::Set)]
+        include_screenshot: Option<bool>,
+        #[arg(long)]
+        max_nodes: Option<usize>,
+        #[arg(long)]
+        screenshot_width: Option<u32>,
+    },
     /// Show or persist optional subagent settings; active agents reload next turn.
     Settings {
         #[arg(long)]

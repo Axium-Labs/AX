@@ -129,6 +129,11 @@ pub(crate) async fn run_internal_entry(
 ) -> Option<Result<()>> {
     let failure = |message: &str| Some(Err(anyhow!("{message}")));
     match internal? {
+        #[cfg(windows)]
+        "--ax-computer-use-worker" => match AxConfig::load() {
+            Ok(config) => Some(tool::desktop_worker(config.computer_use).await.map_err(Into::into)),
+            Err(error) => Some(Err(error)),
+        },
         "--ax-sandbox-snapshot" => Some(worktree_changes::worker_snapshot()),
         "--ax-sandbox-worker" => match raw_args.next() {
             Some(name) => Some(tool::sandbox_worker(&name).await.map_err(Into::into)),

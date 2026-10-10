@@ -25,6 +25,14 @@ uuid.workspace = true
 ignore = "0.4"
 globset = "0.4"
 regex = "1"
+fs2 = "0.4"
+
+[target.'cfg(windows)'.dependencies]
+uiautomation = { version = "0.25.1", default-features = false, features = ["input", "pattern"] }
+win-screenshot = "4.0.14"
+enigo = "0.6.1"
+image = { version = "0.25", default-features = false, features = ["png"] }
+sysinfo = { version = "0.37.2", default-features = false, features = ["system"] }
 
 # Opts out of the workspace lint table instead of inheriting it: decoding
 # Windows console output (`src/shell.rs::native_decode`) needs
@@ -46,3 +54,15 @@ path = "../../test/web/search_router.rs"
 [[test]]
 name = "ssh"
 path = "../../test/ssh.rs"
+
+[[test]]
+name = "desktop"
+path = "../../test/desktop.rs"
+
+[[test]]
+name = "host_permissions"
+path = "../../test/host_permissions.rs"
+
+[[test]]
+name = "host_browser"
+path = "../../test/host_browser.rs"

@@ -24,7 +24,22 @@ use runtime_core::{AgentEvent, ApprovalPolicy};
 use tool::{Capability, PermissionDecision, PermissionStore, SafetyLevel, ToolPermission};
 
 type Outbox = mpsc::UnboundedSender<Value>;
+#[cfg(test)]
+#[path = "../../../test/host_acp.rs"]
+mod host_approval_tests;
 type PendingPermissions = Arc<Mutex<HashMap<String, oneshot::Sender<String>>>>;
+
+struct PendingPermissionGuard {
+    pending: PendingPermissions,
+    id: String,
+}
+impl Drop for PendingPermissionGuard {
+    fn drop(&mut self) {
+        if let Ok(mut pending) = self.pending.lock() {
+            pending.remove(&self.id);
+        }
+    }
+}
 
 struct ActivePrompt {
     request_id: Value,
@@ -68,6 +83,30 @@ struct AcpApproval {
 
 #[async_trait]
 impl ApprovalPolicy for AcpApproval {
+    async fn host_access(&self, request: &tool::HostAccessRequest) -> tool::HostGrant {
+        let id = Uuid::new_v4().to_string();
+        let (tx, rx) = oneshot::channel();
+        self.pending.lock().unwrap().insert(id.clone(), tx);
+        let _registration = PendingPermissionGuard {
+            pending: self.pending.clone(),
+            id: id.clone(),
+        };
+        if self.out.send(json!({"jsonrpc":"2.0","id":id,"method":"session/request_permission","params":{
+            "sessionId":self.session_id,
+            "toolCall":{"toolCallId":id,"title":format!("Allow {:?} access: {}",request.target.surface,request.target.label),"kind":"execute","status":"pending","rawInput":{"host_access":request.target}},
+            "options":[
+                {"optionId":"allow_once","name":"Allow this app/site once","kind":"allow_once"},
+                {"optionId":"allow_session","name":"Allow this app/site for this session","kind":"allow_always"},
+                {"optionId":"allow_always","name":"Always allow this app/site","kind":"allow_always"},
+                {"optionId":"reject_once","name":"Deny","kind":"reject_once"}
+            ]}})).is_err() { return tool::HostGrant::Deny; }
+        match rx.await.as_deref() {
+            Ok("allow_once") => tool::HostGrant::Once,
+            Ok("allow_session") => tool::HostGrant::Session,
+            Ok("allow_always") => tool::HostGrant::Always,
+            _ => tool::HostGrant::Deny,
+        }
+    }
     async fn approve(&self, name: &str, input: &Value, permission: ToolPermission) -> bool {
         match self.permissions.decision(permission.capability) {
             PermissionDecision::Allow => return true,

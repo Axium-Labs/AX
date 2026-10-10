@@ -3,7 +3,21 @@
 This document covers AX's built-in tools, how tools declare their permission
 requirements, and how the runtime and UI enforce them.
 
+## Computer Use
+
+The opt-in Windows `desktop` tool provides real accessibility reads and control
+actions. `ax computer-use` owns its global configuration; AXCrew edits the same
+state. It defaults off, enforces node/image limits, redacts passwords and skips
+password-bearing window screenshots. See [computer-use.md](computer-use.md) for
+the exact actions, permissions, platform boundaries and screenshot limitations.
+
 ## Agent environment and Crew terminal shell
+
+The `desktop` and `browser` tools use independent `ComputerUse` and `BrowserUse`
+capabilities and an `AuthorizedHost` execution boundary. File/terminal sandboxing,
+target app/site grants and action approval are enforced separately; unknown host
+access is not covered by `--allow-dangerous`. See [host-permissions.md](host-permissions.md)
+for the CLI, exact target identities, browser runtime and current compatibility limits.
 
 `ax environment` shows execution settings. On Windows, `ax environment native`
 runs AX directly; `ax environment wsl` runs Linux AX in the default WSL
@@ -176,7 +190,18 @@ CLI `run` prints the same activity description to stderr.
 URLs). The legacy singular `query` and `url` keys remain as aliases and are
 normalized into the same lists, so a single-request call keeps working.
 
-Queries are executed concurrently against one `SearchProvider`. The default
+Web search uses a two-tier routing system that automatically selects the best
+search backend available:
+
+1. **Native Search**: If your current provider (OpenAI, Anthropic, Google, etc.)
+   supports native web search, it's used directly with no configuration needed.
+2. **Remote Search**: Otherwise, AX routes through Brave, Bocha, SearXNG, or
+   DuckDuckGo with automatic failover.
+
+See [web-search-architecture.md](web-search-architecture.md) for the complete
+architecture, configuration options, resilience patterns, and provider capabilities.
+
+Queries are executed concurrently against the selected search provider. The default
 total target is `limit` distinct valid URLs; optional `target_results` sets a
 different target (up to `limit * query_count`). As soon as the target is met,
 remaining futures are dropped. Results are merged in original query order,

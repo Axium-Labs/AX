@@ -117,6 +117,10 @@ pub(crate) struct TrackedApproval {
 }
 #[async_trait::async_trait]
 impl crate::ApprovalPolicy for TrackedApproval {
+    async fn host_access(&self, request: &tool::HostAccessRequest) -> tool::HostGrant {
+        let _pending = ActivityLease::new(&self.activity.approvals);
+        self.inner.host_access(request).await
+    }
     async fn approve(
         &self,
         name: &str,

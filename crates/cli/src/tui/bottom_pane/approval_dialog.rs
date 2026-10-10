@@ -19,8 +19,12 @@ use super::super::theme;
 use super::view::{ModalAction, PaneView, ViewOutcome};
 
 const MAX_INPUT_ROWS: usize = 8;
+#[cfg(test)]
+#[path = "../../../../../test/host_tui.rs"]
+mod host_dialog_tests;
 
 pub struct ApprovalDialog {
+    host: bool,
     tool: String,
     input: Value,
     safety: SafetyLevel,
@@ -39,6 +43,7 @@ impl ApprovalDialog {
         reply: oneshot::Sender<ApprovalChoice>,
     ) -> Self {
         Self {
+            host: false,
             tool,
             input,
             safety,
@@ -59,6 +64,13 @@ impl ApprovalDialog {
         } else {
             ViewOutcome::Accepted
         };
+    }
+    pub fn with_host_access(mut self, host: bool) -> Self {
+        self.host = host;
+        if host {
+            self.selected = 3;
+        }
+        self
     }
 
     fn wrapped_input(&self, width: u16) -> Vec<String> {
@@ -96,12 +108,13 @@ impl PaneView for ApprovalDialog {
         }
         match key.code {
             KeyCode::Up => self.selected = self.selected.saturating_sub(1),
-            KeyCode::Down => self.selected = (self.selected + 1).min(2),
+            KeyCode::Down => self.selected = (self.selected + 1).min(if self.host { 3 } else { 2 }),
             KeyCode::Char('y') => self.resolve(ApprovalChoice::AllowOnce),
             KeyCode::Char('n') | KeyCode::Esc => self.resolve(ApprovalChoice::Deny),
             KeyCode::Enter => self.resolve(match self.selected {
                 0 => ApprovalChoice::AllowOnce,
                 1 => ApprovalChoice::AllowSession,
+                2 if self.host => ApprovalChoice::AllowAlways,
                 _ => ApprovalChoice::Deny,
             }),
             _ => {}
@@ -130,11 +143,19 @@ impl PaneView for ApprovalDialog {
             lines.push(Line::from(Span::styled(format!("  {row}"), theme::dim())));
         }
         lines.push(Line::from(""));
-        let options = [
+        let mut options = vec![
             (0usize, "Yes — allow once"),
             (1, "Yes — allow for this session"),
             (2, "No — deny"),
         ];
+        if self.host {
+            options = vec![
+                (0, "Allow this app/site once"),
+                (1, "Allow this app/site for this session"),
+                (2, "Always allow this app/site"),
+                (3, "Deny app/site access"),
+            ];
+        }
         for (index, label) in options {
             let selected = index == self.selected;
             let marker = if selected { "› " } else { "  " };
@@ -168,8 +189,8 @@ impl PaneView for ApprovalDialog {
     fn preferred_height(&self, width: u16) -> u16 {
         let input = self.wrapped_input(width).len().min(MAX_INPUT_ROWS);
         // title + blank + tool + safety + input label + input rows + blank +
-        // three options + hint
-        u16::try_from(10 + input).unwrap_or(u16::MAX)
+        // Three operation options, or four host-access options, plus hint.
+        u16::try_from(10 + input + usize::from(self.host)).unwrap_or(u16::MAX)
     }
 
     fn animate_open(&self) -> bool {

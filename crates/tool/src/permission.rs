@@ -13,6 +13,8 @@ pub enum Capability {
     Network,
     Mcp,
     Process,
+    ComputerUse,
+    BrowserUse,
 }
 impl Capability {
     #[must_use]
@@ -24,6 +26,8 @@ impl Capability {
             Self::Network => "network",
             Self::Mcp => "mcp",
             Self::Process => "process",
+            Self::ComputerUse => "computer-use",
+            Self::BrowserUse => "browser-use",
         }
     }
     #[must_use]
@@ -35,6 +39,8 @@ impl Capability {
             Self::Network,
             Self::Mcp,
             Self::Process,
+            Self::ComputerUse,
+            Self::BrowserUse,
         ]
         .into_iter()
         .find(|capability| capability.key() == key)
@@ -66,12 +72,14 @@ impl std::fmt::Display for PermissionDecision {
 pub struct PermissionStore(Arc<RwLock<PermissionState>>);
 #[derive(Debug)]
 struct PermissionState {
+    host_session: String,
     policies: BTreeMap<Capability, PermissionDecision>,
     session_grants: BTreeSet<Capability>,
 }
 impl Default for PermissionStore {
     fn default() -> Self {
         Self(Arc::new(RwLock::new(PermissionState {
+            host_session: uuid::Uuid::new_v4().to_string(),
             policies: BTreeMap::from([
                 (Capability::FilesystemRead, PermissionDecision::Allow),
                 (Capability::Network, PermissionDecision::Allow),
@@ -120,8 +128,17 @@ impl PermissionStore {
     }
     pub fn reset_session(&self) {
         if let Ok(mut state) = self.0.write() {
+            crate::reset_host_session(&state.host_session);
+            state.host_session = uuid::Uuid::new_v4().to_string();
             state.session_grants.clear();
         }
+    }
+    #[must_use]
+    pub fn host_session(&self) -> String {
+        self.0.read().map_or_else(
+            |_| uuid::Uuid::new_v4().to_string(),
+            |state| state.host_session.clone(),
+        )
     }
 }
 #[cfg(test)]
@@ -340,7 +357,8 @@ impl PermissionProfile {
             Capability::Shell | Capability::Process | Capability::Mcp
         );
         if (self.boundary.read_only && (process || resources.iter().any(|r| r.write)))
-            || (self.boundary.deny_network && (process || capability == Capability::Network))
+            || (self.boundary.deny_network
+                && (process || matches!(capability, Capability::Network | Capability::BrowserUse)))
         {
             return Some(PermissionDecision::Deny);
         }

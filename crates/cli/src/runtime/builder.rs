@@ -27,6 +27,9 @@ use crate::{
 };
 
 pub(crate) fn tools(mcp_tools: &[McpToolProxy]) -> ToolRegistry {
+    tools_in_session(mcp_tools, "catalog")
+}
+fn tools_in_session(mcp_tools: &[McpToolProxy], session: &str) -> ToolRegistry {
     let mut registry = ToolRegistry::new();
     let root = tool_workspace();
     if std::env::var_os("AX_SSH_CONTEXT").is_some()
@@ -52,6 +55,19 @@ pub(crate) fn tools(mcp_tools: &[McpToolProxy]) -> ToolRegistry {
         Arc::new(tool::ViewImageTool::new(root.clone())),
     ] {
         registry.register(tool::SandboxedTool::new(local, root.clone()));
+    }
+    registry.register(tool::BrowserTool::in_session(
+        crate::config::ax_home(),
+        session,
+    ));
+    // Desktop and browser access are independently authorized host capabilities.
+    // An invalid configuration fails closed; constructing the tool is lazy.
+    if cfg!(windows)
+        && let Ok(config) = AxConfig::load()
+        && config.computer_use.enabled
+    {
+        registry
+            .register(tool::DesktopTool::with_settings(config.computer_use).with_session(session));
     }
     registry.register(tool::WebTool::new());
     if let Some(collaboration) = crate::distributed_tool::CollaborationTool::from_env(root) {
@@ -88,9 +104,22 @@ impl Runtime {
         mcp_tools: &[McpToolProxy],
         auth_path: &Path,
     ) -> Result<Self> {
+        Self::build_in_session(
+            selection,
+            mcp_tools,
+            auth_path,
+            &uuid::Uuid::new_v4().to_string(),
+        )
+    }
+    pub(crate) fn build_in_session(
+        selection: &ModelSelection,
+        mcp_tools: &[McpToolProxy],
+        auth_path: &Path,
+        session: &str,
+    ) -> Result<Self> {
         let provider = hedged_provider(selection, auth_path)?;
         let tools = if selection.supports_tools {
-            tools(mcp_tools)
+            tools_in_session(mcp_tools, session)
         } else {
             ToolRegistry::new()
         };

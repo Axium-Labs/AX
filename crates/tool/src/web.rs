@@ -13,6 +13,7 @@ use std::{collections::HashMap, error::Error, sync::Arc, time::Instant};
 mod network;
 mod providers;
 mod router;
+pub mod native;
 pub use providers::{
     BochaSearch, BraveSearch, DuckDuckGoSearch, ProviderTimeout, SearchConfig, SearxngSearch,
 };

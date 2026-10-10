@@ -30,6 +30,8 @@ ratatui.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sysinfo = { version = "0.37.2", default-features = false, features = ["system"] }
+nvml-wrapper = "0.11"
 sha2 = "0.10"
 base64 = "0.22"
 ed25519-dalek = { version = "2", features = ["rand_core"] }

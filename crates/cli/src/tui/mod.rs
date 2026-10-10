@@ -84,10 +84,12 @@ enum WorkerMessage {
 pub(crate) enum ApprovalChoice {
     AllowOnce,
     AllowSession,
+    AllowAlways,
     Deny,
 }
 
 struct ApprovalRequest {
+    host: bool,
     tool: String,
     input: Value,
     safety: SafetyLevel,
@@ -102,6 +104,31 @@ struct ChannelApproval {
 
 #[async_trait]
 impl ApprovalPolicy for ChannelApproval {
+    async fn host_access(&self, request: &tool::HostAccessRequest) -> tool::HostGrant {
+        let (tx, rx) = oneshot::channel();
+        if self
+            .tx
+            .send(WorkerMessage::Approval(ApprovalRequest {
+                host: true,
+                tool: format!(
+                    "Allow {:?}: {}",
+                    request.target.surface, request.target.label
+                ),
+                input: serde_json::json!({"host_access":request.target}),
+                safety: SafetyLevel::RequiresApproval,
+                reply: tx,
+            }))
+            .is_err()
+        {
+            return tool::HostGrant::Deny;
+        }
+        match rx.await.unwrap_or(ApprovalChoice::Deny) {
+            ApprovalChoice::AllowOnce => tool::HostGrant::Once,
+            ApprovalChoice::AllowSession => tool::HostGrant::Session,
+            ApprovalChoice::AllowAlways => tool::HostGrant::Always,
+            ApprovalChoice::Deny => tool::HostGrant::Deny,
+        }
+    }
     async fn approve(&self, tool: &str, input: &Value, permission: tool::ToolPermission) -> bool {
         let safety = permission.safety;
         let decision = self.permissions.decision(permission.capability);
@@ -132,6 +159,7 @@ impl ChannelApproval {
         let safety = permission.safety;
         let (tx, rx) = oneshot::channel();
         let sent = self.tx.send(WorkerMessage::Approval(ApprovalRequest {
+            host: false,
             tool: tool.to_owned(),
             input: input.clone(),
             safety,
@@ -142,7 +170,7 @@ impl ChannelApproval {
         }
         match rx.await.unwrap_or(ApprovalChoice::Deny) {
             ApprovalChoice::AllowOnce => true,
-            ApprovalChoice::Deny => false,
+            ApprovalChoice::Deny | ApprovalChoice::AllowAlways => false,
             ApprovalChoice::AllowSession => {
                 if grant_session {
                     self.permissions.allow_session(permission.capability);
@@ -790,12 +818,15 @@ pub(super) async fn run_tui(
                     app.apply_event(event);
                 }
                 WorkerMessage::Approval(request) => {
-                    pane.push_view(Box::new(ApprovalDialog::new(
-                        request.tool,
-                        request.input,
-                        request.safety,
-                        request.reply,
-                    )));
+                    pane.push_view(Box::new(
+                        ApprovalDialog::new(
+                            request.tool,
+                            request.input,
+                            request.safety,
+                            request.reply,
+                        )
+                        .with_host_access(request.host),
+                    ));
                 }
             }
         }

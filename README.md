@@ -16,8 +16,11 @@ plane built alongside it — connect, control and orchestrate AX agents running
 on your laptop, servers, GPU boxes and cloud VMs. See
 [ACP and Crew integration](docs/acp-crew.md).
 
-- **Rust native** — one binary, no runtime, no Node, no Docker.
+- **Rust native** — one binary for the terminal agent; no Node or Docker needed for core use. Optional Browser Use needs Node and Playwright.
+- **Independent UI permissions** — app/site access and action approval are separate from the file/terminal sandbox. Windows Computer Use is opt-in; see [host access](docs/host-permissions.md) for platform support and browser limits.
 - **Fast startup** — providers, skills, MCP servers and memory load on demand.
+- **Local system resources** — `/system` shows measured CPU/memory usage and
+  supported NVIDIA GPU usage/VRAM; collection runs only when requested.
 - **Standard skills and focused tools** — Agent Skills `SKILL.md` packages with lazy instructions and optional resources, read-only web search/fetch that batches concurrent queries and page fetches and deduplicates their results, LSP through configurable MCP servers, and native image input on supported vision models.
 - **Small binary** — a compact workspace of focused crates, not a framework.
 - **Simple workflow** — type, get an answer, switch models, move on.

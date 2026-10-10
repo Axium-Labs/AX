@@ -27,6 +27,19 @@ mod view_image;
 pub use patch::PatchTool;
 pub use search::SearchTool;
 pub use view_image::ViewImageTool;
+mod browser;
+mod host_access;
+pub use browser::BrowserTool;
+pub use host_access::{
+    HostAccessRequest, HostAuthorization, HostGrant, HostPermissionStore, HostPermissions,
+    HostSurface, HostTarget, app_id, browser_origin, host_home, reset_host_session,
+};
+mod desktop;
+#[cfg(windows)]
+pub use desktop::desktop_worker;
+pub use desktop::{
+    DesktopSettings, DesktopTool, MAX_DESKTOP_NODES, MAX_SCREENSHOT_WIDTH, MIN_SCREENSHOT_WIDTH,
+};
 mod permission;
 mod resources;
 pub use resources::{Resource, ResourceAccess};
@@ -150,6 +163,24 @@ pub trait Tool: Send + Sync {
             safety: self.safety(input),
         }
     }
+    /// Resolve app/site identity from the trusted host before any UI data/effect.
+    async fn host_access(&self, _input: &Value) -> Result<Option<HostAccessRequest>, ToolError> {
+        Ok(None)
+    }
+    /// Host implementations revalidate target identity and revocation at execution.
+    async fn execute_output_authorized(
+        &self,
+        input: Value,
+        profiles: &[PermissionProfile],
+        authorization: Option<&HostAuthorization>,
+    ) -> Result<ToolOutput, ToolError> {
+        if authorization.is_some() {
+            return Err(ToolError::PermissionDenied(
+                "Tool has no authorized host transport".into(),
+            ));
+        }
+        self.execute_output_constrained(input, profiles).await
+    }
     /// Explicit effects used by the runtime scheduler. Permissions and safety
     /// do not imply independence: undeclared effects use a global write lock.
     fn resources(&self, _input: &Value) -> Vec<ResourceAccess> {
@@ -183,6 +214,8 @@ pub enum ExecutionBoundary {
     Sandboxed,
     Remote,
     RuntimeOwned,
+    /// Trusted application/site transport with an independent approval gate.
+    AuthorizedHost,
 }
 
 #[derive(Clone)]
@@ -233,6 +266,8 @@ impl ToolRegistry {
     /// - `Sandboxed` already carries its own manager (for example a stdio MCP
     ///   transport) and is passed through unchanged;
     /// - `Remote` and `RuntimeOwned` never reach local OS effects.
+    /// - `AuthorizedHost` carries an independent app/site gate and trusted
+    ///   host transport; it never changes the workspace worker's policy.
     ///
     /// Confined wrapping only happens when the registry's mode requires it.
     fn bind(&self, tool: Arc<dyn Tool>, root: &std::path::Path) -> Arc<dyn Tool> {

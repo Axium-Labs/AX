@@ -356,8 +356,22 @@ impl ModHost {
         } else {
             bail!("Unknown Mod host operation: {call}");
         };
+        let host_access = tool.host_access(&arguments).await?;
+        let authorization = if let Some(request) = host_access.as_ref() {
+            let grant = match request.decision {
+                tool::PermissionDecision::Deny => tool::HostGrant::Deny,
+                tool::PermissionDecision::Allow => tool::HostGrant::Once,
+                tool::PermissionDecision::Ask => self.approval.host_access(request).await,
+            };
+            Some(tool::HostAuthorization::approved(request, grant)?)
+        } else {
+            None
+        };
         Ok(
-            match tool.execute_output_constrained(arguments, profiles).await {
+            match tool
+                .execute_output_authorized(arguments, profiles, authorization.as_ref())
+                .await
+            {
                 Ok(ToolOutput::Text(result)) => json!({"result":result,"isError":false}),
                 Ok(ToolOutput::Image {
                     description,

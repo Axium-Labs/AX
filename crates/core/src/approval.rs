@@ -8,6 +8,10 @@ use tool::{SafetyLevel, ToolPermission};
 /// composition root, so the kernel never learns about prompts or terminals.
 #[async_trait]
 pub trait ApprovalPolicy: Send + Sync {
+    /// App/site grants do not follow shell/network/capability-wide approvals.
+    async fn host_access(&self, _request: &tool::HostAccessRequest) -> tool::HostGrant {
+        tool::HostGrant::Deny
+    }
     async fn approve(&self, tool: &str, input: &Value, permission: ToolPermission) -> bool;
     /// Explicit Ask rules must not be bypassed by capability/session grants.
     fn capability_decision(

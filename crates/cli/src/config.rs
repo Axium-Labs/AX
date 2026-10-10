@@ -93,6 +93,8 @@ pub struct AxConfig {
     pub execution: ExecutionConfig,
     #[serde(default)]
     pub personalization: crate::personalization::PersonalizationConfig,
+    #[serde(default)]
+    pub computer_use: tool::DesktopSettings,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<ModelConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
