@@ -66,7 +66,7 @@ What becomes easier, what becomes harder, and what we accepted.
 
 - [0017 — Authoritative Experience JSONL](0017-evolution-jsonl-authority.md) — Evolution control checkpoints, incremental consumption and legacy migration.
 
-- [0018 — Continuation-driven completion](0018-continuation-driven-completion.md) — no mandatory final reviewer; optional Stop Guards.
+- [0018 — Continuation-driven completion](0018-continuation-driven-completion.md) — no mandatory final reviewer; optional Goal.
 
 - [0019 — Search provider routing](0019-search-provider-routing.md) — provider-specific transport, reachability/latency routing, circuits and bounded hedging.
 
@@ -79,3 +79,5 @@ What becomes easier, what becomes harder, and what we accepted.
 - [0024 — Independent host access](0024-independent-host-access.md) — workspace confinement, app/site access and action approvals remain separate.
 
 - [0025 — Native-first hosted search](0025-native-first-hosted-search.md) — actual model protocols and authorized anonymous MCP fallback.
+
+- [0026 - Optional Goal](0026-optional-goal.md) - target-scoped acceptance in the existing loop and queue.

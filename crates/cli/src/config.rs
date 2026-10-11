@@ -76,7 +76,8 @@ pub(crate) fn config_path() -> PathBuf {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct AxConfig {
     #[serde(default)]
-    pub verification: runtime_core::VerificationConfig,
+    #[serde(alias = "verification")]
+    pub goal: runtime_core::GoalConfig,
     #[serde(default)]
     pub child_models: std::collections::BTreeMap<String, ModelConfig>,
     #[serde(default)]
@@ -205,7 +206,23 @@ impl AxConfig {
     /// Loads a config from a specific path (tests inject a temporary file).
     pub(crate) fn load_from(path: &Path) -> Result<Self> {
         match fs::read_to_string(path) {
-            Ok(contents) => serde_json::from_str(&contents).context("invalid config.json"),
+            Ok(contents) => {
+                let mut value: serde_json::Value =
+                    serde_json::from_str(&contents).context("invalid config.json")?;
+                if let Some(object) = value.as_object_mut()
+                    && let Some(legacy) = object.remove("verification")
+                {
+                    object.entry("goal").or_insert(legacy);
+                    // Keep unrelated and unknown user fields intact at the migration boundary.
+                    let config =
+                        serde_json::from_value(value.clone()).context("invalid Goal config")?;
+                    let temporary = path.with_extension("goal-migration.tmp");
+                    fs::write(&temporary, serde_json::to_vec_pretty(&value)?)?;
+                    fs::rename(temporary, path)?;
+                    return Ok(config);
+                }
+                serde_json::from_value(value).context("invalid config.json")
+            }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
             Err(error) => Err(error).context("failed to read config.json"),
         }
@@ -244,5 +261,44 @@ impl AxConfig {
     #[must_use]
     pub fn model_config(&self) -> Option<&ModelConfig> {
         self.model.as_ref()
+    }
+}
+
+/// Goal templates are read only on explicit Goal creation, never installed globally.
+pub(crate) fn goal_template(root: &Path) -> Result<runtime_core::GoalConfig> {
+    project_goal_template(root, AxConfig::load()?.goal)
+}
+pub(crate) fn project_goal_template(
+    root: &Path,
+    mut config: runtime_core::GoalConfig,
+) -> Result<runtime_core::GoalConfig> {
+    let path = root.join(".ax/goal.json");
+    let legacy = root.join(".ax/verification.json");
+    match fs::read(&path) {
+        Ok(bytes) => config = serde_json::from_slice(&bytes).context("invalid .ax/goal.json")?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            match fs::read(&legacy) {
+                Ok(bytes) => {
+                    config = serde_json::from_slice(&bytes)
+                        .context("invalid legacy verification config")?;
+                    let temporary = path.with_extension("migration.tmp");
+                    fs::write(&temporary, serde_json::to_vec_pretty(&config)?)?;
+                    fs::rename(temporary, &path)?;
+                    // Retain old user bytes as a backup; core only sees GoalConfig.
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        Err(error) => return Err(error.into()),
+    }
+    resolve_goal_paths(root, &mut config);
+    Ok(config)
+}
+pub(crate) fn resolve_goal_paths(root: &Path, config: &mut runtime_core::GoalConfig) {
+    for path in &mut config.deliverables {
+        if path.is_relative() {
+            *path = root.join(&*path);
+        }
     }
 }

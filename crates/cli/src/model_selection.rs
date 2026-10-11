@@ -667,7 +667,7 @@ mod tests {
         let root = std::env::temp_dir().join(format!("ax-config-{}", std::process::id()));
         let path = root.join("config.json");
         let config = AxConfig {
-            verification: runtime_core::VerificationConfig::default(),
+            goal: runtime_core::GoalConfig::default(),
             child_models: std::collections::BTreeMap::default(),
             context_pool: runtime_core::ContextPoolPolicy::default(),
             permissions: tool::PermissionProfile::default(),

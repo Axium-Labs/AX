@@ -64,9 +64,28 @@ fn render_event(event: AgentEvent) {
         AgentEvent::SubagentCompleted { id } => eprintln!("[{id}] completed"),
         AgentEvent::SubagentFailed { id, error } => eprintln!("[{id}] failed: {error}"),
         AgentEvent::SubagentCancelled { id } => eprintln!("[{id}] cancelled"),
+        AgentEvent::GoalUpdated { goal_id, goal } => eprintln!(
+            "[goal:{}] {:?} | checks={} rounds={} requests={} tokens={}{} cost={} elapsed={}ms | {}",
+            goal_id.unwrap_or_default(),
+            goal.state,
+            goal.checks,
+            goal.usage.rounds,
+            goal.usage.requests,
+            goal.usage
+                .input_tokens
+                .saturating_add(goal.usage.output_tokens),
+            if goal.usage.estimated {
+                " estimated"
+            } else {
+                ""
+            },
+            goal.usage.cost_display(),
+            goal.usage.elapsed_ms,
+            goal.target
+        ),
         AgentEvent::Continuation { .. }
         | AgentEvent::Completion { .. }
-        | AgentEvent::StopGuardEvaluated { .. }
+        | AgentEvent::GoalEvaluated { .. }
         | AgentEvent::SubagentProgress { .. }
         | AgentEvent::TurnStarted
         | AgentEvent::ThinkingDelta { .. } => {}
@@ -80,6 +99,8 @@ pub(crate) async fn run_prompt(
 ) -> Result<String> {
     run_prompt_with(state, selection, approval, prompt, render_event).await
 }
+// Keep prompt admission, session persistence and extension completion together.
+#[allow(clippy::too_many_lines)]
 pub(crate) async fn run_prompt_with<F>(
     state: &mut ReplState,
     selection: &ModelSelection,
@@ -90,6 +111,23 @@ pub(crate) async fn run_prompt_with<F>(
 where
     F: FnMut(AgentEvent) + Send,
 {
+    let goal_prompt;
+    let prompt = if prompt == "/goal" || prompt.starts_with("/goal ") {
+        match crate::commands::goal::prepare(state, prompt)? {
+            crate::commands::goal::GoalCommand::Output(output) => {
+                emit(AgentEvent::ContentDelta {
+                    delta: output.clone(),
+                });
+                return Ok(output);
+            }
+            crate::commands::goal::GoalCommand::Run(target) => {
+                goal_prompt = target;
+                &goal_prompt
+            }
+        }
+    } else {
+        prompt
+    };
     let revision = crate::mods::revision(state)?;
     if state
         .mod_revision

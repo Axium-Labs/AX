@@ -259,3 +259,10 @@ AX ACP provides read-only directory discovery for AXCrew local project
 selection. SSH projects run local AX with an SSH tool; remote hosts need no AX. Paired devices advertise registered project roots while keeping the
 existing registered-root execution restriction. See
 [the ACP design note](docs/adr/0004-acp-control-plane.md).
+
+### Optional Goal
+
+`/goal <target>` enables target-scoped completion checks and continued execution.
+Use `/goal status`, `/goal pause`, `/goal resume` and `/goal cancel` to manage it.
+Ordinary prompts keep their direct execution path without additional validation.
+See [Goal commands, budgets and recovery](docs/goal.md).

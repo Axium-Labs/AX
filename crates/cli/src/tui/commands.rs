@@ -71,6 +71,12 @@ const fn cmd(
 
 pub static SLASH_COMMANDS: &[SlashCommandDef] = &[
     cmd(
+        "/goal",
+        "start, inspect or manage an optional target",
+        SlashPresentation::DirectAction,
+        Some("<target>|status|pause|resume|cancel"),
+    ),
+    cmd(
         "/login",
         "connect a model provider",
         SlashPresentation::Picker,
@@ -325,6 +331,17 @@ pub(super) async fn execute_slash(
     app: &mut App,
     pane: &mut BottomPane,
 ) -> Result<bool> {
+    if command.trim() == "/goal" || command.trim().starts_with("/goal ") {
+        match crate::commands::goal::prepare(state, command.trim())? {
+            crate::commands::goal::GoalCommand::Run(prompt) => {
+                app.pending.push_front(prompt);
+            }
+            crate::commands::goal::GoalCommand::Output(output) => {
+                app.push(TranscriptKind::Info, output);
+            }
+        }
+        return Ok(true);
+    }
     if let Some(kind) = capability_slash(command.trim(), state)? {
         match kind {
             crate::capabilities::Kind::Skills => open_skills(state, pane)?,

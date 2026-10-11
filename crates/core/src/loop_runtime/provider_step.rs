@@ -1,4 +1,4 @@
-//! All controller, child and optional stop-guard requests share streaming/retry semantics.
+//! All controller, child and optional Goal verifier requests share streaming/retry semantics.
 use crate::{AgentError, AgentKernel};
 use model::{ModelError, ModelRequest, ModelResponse};
 

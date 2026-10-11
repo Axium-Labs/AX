@@ -11,6 +11,11 @@ use tool::ToolError;
 pub enum AgentError {
     #[error("goal lifecycle error: {0}")]
     GoalMismatch(String),
+    #[error("Goal {state:?}: {reason}")]
+    GoalStopped {
+        state: crate::GoalState,
+        reason: String,
+    },
     #[error("global execution blocker: {0}")]
     GlobalBlocked(String),
     #[error(transparent)]
@@ -43,7 +48,14 @@ impl AgentError {
     pub const fn resumable(&self) -> bool {
         matches!(
             self,
-            Self::Budget(_) | Self::StepLimit(_) | Self::Timeout(_) | Self::WaitingForUser(_)
+            Self::Budget(_)
+                | Self::StepLimit(_)
+                | Self::Timeout(_)
+                | Self::WaitingForUser(_)
+                | Self::GoalStopped {
+                    state: crate::GoalState::Paused,
+                    ..
+                }
         )
     }
 

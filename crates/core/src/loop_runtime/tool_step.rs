@@ -47,6 +47,7 @@ impl AgentKernel {
         F: FnMut(AgentEvent) + Send,
         H: FnMut(&[Message]) -> Result<(), AgentError> + Send,
     {
+        self.goal_budget_check()?;
         let state = self.turn_state();
         (emit.lock().unwrap())(AgentEvent::Continuation {
             goal_id: self.goal_id.clone(),
@@ -77,56 +78,142 @@ impl AgentKernel {
             return Ok(ToolStep::Continue);
         }
         if tool_calls.is_empty()
-            && let Some(guard) = self.stop_guard.clone()
+            && let Some(evaluator) = self.goal_evaluator.clone()
         {
-            if guard.uses_model()
+            if evaluator.uses_model()
                 && self.budget.max_steps != 0
-                && steps_used.saturating_add(self.guard_model_requests) >= self.budget.max_steps
+                && steps_used.saturating_add(self.goal_model_requests) >= self.budget.max_steps
             {
                 return Err(AgentError::StepLimit(self.budget.max_steps));
             }
             let mut state = self.turn_state();
-            state.guard_model_requests = Arc::default();
+            state.goal_model_requests = Arc::default();
+            state.goal_usage_messages = Some(Arc::default());
             state.evidence.clone_from(&self.messages);
+            self.sync_goal_usage();
             state.successful_tool_calls = self
-                .messages
-                .iter()
-                .chain(&self.raw_turn_messages)
-                .filter(|m| m.role == model::Role::Tool)
-                .filter(|m| {
-                    serde_json::from_str::<Value>(&m.content)
-                        .is_ok_and(|v| v["status"] == "success")
-                })
-                .filter_map(|m| m.tool_call_id.clone())
-                .collect();
+                .goal()
+                .map_or_else(Default::default, |g| g.successful_calls.clone());
             if let Some(queue) = &self.task_queue {
                 state.evidence.push(queue.summary_context());
             }
             if let Some(receipts) = self.current_receipts_context() {
                 state.evidence.push(receipts);
             }
-            let decision = guard.evaluate(&state).await;
+            if let Some(goal) = self.goal() {
+                state.evidence.push(Message::system(format!("[ax-goal-evidence]\n{}", serde_json::json!({"goal_id":self.goal_id,"target":goal.target,"acceptance":goal.config.acceptance,"successful_current_goal_call_ids":goal.successful_calls}))));
+                state.evidence.extend(
+                    self.raw_turn_messages
+                        .iter()
+                        .filter(|m| m.role != model::Role::System)
+                        .cloned(),
+                );
+            }
+            if let Some(goal) = self.task_queue.as_mut().and_then(|q| q.goal.as_mut()) {
+                goal.state = crate::GoalState::Verifying;
+            }
+            if evaluator.uses_model() {
+                if let Some(goal) = self.task_queue.as_mut().and_then(|q| q.goal.as_mut()) {
+                    goal.usage.rounds = goal.usage.rounds.saturating_add(1);
+                }
+                self.reserve_goal_checkpoint(crate::token::estimate_tokens(&state.evidence));
+            }
+            self.checkpoint_queue(checkpoint)?;
+            if let Some(goal) = self.goal() {
+                (emit.lock().unwrap())(AgentEvent::GoalUpdated {
+                    goal_id: self.goal_id.clone(),
+                    goal: Box::new(goal.clone()),
+                });
+            }
+            let decision = evaluator.evaluate(&state).await;
             let requests = state
-                .guard_model_requests
+                .goal_model_requests
                 .load(std::sync::atomic::Ordering::Relaxed);
-            self.guard_model_requests += requests;
-            (emit.lock().unwrap())(AgentEvent::StopGuardEvaluated {
+            self.goal_model_requests += usize::from(requests > 0);
+            let usage_messages = state
+                .goal_usage_messages
+                .as_ref()
+                .map_or_else(Vec::new, |messages| {
+                    std::mem::take(&mut *messages.lock().unwrap())
+                });
+            if let Some(goal) = self.task_queue.as_mut().and_then(|q| q.goal.as_mut()) {
+                let reservation = goal.pending_usage.take();
+                if evaluator.uses_model() && requests == 0 {
+                    goal.usage.rounds = goal.usage.rounds.saturating_sub(1);
+                }
+                if requests > 0
+                    && usage_messages.is_empty()
+                    && let Some(usage) = reservation
+                {
+                    goal.usage = usage;
+                }
+                for message in &usage_messages {
+                    if let Some(usage) = &message.usage {
+                        goal.record_usage(
+                            usage.get("reported").filter(|u| !u.is_null()),
+                            usage["estimated_input_tokens"].as_u64().unwrap_or(0),
+                            usage["estimated_output_tokens"].as_u64().unwrap_or(0),
+                            requests,
+                        );
+                    }
+                }
+            }
+            self.raw_turn_messages.extend(usage_messages);
+            self.sync_goal_usage();
+            let mut halted = None;
+            if let Some(queue) = &mut self.task_queue
+                && let Some(goal) = &mut queue.goal
+            {
+                goal.checks = goal.checks.saturating_add(1);
+                goal.last_decision = Some(decision.clone());
+                goal.state = match &decision {
+                    crate::GoalDecision::Blocked { .. } => crate::GoalState::Blocked,
+                    crate::GoalDecision::Failed { .. } => crate::GoalState::Failed,
+                    _ => crate::GoalState::Running,
+                };
+                if matches!(
+                    &decision,
+                    crate::GoalDecision::Blocked { .. } | crate::GoalDecision::Failed { .. }
+                ) {
+                    halted = Some(AgentError::GoalStopped {
+                        state: goal.state,
+                        reason: decision.reason().into(),
+                    });
+                }
+            }
+            self.checkpoint_queue(checkpoint)?;
+            if let Some(goal) = self.goal() {
+                (emit.lock().unwrap())(AgentEvent::GoalUpdated {
+                    goal_id: self.goal_id.clone(),
+                    goal: Box::new(goal.clone()),
+                });
+            }
+            (emit.lock().unwrap())(AgentEvent::GoalEvaluated {
                 goal_id: self.goal_id.clone(),
-                guard: guard.name().into(),
-                allowed: decision == crate::StopDecision::Allow,
+                evaluator: evaluator.name().into(),
+                allowed: decision == crate::GoalDecision::Allow,
                 model_requests: requests,
+                decision: decision.clone(),
             });
+            if let Some(error) = halted {
+                return Err(error);
+            }
+            self.goal_budget_check()?;
             match decision {
-                crate::StopDecision::Continue { reason } => {
+                crate::GoalDecision::Continue { reason }
+                | crate::GoalDecision::InsufficientEvidence { reason } => {
                     self.continuation.required_actions.push(reason.clone());
-                    let message = Message::system(format!("[ax-stop-guard] Continue: {reason}"));
+                    let message = Message::system(format!("[ax-goal] Continue: {reason}"));
                     self.messages.push(message.clone());
                     self.raw_turn_messages.push(message);
                     checkpoint(&self.raw_turn_messages)?;
                     return Ok(ToolStep::Continue);
                 }
-                crate::StopDecision::Allow => {
-                    let marker = Message::system("[ax-stop-guard-allowed]");
+                crate::GoalDecision::Blocked { .. } | crate::GoalDecision::Failed { .. } => {
+                    unreachable!("terminal Goal decision handled above")
+                }
+                crate::GoalDecision::Allow => {
+                    let marker = Message::system("[ax-goal-allowed]");
                     self.messages.push(marker.clone());
                     self.raw_turn_messages.push(marker);
                     checkpoint(&self.raw_turn_messages)?;
@@ -134,7 +221,7 @@ impl AgentKernel {
             }
         }
         if tool_calls.is_empty() {
-            // Input may arrive while an explicitly blocking guard is running.
+            // Input may arrive while an explicitly blocking evaluator is running.
             if crate::needs_follow_up(&self.turn_state()) || !self.turn_input.close_if_empty() {
                 return Ok(ToolStep::Continue);
             }
@@ -150,25 +237,35 @@ impl AgentKernel {
                 // A final response is goal-scoped. Never interpret it as one
                 // task's completion and ask again for every remaining item.
                 queue.state = QueueState::Completed;
+                if let Some(goal) = &mut queue.goal {
+                    goal.state = crate::GoalState::Completed;
+                    goal.stop_reason = None;
+                }
                 queue.final_response = Some(content.clone());
                 queue.summarized = true;
                 self.checkpoint_queue(checkpoint)?;
             }
+            if let Some(goal) = self.goal() {
+                (emit.lock().unwrap())(AgentEvent::GoalUpdated {
+                    goal_id: self.goal_id.clone(),
+                    goal: Box::new(goal.clone()),
+                });
+            }
             (emit.lock().unwrap())(AgentEvent::Completion {
                 goal_id: self.goal_id.clone(),
-                completion: if self.stop_guard.is_some() {
-                    "stop_guard"
+                completion: if self.goal_evaluator.is_some() {
+                    "goal"
                 } else {
                     "direct"
                 }
                 .into(),
                 model_steps: *steps_used,
-                guard_model_requests: self.guard_model_requests,
+                goal_model_requests: self.goal_model_requests,
                 tools: *calls_used,
-                guard: self
-                    .stop_guard
+                evaluator: self
+                    .goal_evaluator
                     .as_ref()
-                    .map(|guard| guard.name().to_owned()),
+                    .map(|evaluator| evaluator.name().to_owned()),
             });
             self.set_context(task_queue::PROGRESS_PREFIX, None);
             (emit.lock().unwrap())(AgentEvent::TurnFinished);
@@ -347,11 +444,14 @@ impl AgentKernel {
                     let blocker = serde_json::from_str::<tool::ToolResult>(&message.content)
                         .ok()
                         .and_then(|result| result.global_blocker);
+                    let denied = serde_json::from_str::<tool::ToolResult>(&message.content).is_ok_and(|result| result.permission_denied);
                     self.messages.push(message.clone());
                     self.raw_turn_messages.push(message);
                     self.raw_turn_messages
                         .push(self.execution_state().snapshot());
-                    checkpoint(&self.raw_turn_messages)?;
+                    if self.goal().is_some() { self.checkpoint_queue(checkpoint)?; }
+                    else { checkpoint(&self.raw_turn_messages)?; }
+                    if denied && self.goal().is_some() { return Err(AgentError::GoalStopped { state: crate::GoalState::Blocked, reason: "Required tool permission was denied; inspect or change authorization before explicit resume".into() }); }
                     if let Some(reason) = blocker {
                         return Err(AgentError::GlobalBlocked(reason));
                     }

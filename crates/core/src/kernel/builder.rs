@@ -29,11 +29,13 @@ impl AgentKernel {
         tools.register(result_reader.clone());
         Self {
             extension: None,
-            guard_model_requests: 0,
+            goal_model_requests: 0,
             continuation: crate::TurnState::default(),
             activity: Arc::default(),
             turn_input: crate::continuation::TurnInput::default(),
-            stop_guard: None,
+            goal_evaluator: None,
+            pending_goal: None,
+            pending_goal_evaluator: None,
             provider,
             retry_policy: model::RetryPolicy::default(),
             permission_profiles: vec![],
@@ -175,6 +177,7 @@ impl AgentKernel {
     pub fn fork_with_messages(&self, mut messages: Vec<Message>) -> Self {
         // Worker context belongs to a child goal, never the controller queue.
         task_queue::TaskQueue::restore(&mut messages);
+        messages.retain(|m| !m.content.starts_with("[ax-goal-context]"));
         let result_reader = tool::ResultReader::default();
         let mut tools = self.tools.clone();
         tools.remove("subagent");
@@ -183,11 +186,13 @@ impl AgentKernel {
         tools.register(result_reader.clone());
         let mut worker = Self {
             extension: None,
-            guard_model_requests: 0,
+            goal_model_requests: 0,
             continuation: crate::TurnState::default(),
             activity: Arc::default(),
             turn_input: crate::continuation::TurnInput::default(),
-            stop_guard: None,
+            goal_evaluator: None,
+            pending_goal: None,
+            pending_goal_evaluator: None,
             provider: Arc::clone(&self.provider),
             retry_policy: self.retry_policy,
             permission_profiles: self.permission_profiles.clone(),

@@ -215,6 +215,9 @@ fn now_seconds() -> i64 {
 
 fn update(out: &Outbox, session_id: &str, event: AgentEvent, calls: &mut HashMap<String, String>) {
     let body = match event {
+        AgentEvent::GoalUpdated { goal_id, goal } => {
+            json!({"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":""},"_meta":{"axGoal":{"goal_id":goal_id,"goal":goal}}})
+        }
         AgentEvent::ContentDelta { delta } => {
             json!({"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":delta}})
         }
@@ -262,7 +265,7 @@ fn update(out: &Outbox, session_id: &str, event: AgentEvent, calls: &mut HashMap
         }
         AgentEvent::Continuation { .. }
         | AgentEvent::Completion { .. }
-        | AgentEvent::StopGuardEvaluated { .. }
+        | AgentEvent::GoalEvaluated { .. }
         | AgentEvent::SubagentStarted { .. }
         | AgentEvent::SubagentProgress { .. }
         | AgentEvent::SubagentCompleted { .. }

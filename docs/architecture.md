@@ -272,7 +272,7 @@ user task
   → inject runtime prompt + per-capability guidance + environment snapshot + coding policy
   → context pressure check / layered compression
   → model streaming request
-  → final + no continuation → optional StopGuard (default absent) → TurnFinished
+  → final + no continuation → optional Goal (default absent) → TurnFinished
   → pending input / approval / child / retry → wait, collect results, continue
   → tool calls
       → goal-bound step/scope admission
@@ -316,10 +316,12 @@ Step-by-step guidance lives in [development.md](development.md).
 
 ## Lightweight long-task orchestration
 
-A queue is created only for genuinely multi-item or long-running work: the model
-must start one with `task_queue`, a durable queue must already exist, or the
-explicit coding harness must be enabled. A plain turn creates no queue and no
-implicit per-goal queue. See [agent-runtime.md](agent-runtime.md).
+Every controller turn has the existing goal ID and an empty active queue head;
+ordinary direct completion closes that head without optional verification.
+Concrete queue items come from `task_queue` or typed work observations. Explicit
+Goal creation attaches acceptance and lifecycle metadata to this same head;
+an ordinary identity alone does not enable Goal. See [agent-runtime.md](agent-runtime.md)
+and [goal.md](goal.md).
 
 The existing Agent Loop and tool-round DAG remain the execution mechanisms. A
 small Task Queue stores concrete model-created tasks through `task_queue` or typed
@@ -566,7 +568,7 @@ registries bind their own workspace. Permission remains independent. See
 [security.md](security.md) and [ADR 0013](adr/0013-workspace-runtime-sandbox.md)
 for backend requirements, lifecycle capabilities and platform limitations.
 
-Current coding execution policy, task-level Git workspaces, optional stop verification
+Current coding execution policy, task-level Git workspaces, optional Goal verification
 and artifact staging/export are described in [coding-harness.md](coding-harness.md).
 
 ### Native provider dispatch

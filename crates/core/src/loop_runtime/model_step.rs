@@ -66,8 +66,16 @@ impl AgentKernel {
             event_count -= 1;
         }
         self.set_context(execution::CONTEXT_PREFIX, Some(state.context(event_count)));
-        self.compress_if_needed(|event| (emit.lock().unwrap())(event))
+        let compression = self
+            .compress_if_needed(|event| (emit.lock().unwrap())(event))
             .await?;
+        if compression.is_some_and(|c| c.semantic_called)
+            && let Some(goal) = self.task_queue.as_mut().and_then(|q| q.goal.as_mut())
+        {
+            goal.usage.estimated = true;
+            goal.usage.cost_estimated = true;
+        }
+
         (emit.lock().unwrap())(AgentEvent::ModelStarted {
             provider: self.provider.name().to_owned(),
             model: self.provider.model_id().to_owned(),
@@ -99,10 +107,49 @@ impl AgentKernel {
             messages: request_messages,
             tools: tool_specs.to_vec(),
         };
-        let response = self
-            .request_with_retry(request, on_delta, on_thinking)
-            .await?;
+        let goal_enabled = self.goal().is_some();
+        let input_estimate = if goal_enabled {
+            estimate_tokens(&request.messages)
+                + crate::token::estimate_text_tokens(
+                    &serde_json::to_string(&request.tools).unwrap_or_default(),
+                )
+        } else {
+            0
+        };
+        if goal_enabled {
+            self.reserve_goal_checkpoint(input_estimate);
+            self.checkpoint_queue(checkpoint)?;
+        }
+        let requests = std::sync::atomic::AtomicUsize::new(0);
+        let response = if goal_enabled {
+            self.request_with_retry_observed(request, on_delta, on_thinking, || {
+                requests.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            })
+            .await?
+        } else {
+            self.request_with_retry(request, on_delta, on_thinking)
+                .await?
+        };
+        let attempts = requests.load(std::sync::atomic::Ordering::Relaxed);
         drop(model_timer);
+        let output_estimate = if goal_enabled {
+            crate::token::estimate_text_tokens(&response.content)
+                + crate::token::estimate_text_tokens(
+                    &serde_json::to_string(&response.tool_calls).unwrap_or_default(),
+                )
+        } else {
+            0
+        };
+        if let Some(goal) = self.task_queue.as_mut().and_then(|q| q.goal.as_mut()) {
+            goal.pending_usage = None;
+            goal.record_usage(
+                response.usage.as_ref(),
+                u64::try_from(input_estimate).unwrap_or(u64::MAX),
+                u64::try_from(output_estimate).unwrap_or(u64::MAX),
+                attempts,
+            );
+        }
+        self.sync_goal_usage();
         let content = response.content;
         let tool_calls = response.tool_calls;
         self.continuation.required_actions.clear();
@@ -121,10 +168,10 @@ impl AgentKernel {
             )
         );
         if tool_calls.is_empty()
-            && (self.stop_guard.is_some() || self.continuation.model_requests_continuation)
+            && (self.goal_evaluator.is_some() || self.continuation.model_requests_continuation)
         {
-            let marker = Message::system(if self.stop_guard.is_some() {
-                "[ax-stop-guard-pending]"
+            let marker = Message::system(if self.goal_evaluator.is_some() {
+                "[ax-goal-pending]"
             } else {
                 "[ax-model-continuation]"
             });
@@ -133,12 +180,25 @@ impl AgentKernel {
         }
         let mut assistant = Message::assistant(content.clone(), tool_calls.clone());
         assistant.provider_metadata = response.provider_metadata;
-        assistant.usage = response.usage.map(|reported| {
-            serde_json::json!({"provider": self.provider.name(), "model": self.provider.model_id(), "reported": reported})
-        });
+        assistant.usage = if goal_enabled {
+            Some(
+                serde_json::json!({"provider":self.provider.name(),"model":self.provider.model_id(),"reported":response.usage,"estimated_input_tokens":input_estimate,"estimated_output_tokens":output_estimate,"axGoalRequests":attempts}),
+            )
+        } else {
+            response.usage.map(|reported| serde_json::json!({"provider":self.provider.name(),"model":self.provider.model_id(),"reported":reported}))
+        };
         self.messages.push(assistant.clone());
         self.raw_turn_messages.push(assistant);
         checkpoint(&self.raw_turn_messages)?;
+        if goal_enabled {
+            self.checkpoint_queue(checkpoint)?;
+        }
+        if let Some(goal) = self.goal() {
+            (emit.lock().unwrap())(AgentEvent::GoalUpdated {
+                goal_id: self.goal_id.clone(),
+                goal: Box::new(goal.clone()),
+            });
+        }
         Ok(ModelStep {
             content,
             tool_calls,

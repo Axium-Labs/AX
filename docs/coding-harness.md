@@ -38,7 +38,7 @@ action. Tool use, edits, shell commands and tests never trigger another model
 request by themselves. A plain answer costs one execution model request and zero
 reviewer requests. There is no task complexity classifier.
 
-Extra verification is an optional `StopGuard`, default off. Deterministic checks
+Extra verification is an optional `Goal`, default off. Deterministic checks
 run before any explicitly enabled model verification. See [agent-loop.md](agent-loop.md)
 for configuration, events, extension points and recovery. Legacy completion-review
 markers are read for recovery compatibility only; new default turns do not write
@@ -195,4 +195,4 @@ Each frozen output has `artifact-manifest.json` identifying this child/task and 
 
 The current manifest includes host-generated receipt, trace, patch, metrics, validation and diagnostic files, even without child staging files. Setup failures publish the same receipt/manifest surface. Coding policy asks for requested per-item reports for failed as well as completed items; unavailable measurements/evaluation remain null rather than excusing missing files.
 
-Current child receipt status, measured metrics, diff statistics and grouped current output filenames are injected directly into controller terminal summarization and optional stop verification. They do not require the model to first discover/call child_result. Host outputs are Artifact references as well as manifest entries. This supplies execution context without an automatic semantic review.
+Current child receipt status, measured metrics, diff statistics and grouped current output filenames are injected directly into controller terminal summarization and optional Goal verification. They do not require the model to first discover/call child_result. Host outputs are Artifact references as well as manifest entries. This supplies execution context without an automatic semantic review.

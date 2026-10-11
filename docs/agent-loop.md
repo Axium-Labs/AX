@@ -58,92 +58,38 @@ global tool-call cap — long, productive tasks still make many calls. The chain
 resets when the call changes and at the start of each turn. See
 `crates/core/src/loop_hygiene.rs`.
 
-## Optional Stop Guards
+## Optional Goal
 
-No guard is installed by default. The harness never installs
-execution policy/environment and typed task admission when explicitly enabled;
-enabling it does not enable review.
+Ordinary tasks finish directly without extra validation or provider requests.
+Explicit `/goal <target>` adds target-scoped deterministic or independent model
+verification to this same loop. A denial supplies concrete continuation reasons;
+blocked, failed, paused and cancelled states remain distinct from completion.
+Goal criteria, limits and consumption live in the existing queue checkpoint with
+the same goal ID. Configuration templates do not activate ordinary tasks.
 
-Global `$AX_HOME/config.json` accepts:
-
-```json
-{
-  "verification": {
-    "mode": "off",
-    "deliverables": [],
-    "required_successful_calls": []
-  }
-}
-```
-
-Modes shipped here are `off`, `deterministic`, and `model`. A project can override
-the whole verification object in `.ax/verification.json`, for example:
-
-```json
-{
-  "mode": "deterministic",
-  "deliverables": ["dist/report.json"],
-  "required_successful_calls": []
-}
-```
-
-Relative paths resolve against the project root. Deterministic mode checks
-runtime readiness, deliverable existence and explicitly configured successful
-tool **call IDs**. It never infers test success from shell text, file names or
-the assistant's assertion. Success evidence comes from structured tool envelopes,
-including the current raw checkpoint history when context was compressed. File
-existence alone does not establish freshness or semantic correctness.
-
-Model mode runs those deterministic checks first. Only after they pass does it
-make an additional streaming provider request with one `stop_decision` schema.
-The verifier cannot execute tools; denial supplies a concrete reason back to the
-ordinary execution loop. Configured model step budgets include guard requests;
-provider retry policy and turn timeout still apply. Guard text is not sent as a
-second final response. Normal assistant text streams immediately, while the
-explicit guard blocks only `TurnFinished`.
-
-Embedders can install `Arc<dyn StopGuard>` with `with_stop_guard`. Its async
-`evaluate(&TurnState)` returns `Allow` or `Continue { reason }`. `name()` labels
-observability and `uses_model()` declares a model-backed guard for budget admission.
-Command, policy, test and agent guards can implement this extension; `agent` is
-not a built-in configuration mode in this change. A guard that calls models should
-record requests in `state.guard_model_requests`. Controller guard rules are not
-implicitly inherited by worker forks: a controller's report paths and call IDs
-belong to its goal. A host may explicitly configure a child guard for child-local
-requirements.
+See [goal.md](goal.md) for commands, lifecycle, resource admission, migration and
+recovery. `GoalEvaluator` is the single extension boundary evolved from the old
+stop verifier. Workers do not inherit controller criteria.
 
 ## Observability and recovery
 
-Each model step emits `Continuation { goal_id, step, continuation }`. Completion
-emits `Completion { goal_id, completion, model_steps, guard_model_requests, tools,
-guard }`, followed by `TurnFinished`. Examples of the corresponding values:
+Each execution model step emits Continuation. Optional Goal emits GoalUpdated
+and GoalEvaluated (including the structured decision). Completion reports
+`model_steps`, `goal_model_requests`, tools and evaluator, followed by TurnFinished.
+Default completion is `direct`; verified completion is `goal`. AX_EVENT_LOG records
+these events through the shared CLI/TUI/ACP prompt boundary. Verifier output never
+becomes a second final answer.
 
-```text
-step=1 continuation=tool_call
-step=2 continuation=complete
-completion=direct model_steps=2 guard_model_requests=0 tools=1
-
-completion=stop_guard model_steps=1 guard_model_requests=1 guard=model
-```
-
-`model_steps` counts execution-loop inference steps, not child dispatch batches or
-guard requests. `StopGuardEvaluated` records the guard name, decision and number of
-actual guard provider requests, including retries. Goal IDs distinguish controller
-and child events. `AX_EVENT_LOG` writes JSONL from the shared prompt boundary for
-CLI, TUI and ACP, without adding UI noise or model requests when unset.
-
-Default finals are checkpointed directly. Explicitly guarded child finals have a
-pending marker persisted in the same checkpoint as the assistant message; only a
-durable allow marker permits recovering that final as terminal. Provider-declared
-nonfinal text cannot recover as a final receipt. Old `completion_check` and
-`[ax-completion-pending]` records are read only for legacy recovery compatibility;
-no default path generates them. Raw history remains intact.
+Pending Goal and provider continuation markers prevent recovering premature
+child finals. Only a durable Goal allow marker permits recovering a verified final.
+Old completion_check and pending/allowed records are compatibility data only.
+Raw history remains intact.
 
 ## Verification and references
 
 `test/harness/continuation.rs` and `subagent_continuation.rs` assert request counts,
 stream timing, real pending approval/retry/input, queued tasks, unfinished and
-unconsumed subagents, deterministic checks, model guard opt-in and denial/recovery.
+unconsumed subagents, deterministic checks, model Goal opt-in and denial/recovery.
 `test/harness/runtime_neutrality.rs` asserts the runtime contract: a plain request
 is answered directly and its goal queue completes, context cannot hijack it,
 explicit investigation and fixes run to completion, a long-running request
@@ -153,5 +99,5 @@ Existing frontend/workspace fixtures reject any default completion-review prompt
 
 Design references: [OpenAI's Codex agent loop](https://openai.com/index/unrolling-the-codex-agent-loop/)
 and [Claude Code Stop hooks](https://code.claude.com/docs/en/hooks#stop). AX adopts
-tool/result-driven continuation and optional stop hooks, without copying a fixed
+tool/result-driven continuation and optional target-driven Goal, without copying a fixed
 semantic verifier into the core loop.

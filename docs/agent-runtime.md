@@ -8,6 +8,10 @@ flow, and how context, tools, tasks, subagents and repetition are handled. It
 is the authoritative statement for every frontend (CLI, TUI, ACP, Crew bridge)
 and every isolated child.
 
+The ordinary task queue uses a goal ID for identity. That ID does not enable the
+optional [Goal](goal.md) acceptance/continuation policy; only explicit Goal creation
+does so. Harness and Goal share this identity and one execution loop.
+
 ## Core contract
 
 > The user request defines the work; context supports the work; tools provide
@@ -66,8 +70,9 @@ The TUI composer remains editable during work. Enter sends ordinary text as
 guidance to the current execution; it does not cancel the model stream, restart
 tools or create another goal. The kernel consumes messages in arrival order at
 the next model/tool boundary, checkpoints them as user messages and continues
-with the same goal and completed results. Slash commands remain queued until
-work finishes. A submission arriving after the final admission boundary is an
+with the same goal and completed results. `/goal status` and active Goal
+pause/cancel remain available during execution; other slash commands remain queued
+until work finishes. A submission arriving after the final admission boundary is an
 ordinary next turn.
 
 Embedders use `TurnInput::try_steer` and `AgentKernel::with_turn_input` or

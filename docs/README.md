@@ -16,7 +16,8 @@ are documented in [host-permissions.md](host-permissions.md).
 | [agent-runtime.md](agent-runtime.md) | The runtime contract: request/context/capability boundary, turn flow, trigger conditions |
 | [coding-harness.md](coding-harness.md) | The coding execution policy: concrete task sources, workspace specs and durable artifacts |
 | [coding-harness-validation.md](coding-harness-validation.md) | Root causes, regression coverage and original testax whole-prompt acceptance evidence |
-| [agent-loop.md](agent-loop.md) | Continuation state, direct streaming completion and optional Stop Guards |
+| [goal.md](goal.md) | Optional target execution, validation, lifecycle, budgets and recovery |
+| [agent-loop.md](agent-loop.md) | Continuation state, direct streaming completion and optional Goal |
 | [architecture.md](architecture.md) | System architecture: crate responsibilities, agent loop, cold-start path |
 | [distributed-collaboration.md](distributed-collaboration.md) | Optional durable cross-Host Tasks, Events, Artifacts, Workflow State and AX worker |
 | [release-notes/0.3.8.md](release-notes/0.3.8.md) | AX 0.3.8 remote SSH execution and provider reasoning effort |

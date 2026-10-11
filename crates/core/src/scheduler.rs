@@ -552,6 +552,7 @@ fn envelope(result: &Result<ToolOutput, ToolError>) -> tool::ToolResult {
         Err(error) => error.to_string(),
     };
     let mut envelope = tool::ToolResult::new(result.is_ok(), raw);
+    envelope.permission_denied = matches!(result, Err(ToolError::PermissionDenied(_)));
     if let Err(ToolError::GlobalBlocked(reason)) = result {
         envelope.global_blocker = Some(reason.clone());
     }

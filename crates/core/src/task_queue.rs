@@ -17,6 +17,13 @@ pub enum GoalTurn {
     Start {
         goal_id: String,
     },
+    /// Explicit optional target-driven execution. Uses the queue's existing ID.
+    Pursue {
+        config: crate::GoalConfig,
+        /// Optional caller-owned identity (e.g. the existing ACP/Crew task ID).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        goal_id: Option<String>,
+    },
     Resume {
         goal_id: String,
     },
@@ -27,6 +34,9 @@ pub enum GoalTurn {
         answer: crate::UserAnswer,
     },
     Cancel {
+        goal_id: String,
+    },
+    Pause {
         goal_id: String,
     },
 }
@@ -132,6 +142,8 @@ impl QueuedTask {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TaskQueue {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub goal: Option<crate::Goal>,
     #[serde(default)]
     pub goal_id: String,
     #[serde(default)]
@@ -151,6 +163,7 @@ pub struct TaskQueue {
 impl TaskQueue {
     pub(crate) fn new(goal: String, titles: Vec<String>) -> Self {
         let mut queue = Self {
+            goal: None,
             goal_id: fresh_goal_id(),
             parent_goal_id: None,
             state: QueueState::Active,
@@ -295,6 +308,20 @@ impl TaskQueue {
         }
         self.state = state;
         self.stop_reason = Some(reason);
+        if let Some(goal) = &mut self.goal
+            && matches!(
+                goal.state,
+                crate::GoalState::Created | crate::GoalState::Running | crate::GoalState::Verifying
+            )
+        {
+            goal.state = match state {
+                QueueState::Suspended | QueueState::WaitingForUser => crate::GoalState::Paused,
+                QueueState::Blocked => crate::GoalState::Blocked,
+                QueueState::Cancelled | QueueState::Superseded => crate::GoalState::Cancelled,
+                _ => goal.state,
+            };
+            goal.stop_reason.clone_from(&self.stop_reason);
+        }
     }
 
     /// Park the goal on a `request_user_input` question. Suspension is
@@ -392,7 +419,7 @@ impl TaskQueue {
         );
         Message::system(format!("{STATE_PREFIX}{state}"))
     }
-    pub(crate) fn restore(messages: &mut Vec<Message>) -> Option<Self> {
+    pub fn restore(messages: &mut Vec<Message>) -> Option<Self> {
         let mut queue: Option<Self> = messages
             .iter()
             .rev()
@@ -411,6 +438,27 @@ impl TaskQueue {
         });
         if let Some(queue) = &mut queue {
             queue.normalize_legacy();
+            if let Some(goal) = &mut queue.goal {
+                if let Some(reserved) = goal.pending_usage.take() {
+                    goal.usage = reserved;
+                }
+                if let Some(since) = goal.active_since_ms.take() {
+                    goal.usage.elapsed_ms = goal
+                        .elapsed_base_ms
+                        .saturating_add(crate::goal::now_ms().saturating_sub(since));
+                }
+                if matches!(
+                    goal.state,
+                    crate::GoalState::Created
+                        | crate::GoalState::Running
+                        | crate::GoalState::Verifying
+                ) {
+                    goal.state = crate::GoalState::Paused;
+                    goal.stop_reason = Some(
+                        "Interrupted; inspect completed effects before explicit resume".into(),
+                    );
+                }
+            }
         }
         queue
     }
@@ -570,6 +618,7 @@ pub(crate) fn apply(
                 existing.summarized = false;
                 existing.advance();
             } else {
+                plan.goal = queue.as_ref().and_then(|q| q.goal.clone());
                 *queue = Some(plan);
             }
             Ok(())

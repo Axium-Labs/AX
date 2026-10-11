@@ -103,7 +103,7 @@ impl AgentKernel {
         let _input_lease = crate::continuation::TurnInputLease(self.turn_input.clone());
         self.raw_turn_messages.clear();
         self.continuation = crate::TurnState::default();
-        self.guard_model_requests = 0;
+        self.goal_model_requests = 0;
         self.repeat_calls.reset();
         self.prepare_environment().await?;
         self.touch_progress();
@@ -111,37 +111,149 @@ impl AgentKernel {
         // legitimately spans the whole child batch, and each child already has
         // its own budget, so the controller is only cancelled when nothing has
         // progressed for the whole window.
-        let result = if self.budget.turn_timeout_secs == 0 {
-            self.run_turn_inner(input, intent, &mut emit, &mut checkpoint)
-                .await
-        } else if self.child_run.is_some() {
-            // An explicitly budgeted isolated child must not extend its deadline
-            // by repeatedly emitting model/tool activity. Its failure stays local.
-            tokio::time::timeout(
-                std::time::Duration::from_secs(self.budget.turn_timeout_secs),
-                self.run_turn_inner(input, intent, &mut emit, &mut checkpoint),
-            )
-            .await
-            .unwrap_or_else(|_| Err(AgentError::Timeout("child execution timeout".into())))
+        let enforce_goal_deadline =
+            !matches!(&intent, GoalTurn::Pause { .. } | GoalTurn::Cancel { .. })
+                && (matches!(
+                    &intent,
+                    GoalTurn::New | GoalTurn::Start { .. } | GoalTurn::Pursue { .. }
+                ) || self.goal().is_some_and(|g| {
+                    !matches!(
+                        g.state,
+                        crate::GoalState::Completed
+                            | crate::GoalState::Failed
+                            | crate::GoalState::Cancelled
+                    )
+                }));
+        let goal_config = match &intent {
+            GoalTurn::Pursue { config, .. } => Some(config.clone()),
+            GoalTurn::New | GoalTurn::Start { .. } => self.pending_goal.clone(),
+            _ => self.goal().map(|g| g.config.clone()),
+        }
+        .filter(|config| config.mode != crate::GoalMode::Off);
+        if goal_config.is_some() {
+            self.turn_input.enable_goal_control();
+        }
+        let saved_ms = if matches!(&intent, GoalTurn::Resume { .. } | GoalTurn::Answer { .. }) {
+            self.goal().map_or(0, |g| g.usage.elapsed_ms)
         } else {
-            let window = std::time::Duration::from_secs(self.budget.turn_timeout_secs);
-            let clock = std::sync::Arc::clone(&self.progress_clock);
-            let mut inner =
-                std::pin::pin!(self.run_turn_inner(input, intent, &mut emit, &mut checkpoint));
-            loop {
-                if let Ok(result) = tokio::time::timeout(window, inner.as_mut()).await {
-                    break result;
+            0
+        };
+        let original_budget = self.budget;
+        if enforce_goal_deadline
+            && let Some(config) = &goal_config
+            && config.max_rounds > 0
+        {
+            let consumed = if matches!(&intent, GoalTurn::Resume { .. } | GoalTurn::Answer { .. }) {
+                self.goal().map_or(0, |g| g.usage.rounds)
+            } else {
+                0
+            };
+            let remaining = config.max_rounds.saturating_sub(consumed).max(1);
+            self.budget.max_steps = if self.budget.max_steps == 0 {
+                remaining
+            } else {
+                self.budget.max_steps.min(remaining)
+            };
+        }
+        let goal_window = goal_config
+            .as_ref()
+            .filter(|c| enforce_goal_deadline && c.max_seconds > 0)
+            .map(|c| {
+                std::time::Duration::from_millis(
+                    c.max_seconds
+                        .saturating_mul(1000)
+                        .saturating_sub(saved_ms)
+                        .max(1),
+                )
+            });
+        let control = self.turn_input.clone();
+        let execution = async {
+            if self.budget.turn_timeout_secs == 0 && goal_window.is_none() {
+                self.run_turn_inner(input, intent, &mut emit, &mut checkpoint)
+                    .await
+            } else if self.child_run.is_some() || goal_window.is_some() {
+                // An explicitly budgeted isolated child must not extend its deadline
+                // by repeatedly emitting model/tool activity. Its failure stays local.
+                let window = goal_window.map_or_else(
+                    || std::time::Duration::from_secs(self.budget.turn_timeout_secs),
+                    |window| {
+                        if self.budget.turn_timeout_secs == 0 {
+                            window
+                        } else {
+                            window.min(std::time::Duration::from_secs(
+                                self.budget.turn_timeout_secs,
+                            ))
+                        }
+                    },
+                );
+                tokio::time::timeout(
+                    window,
+                    self.run_turn_inner(input, intent, &mut emit, &mut checkpoint),
+                )
+                .await
+                .unwrap_or_else(|_| {
+                    Err(AgentError::Timeout(
+                        if goal_window.is_some() {
+                            "Goal execution timeout"
+                        } else {
+                            "child execution timeout"
+                        }
+                        .into(),
+                    ))
+                })
+            } else {
+                let window = std::time::Duration::from_secs(self.budget.turn_timeout_secs);
+                let clock = std::sync::Arc::clone(&self.progress_clock);
+                let mut inner =
+                    std::pin::pin!(self.run_turn_inner(input, intent, &mut emit, &mut checkpoint));
+                loop {
+                    if let Ok(result) = tokio::time::timeout(window, inner.as_mut()).await {
+                        break result;
+                    }
+                    let idle = clock
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .elapsed();
+                    if idle < window {
+                        continue;
+                    }
+                    break Err(AgentError::Timeout("turn timeout".into()));
                 }
-                let idle = clock
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .elapsed();
-                if idle < window {
-                    continue;
-                }
-                break Err(AgentError::Timeout("turn timeout".into()));
             }
         };
+        let result = if goal_config.is_some() {
+            let interrupted = async {
+                loop {
+                    if let Some(state) = control.goal_control() {
+                        break AgentError::GoalStopped {
+                            state,
+                            reason: "User requested Goal control".into(),
+                        };
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                }
+            };
+            tokio::select! {
+                result = execution => result,
+                error = interrupted => Err(error),
+            }
+        } else {
+            execution.await
+        };
+        self.budget = original_budget;
+        let mismatched = matches!(&result, Err(AgentError::GoalMismatch(_)));
+        if !mismatched {
+            self.sync_goal_usage();
+            if let Some(goal) = self.task_queue.as_mut().and_then(|q| q.goal.as_mut()) {
+                goal.active_since_ms = None;
+                if result.is_err()
+                    && let Some(mut usage) = goal.pending_usage.take()
+                {
+                    usage.elapsed_ms = goal.usage.elapsed_ms;
+                    goal.usage = usage;
+                }
+            }
+        }
         if result
             .as_ref()
             .is_err_and(|error| !matches!(error, AgentError::GoalMismatch(_)))
@@ -150,6 +262,29 @@ impl AgentKernel {
             // question leaves the goal resumable and never drops the queue.
             let waiting = matches!(&result, Err(AgentError::WaitingForUser(_)));
             if let Some(queue) = &mut self.task_queue {
+                if let Some(goal) = &mut queue.goal {
+                    goal.state = match result.as_ref().unwrap_err() {
+                        AgentError::GoalStopped { state, .. } => *state,
+                        AgentError::Model(error)
+                            if error.error_class() == model::ErrorClass::Retryable =>
+                        {
+                            crate::GoalState::Paused
+                        }
+                        AgentError::GlobalBlocked(_)
+                        | AgentError::Model(
+                            model::ModelError::HttpStatus {
+                                status: 401 | 403, ..
+                            }
+                            | model::ModelError::HttpResponse {
+                                status: 401 | 403, ..
+                            }
+                            | model::ModelError::Configuration(_),
+                        ) => crate::GoalState::Blocked,
+                        error if error.resumable() => crate::GoalState::Paused,
+                        _ => crate::GoalState::Failed,
+                    };
+                    goal.stop_reason = Some(result.as_ref().unwrap_err().to_string());
+                }
                 if waiting {
                     queue.await_user();
                 } else if result.as_ref().is_err_and(AgentError::resumable) {
@@ -161,6 +296,21 @@ impl AgentKernel {
                     let reason = result.as_ref().unwrap_err().to_string();
                     queue.stop(QueueState::Blocked, reason.clone());
                     queue.final_response.get_or_insert(reason);
+                }
+                if queue.goal.is_some()
+                    && queue
+                        .goal
+                        .as_ref()
+                        .is_some_and(|g| g.state == crate::GoalState::Paused)
+                {
+                    queue.state = QueueState::Suspended;
+                }
+                if queue
+                    .goal
+                    .as_ref()
+                    .is_some_and(|g| g.state == crate::GoalState::Cancelled)
+                {
+                    queue.state = QueueState::Cancelled;
                 }
             }
             if waiting {
@@ -200,6 +350,17 @@ impl AgentKernel {
             self.checkpoint_queue(&mut checkpoint)?;
         }
         self.turn_input.close();
+        if goal_config.is_some() && !mismatched {
+            self.checkpoint_queue(&mut checkpoint)?;
+            if result.is_err()
+                && let Some(goal) = self.goal()
+            {
+                emit(AgentEvent::GoalUpdated {
+                    goal_id: self.goal_id.clone(),
+                    goal: Box::new(goal.clone()),
+                });
+            }
+        }
         // Preserve accepted guidance even when the provider fails before the next boundary.
         for message in self.turn_input.drain() {
             self.messages.push(message.clone());
@@ -241,7 +402,10 @@ impl AgentKernel {
     {
         let emit = std::sync::Mutex::new(emit);
         let input = input.into();
-        let new_goal = matches!(&intent, GoalTurn::New | GoalTurn::Start { .. });
+        let new_goal = matches!(
+            &intent,
+            GoalTurn::New | GoalTurn::Start { .. } | GoalTurn::Pursue { .. }
+        );
         let answer = match &intent {
             GoalTurn::Answer { answer, .. } => Some(answer.clone()),
             _ => None,
@@ -268,6 +432,17 @@ impl AgentKernel {
             return Ok(cached);
         }
         (emit.lock().unwrap())(AgentEvent::TurnStarted);
+        if let Some(goal) = self.goal() {
+            (emit.lock().unwrap())(AgentEvent::GoalUpdated {
+                goal_id: self.goal_id.clone(),
+                goal: Box::new(goal.clone()),
+            });
+            let context = Message::system(format!(
+                "[ax-goal-context]\n{}",
+                serde_json::json!({"goal_id":self.goal_id,"target":goal.target,"acceptance":goal.config.acceptance,"deliverables":goal.config.deliverables,"required_successful_calls":goal.config.required_successful_calls,"recovery":"Inspect recorded results and external state before retrying interrupted operations. Never blindly replay side effects."})
+            ));
+            self.set_context("[ax-goal-context]", Some(context));
+        }
         if let Some(answer) = &answer {
             // Resume from the exact position the question was asked: the answer
             // becomes the tool result the model was waiting for, and no new
@@ -290,16 +465,20 @@ impl AgentKernel {
                     self.raw_turn_messages.push(message);
                 }
                 if let Some(response) = adapted.response {
-                    if let Some(queue) = &mut self.task_queue {
-                        queue.stop(QueueState::Completed, "Mod command completed".into());
+                    if self.goal().is_some() {
+                        self.messages.push(Message::system(format!("[ax-goal-mod-result]\n{response}\nThis result still requires Goal verification.")));
+                    } else {
+                        if let Some(queue) = &mut self.task_queue {
+                            queue.stop(QueueState::Completed, "Mod command completed".into());
+                        }
+                        return self.finish_goal_response(response, &emit, checkpoint);
                     }
-                    return self.finish_goal_response(response, &emit, checkpoint);
                 }
             } else {
                 self.messages.push(Message::user(input));
             }
         }
-        if self.child_run.is_some() {
+        if self.child_run.is_some() || self.goal().is_some() {
             // Never replay an interrupted call whose side effects are unknown.
             let answered = self
                 .messages
@@ -371,6 +550,22 @@ impl AgentKernel {
             }
             self.touch_progress();
             if let Some(queue) = self.task_queue.as_ref().filter(|q| !q.active()) {
+                if self.goal().is_some_and(|g| {
+                    matches!(
+                        g.state,
+                        crate::GoalState::Paused | crate::GoalState::Cancelled
+                    )
+                }) {
+                    return Err(AgentError::GoalStopped {
+                        state: self.goal().unwrap().state,
+                        reason: queue.stop_reason.clone().unwrap_or_default(),
+                    });
+                }
+                if self.goal().is_some() && queue.state == QueueState::Blocked {
+                    return Err(AgentError::GlobalBlocked(
+                        queue.stop_reason.clone().unwrap_or_default(),
+                    ));
+                }
                 // A terminal control action closes input at the same admission boundary.
                 if !self.turn_input.close_if_empty() {
                     continue;
@@ -382,8 +577,19 @@ impl AgentKernel {
                     .unwrap_or_default();
                 return self.finish_goal_response(content, &emit, checkpoint);
             }
+            self.goal_budget_check()?;
+            if let Some(goal) = self.goal() {
+                if goal.config.max_rounds > 0 && goal.usage.rounds >= goal.config.max_rounds {
+                    return Err(AgentError::Budget("Goal model-round limit".into()));
+                }
+                if goal.config.max_seconds > 0
+                    && goal.usage.elapsed_ms >= goal.config.max_seconds.saturating_mul(1000)
+                {
+                    return Err(AgentError::Budget("Goal time limit".into()));
+                }
+            }
             if self.budget.max_steps != 0
-                && steps_used.saturating_add(self.guard_model_requests) >= self.budget.max_steps
+                && steps_used.saturating_add(self.goal_model_requests) >= self.budget.max_steps
             {
                 return Err(AgentError::StepLimit(self.budget.max_steps));
             }
@@ -396,10 +602,17 @@ impl AgentKernel {
                 // independent run together, dependents wait for their
                 // predecessor, and one failure never stops the others.
                 if self.execute_ready_children(&emit, checkpoint).await? > 0 {
+                    if self.goal().is_some() {
+                        self.checkpoint_queue(checkpoint)?;
+                    }
+                    self.observe_goal_progress()?;
                     continue;
                 }
             }
             steps_used = steps_used.saturating_add(1);
+            if let Some(goal) = self.task_queue.as_mut().and_then(|q| q.goal.as_mut()) {
+                goal.usage.rounds = goal.usage.rounds.saturating_add(1);
+            }
             let step = self
                 .model_step(&emit, &tool_specs, steps_used, checkpoint)
                 .await?;
@@ -419,6 +632,10 @@ impl AgentKernel {
             {
                 ToolStep::Final(content) => return Ok(content),
                 ToolStep::Continue => {
+                    self.observe_goal_progress()?;
+                    if self.goal().is_some() {
+                        self.checkpoint_queue(checkpoint)?;
+                    }
                     self.continuation.pending_tool_calls = 0;
                     self.continuation.pending_tool_results = self
                         .messages

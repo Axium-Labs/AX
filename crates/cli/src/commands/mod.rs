@@ -11,3 +11,5 @@ pub(crate) mod run;
 
 #[cfg(test)]
 mod prompt_execution_tests;
+
+pub(crate) mod goal;

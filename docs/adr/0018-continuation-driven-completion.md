@@ -15,11 +15,11 @@ runtime work completes directly. Wait states await execution/input rather than
 polling a reviewer. No task classifier, prose heuristic or historical tool-use
 flag participates in completion.
 
-Streaming is immediate. Stop verification is an optional `StopGuard`, absent by
-default. Deterministic checks precede explicitly selected model verification;
-custom command/test/policy/agent guards use the same extension boundary. Worker
-guards must be configured for their own goal rather than inheriting controller
-deliverable paths. Execution and guard model requests are reported separately.
+Streaming is immediate. Optional verification has evolved in place into Goal,
+absent by default. Deterministic checks precede explicitly selected model
+verification. The GoalEvaluator boundary supplies concrete continuation reasons;
+criteria belong to the current Goal and are never inherited by workers. Execution
+and Goal verifier requests are reported separately. See ADR 0026.
 
 ## Consequences
 

@@ -64,6 +64,9 @@ impl crate::Tool for ResultReader {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ToolResult {
+    /// Set only from a typed runtime permission failure, never inferred from prose.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub permission_denied: bool,
     /// Explicit goal-wide failures stop queue consumption; ordinary errors are local.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub global_blocker: Option<String>,
@@ -115,7 +118,7 @@ impl ToolResult {
                     .map(|line| json!({"message":line}))
                     .collect()
             });
-        Self { global_blocker: None, status: if success { "success" } else { "error" }.into(),
+        Self { permission_denied: false, global_blocker: None, status: if success { "success" } else { "error" }.into(),
             summary: if success { "Operation succeeded" } else { "Operation failed; repair the reported diagnostic locally and run the smallest relevant check before broader tests" }.into(),
             diagnostics, raw_output, truncated: parsed.as_ref().and_then(|v| v["truncated"].as_bool()).unwrap_or(false) }
     }
@@ -138,10 +141,18 @@ impl ToolResult {
             let text=diagnostic.to_string();
             if text.chars().count()>diagnostic_chars { json!({"message":text.chars().take(diagnostic_chars).collect::<String>(),"truncated":true}) } else { diagnostic.clone() }
         }).collect();
-        json!({"global_blocker":self.global_blocker,"status":self.status,"summary":self.summary,"diagnostics":diagnostics,
+        let mut view = json!({"global_blocker":self.global_blocker,"status":self.status,"summary":self.summary,"diagnostics":diagnostics,
             "output":clipped,"truncated":self.truncated || clipped.len()<cleaned.len() || cleaned != pretty,
-            "raw_output_available":true}).to_string()
+            "raw_output_available":true});
+        if self.permission_denied {
+            view["permission_denied"] = json!(true);
+        }
+        view.to_string()
     }
+}
+#[allow(clippy::trivially_copy_pass_by_ref)] // Serde skip callback requires a reference.
+fn is_false(value: &bool) -> bool {
+    !value
 }
 
 /// Report nearby names without a recursive workspace search.

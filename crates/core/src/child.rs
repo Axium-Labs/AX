@@ -159,11 +159,17 @@ fn terminal_result_reviewed(messages: &[Message], reviewed: bool) -> Option<Chil
     if preceding.is_some_and(|m| m.content == "[ax-model-continuation]") {
         return None;
     }
-    if preceding.is_some_and(|m| m.content == "[ax-stop-guard-pending]")
-        && !messages[final_index + 1..]
-            .iter()
-            .any(|m| m.content == "[ax-stop-guard-allowed]")
-    {
+    if preceding.is_some_and(|m| {
+        matches!(
+            m.content.as_str(),
+            "[ax-goal-pending]" | "[ax-stop-guard-pending]"
+        )
+    }) && !messages[final_index + 1..].iter().any(|m| {
+        matches!(
+            m.content.as_str(),
+            "[ax-goal-allowed]" | "[ax-stop-guard-allowed]"
+        )
+    }) {
         return None;
     }
     if !reviewed && preceding.is_some_and(|m| m.content.starts_with(LEGACY_COMPLETION_PENDING)) {

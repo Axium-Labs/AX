@@ -10,11 +10,41 @@ use std::sync::{
 struct Inputs {
     messages: Vec<model::Message>,
     closed: bool,
+    control: Option<crate::GoalState>,
+    goal_enabled: bool,
 }
 #[derive(Clone, Default)]
 pub struct TurnInput(Arc<std::sync::Mutex<Inputs>>);
 static STEER_ID: AtomicUsize = AtomicUsize::new(0);
 impl TurnInput {
+    /// Interrupt safely using the existing turn handle. No new execution engine.
+    pub fn control_goal(&self, cancel: bool) -> bool {
+        let mut inputs = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if inputs.closed || !inputs.goal_enabled {
+            return false;
+        }
+        inputs.control = Some(if cancel {
+            crate::GoalState::Cancelled
+        } else {
+            crate::GoalState::Paused
+        });
+        true
+    }
+    pub(crate) fn enable_goal_control(&self) {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .goal_enabled = true;
+    }
+    pub(crate) fn goal_control(&self) -> Option<crate::GoalState> {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .control
+    }
     pub fn steer(&self, input: impl Into<String>) {
         let _ = self.try_steer(input);
     }
@@ -47,7 +77,7 @@ impl TurnInput {
             .0
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if !inputs.messages.is_empty() {
+        if !inputs.messages.is_empty() || inputs.control.is_some() {
             return false;
         }
         inputs.closed = true;
@@ -151,11 +181,13 @@ impl crate::ApprovalPolicy for TrackedApproval {
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct TurnState {
-    /// Supplied only to optional guards.
+    #[serde(skip)]
+    pub goal_usage_messages: Option<Arc<std::sync::Mutex<Vec<model::Message>>>>,
+    /// Supplied only to the optional Goal evaluator.
     #[serde(skip)]
     pub evidence: Vec<model::Message>,
     #[serde(skip)]
-    pub guard_model_requests: Arc<AtomicUsize>,
+    pub goal_model_requests: Arc<AtomicUsize>,
     #[serde(skip)]
     pub successful_tool_calls: std::collections::BTreeSet<String>,
     pub pending_tool_calls: usize,

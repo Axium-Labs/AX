@@ -213,6 +213,7 @@ struct App {
     loading_session: Option<Instant>,
     /// Question the agent parked on; the next submission answers it.
     pending_question: Option<runtime_core::UserQuestion>,
+    goal_status: Option<String>,
 }
 
 impl Drop for App {
@@ -259,6 +260,7 @@ impl App {
             unseen_output: false,
             loading_session: None,
             pending_question: None,
+            goal_status: None,
         }
     }
 
@@ -330,6 +332,35 @@ impl App {
 
     fn apply_event(&mut self, event: AgentEvent) {
         match event {
+            AgentEvent::GoalUpdated { goal_id, goal } => {
+                let status = format!(
+                    "Goal {}: {:?} | checks {} | rounds {} | requests {} | tokens {}{} | cost {} | {}ms | {}",
+                    goal_id.unwrap_or_default(),
+                    goal.state,
+                    goal.checks,
+                    goal.usage.rounds,
+                    goal.usage.requests,
+                    goal.usage
+                        .input_tokens
+                        .saturating_add(goal.usage.output_tokens),
+                    if goal.usage.estimated {
+                        " estimated"
+                    } else {
+                        ""
+                    },
+                    goal.usage.cost_display(),
+                    goal.usage.elapsed_ms,
+                    goal.target
+                );
+                self.goal_status = Some(status.clone());
+                self.push(TranscriptKind::Status, status);
+                if let Some(decision) = &goal.last_decision {
+                    self.push(
+                        TranscriptKind::Status,
+                        format!("Goal verification: {decision:?}"),
+                    );
+                }
+            }
             AgentEvent::SubagentStarted { id } => {
                 self.push(TranscriptKind::Status, format!("{id}: started"));
             }
@@ -343,6 +374,7 @@ impl App {
                 self.push(TranscriptKind::Status, format!("{id}: cancelled"));
             }
             AgentEvent::TurnStarted => {
+                self.goal_status = None;
                 self.working = true;
                 self.streaming = false;
                 self.transcript.streaming = false;
@@ -355,7 +387,7 @@ impl App {
             // into the transcript and consuming the whole viewport.
             AgentEvent::Continuation { .. }
             | AgentEvent::Completion { .. }
-            | AgentEvent::StopGuardEvaluated { .. }
+            | AgentEvent::GoalEvaluated { .. }
             | AgentEvent::SubagentProgress { .. }
             | AgentEvent::ThinkingDelta { delta: _ } => {}
             AgentEvent::TurnFinished => {
@@ -696,6 +728,36 @@ pub(super) async fn run_tui(
                                 TranscriptKind::Status,
                                 "Guidance sent — the current task continues",
                             );
+                            continue;
+                        }
+                        if matches!(submitted.as_str(), "/goal" | "/goal status") {
+                            app.push(
+                                TranscriptKind::Info,
+                                app.goal_status.clone().unwrap_or_else(|| {
+                                    "No optional Goal in the current turn".into()
+                                }),
+                            );
+                            continue;
+                        }
+                        if matches!(
+                            submitted.as_str(),
+                            "/goal pause" | "/goal cancel" | "/goal off"
+                        ) {
+                            if app.goal_status.is_some()
+                                && active_turn.as_ref().is_some_and(|turn| {
+                                    turn.input.control_goal(submitted != "/goal pause")
+                                })
+                            {
+                                app.push(
+                                    TranscriptKind::Status,
+                                    "Goal control requested; preserving completed results",
+                                );
+                            } else {
+                                app.push(
+                                    TranscriptKind::Info,
+                                    "No optional Goal in the current turn",
+                                );
+                            }
                             continue;
                         }
                         // Commands and submissions arriving after the final boundary run next.

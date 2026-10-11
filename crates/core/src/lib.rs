@@ -24,11 +24,11 @@ pub mod child_result;
 mod compression;
 mod context;
 pub mod continuation;
-pub mod stop_guard;
+pub mod goal;
 pub use continuation::{
     ContinuationReason, TurnContinuation, TurnInput, TurnState, WaitReason, needs_follow_up,
 };
-pub use stop_guard::{StopDecision, StopGuard, Verification, VerificationConfig};
+pub use goal::{Goal, GoalConfig, GoalDecision, GoalEvaluator, GoalMode, GoalState, GoalUsage};
 mod error;
 mod extension;
 pub use extension::{ExtensionPrompt, RuntimeExtension};

@@ -97,6 +97,10 @@ pub(crate) struct SubagentPool {
     admitted: AtomicU64,
 }
 impl SubagentManager {
+    /// Existing delegation admission is evidence that controller-only usage is incomplete.
+    pub(crate) fn has_delegated_work(&self) -> bool {
+        self.pool.admitted.load(Ordering::Relaxed) > 0
+    }
     fn child_tool_allowed(&self, name: &str) -> bool {
         if ["subagent", "subagent_fork"].contains(&name) {
             self.controller.subagent_depth.saturating_add(1)

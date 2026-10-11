@@ -221,6 +221,10 @@ legacy `config.toml`, saves the result as `config.json`, and continues.
 
 ## Durable task queues
 
+An optional `goal` object on this same queue stores target-scoped acceptance,
+lifecycle, cumulative resource usage, last validation and recovery reservations.
+It has no separate ID or storage head. Ordinary queues omit it. See [goal.md](goal.md).
+
 Queue checkpoints are ordinary `AgentState` messages prefixed `[ax-task-queue]`.
 They include `goal_id`, optional `parent_goal_id`, queue lifecycle state, original
 goal, ordered tasks, failure reasons, recovery attempts and cached final response.

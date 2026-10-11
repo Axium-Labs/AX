@@ -19,15 +19,20 @@ pub enum AgentEvent {
         goal_id: Option<String>,
         completion: String,
         model_steps: usize,
-        guard_model_requests: usize,
+        goal_model_requests: usize,
         tools: usize,
-        guard: Option<String>,
+        evaluator: Option<String>,
     },
-    StopGuardEvaluated {
+    GoalEvaluated {
         goal_id: Option<String>,
-        guard: String,
+        evaluator: String,
         allowed: bool,
         model_requests: usize,
+        decision: crate::GoalDecision,
+    },
+    GoalUpdated {
+        goal_id: Option<String>,
+        goal: Box<crate::Goal>,
     },
     SubagentStarted {
         id: String,
