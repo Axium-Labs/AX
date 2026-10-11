@@ -131,7 +131,11 @@ pub(crate) async fn run_internal_entry(
     match internal? {
         #[cfg(windows)]
         "--ax-computer-use-worker" => match AxConfig::load() {
-            Ok(config) => Some(tool::desktop_worker(config.computer_use).await.map_err(Into::into)),
+            Ok(config) => Some(
+                tool::desktop_worker(config.computer_use)
+                    .await
+                    .map_err(Into::into),
+            ),
             Err(error) => Some(Err(error)),
         },
         "--ax-sandbox-snapshot" => Some(worktree_changes::worker_snapshot()),

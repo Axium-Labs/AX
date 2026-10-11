@@ -231,7 +231,11 @@ pub(crate) fn writing_context(
         // Bound filesystem reads by this context's token allocation. Decode a
         // prefix lossily so cutting through a UTF-8 character is harmless.
         let mut bytes = Vec::new();
-        if file.take(token_budget.saturating_mul(4) as u64).read_to_end(&mut bytes).is_err() {
+        if file
+            .take(token_budget.saturating_mul(4) as u64)
+            .read_to_end(&mut bytes)
+            .is_err()
+        {
             continue;
         }
         let text = String::from_utf8_lossy(&bytes);

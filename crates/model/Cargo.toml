@@ -9,6 +9,7 @@ rust-version.workspace = true
 async-trait.workspace = true
 httpdate = "1"
 base64 = "0.22"
+sha2 = "0.10"
 futures-util.workspace = true
 reqwest.workspace = true
 serde.workspace = true

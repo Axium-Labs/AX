@@ -47,13 +47,37 @@ fn read_answer() -> Result<Option<String>> {
 /// # Errors
 /// Returns an error when settings validation or the launcher fails.
 pub(crate) fn run_preflight(cli: &Cli) -> Result<bool> {
-    if let Some(Command::HostPermissions { surface, target, decision, remove, browser_enabled }) = &cli.command {
-        let state = crate::host_permissions::manage(surface.as_deref(), target.as_deref(), decision.as_deref(), *remove, *browser_enabled)?;
+    if let Some(Command::HostPermissions {
+        surface,
+        target,
+        decision,
+        remove,
+        browser_enabled,
+    }) = &cli.command
+    {
+        let state = crate::host_permissions::manage(
+            surface.as_deref(),
+            target.as_deref(),
+            decision.as_deref(),
+            *remove,
+            *browser_enabled,
+        )?;
         println!("{}", serde_json::to_string_pretty(&state)?);
         return Ok(true);
     }
-    if let Some(Command::ComputerUse { enabled, include_screenshot, max_nodes, screenshot_width }) = &cli.command {
-        let state = crate::computer_use::manage(*enabled, *include_screenshot, *max_nodes, *screenshot_width)?;
+    if let Some(Command::ComputerUse {
+        enabled,
+        include_screenshot,
+        max_nodes,
+        screenshot_width,
+    }) = &cli.command
+    {
+        let state = crate::computer_use::manage(
+            *enabled,
+            *include_screenshot,
+            *max_nodes,
+            *screenshot_width,
+        )?;
         println!("{}", serde_json::to_string_pretty(&state)?);
         return Ok(true);
     }

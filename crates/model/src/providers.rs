@@ -33,8 +33,8 @@ pub enum ProviderProtocol {
 pub enum SearchCapability {
     /// No native web search capability
     None,
-    /// Provider supports native web search (e.g., via browsing tool)
-    Native,
+    /// Registry protocol candidate; endpoint and model entitlement are checked by the adapter.
+    ProtocolCandidate,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -100,12 +100,19 @@ pub static PROVIDERS: &[ProviderSpec] = &[
         search_capability: SearchCapability::None,
     },
     key!("ant-ling", "Ant Ling", "ANT_LING_API_KEY", OpenAiCompatible),
-    key_with_search!("anthropic", "Anthropic", "ANTHROPIC_API_KEY", Anthropic, Native),
-    key!(
+    key_with_search!(
+        "anthropic",
+        "Anthropic",
+        "ANTHROPIC_API_KEY",
+        Anthropic,
+        ProtocolCandidate
+    ),
+    key_with_search!(
         "azure-openai-responses",
         "Azure OpenAI",
         "AZURE_OPENAI_API_KEY",
-        OpenAiResponses
+        OpenAiResponses,
+        ProtocolCandidate
     ),
     key!("baseten", "Baseten", "BASETEN_API_KEY", OpenAiCompatible),
     key!("cerebras", "Cerebras", "CEREBRAS_API_KEY", OpenAiCompatible),
@@ -136,16 +143,28 @@ pub static PROVIDERS: &[ProviderSpec] = &[
         protocol: ProviderProtocol::Managed,
         search_capability: SearchCapability::None,
     },
-    key_with_search!("google", "Google Gemini", "GEMINI_API_KEY", Google, Native),
+    key_with_search!(
+        "google",
+        "Google Gemini",
+        "GEMINI_API_KEY",
+        Google,
+        ProtocolCandidate
+    ),
     ProviderSpec {
         id: "google-vertex",
         name: "Google Vertex",
         environment: Some("GOOGLE_CLOUD_API_KEY"),
         auth: ProviderAuthKind::Ambient,
         protocol: ProviderProtocol::Google,
-        search_capability: SearchCapability::Native,
+        search_capability: SearchCapability::ProtocolCandidate,
     },
-    key!("groq", "Groq", "GROQ_API_KEY", OpenAiCompatible),
+    key_with_search!(
+        "groq",
+        "Groq",
+        "GROQ_API_KEY",
+        OpenAiCompatible,
+        ProtocolCandidate
+    ),
     key!("huggingface", "Hugging Face", "HF_TOKEN", OpenAiCompatible),
     key!(
         "kimi-coding",
@@ -162,27 +181,35 @@ pub static PROVIDERS: &[ProviderSpec] = &[
         OpenAiCompatible
     ),
     key!("mistral", "Mistral", "MISTRAL_API_KEY", OpenAiCompatible),
-    key!(
+    key_with_search!(
         "moonshotai",
         "Moonshot AI",
         "MOONSHOT_API_KEY",
-        OpenAiCompatible
+        OpenAiCompatible,
+        ProtocolCandidate
     ),
-    key!(
+    key_with_search!(
         "moonshotai-cn",
         "Moonshot AI CN",
         "MOONSHOT_API_KEY",
-        OpenAiCompatible
+        OpenAiCompatible,
+        ProtocolCandidate
     ),
     key!("nvidia", "NVIDIA", "NVIDIA_API_KEY", OpenAiCompatible),
-    key_with_search!("openai", "OpenAI", "OPENAI_API_KEY", OpenAiResponses, Native),
+    key_with_search!(
+        "openai",
+        "OpenAI",
+        "OPENAI_API_KEY",
+        OpenAiResponses,
+        ProtocolCandidate
+    ),
     ProviderSpec {
         id: "openai-codex",
         name: "OpenAI Codex",
         environment: None,
         auth: ProviderAuthKind::CodexOAuth,
         protocol: ProviderProtocol::OpenAiResponses,
-        search_capability: SearchCapability::Native,
+        search_capability: SearchCapability::ProtocolCandidate,
     },
     key!("opencode", "OpenCode", "OPENCODE_API_KEY", OpenAiCompatible),
     key!(
@@ -191,11 +218,12 @@ pub static PROVIDERS: &[ProviderSpec] = &[
         "OPENCODE_API_KEY",
         OpenAiCompatible
     ),
-    key!(
+    key_with_search!(
         "openrouter",
         "OpenRouter",
         "OPENROUTER_API_KEY",
-        OpenAiCompatible
+        OpenAiCompatible,
+        ProtocolCandidate
     ),
     key!(
         "qwen-token-plan",

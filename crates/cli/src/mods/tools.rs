@@ -14,6 +14,14 @@ pub(super) struct WrappedTool {
 }
 #[async_trait]
 impl Tool for WrappedTool {
+    fn bind_model(&self, provider: Arc<dyn model::ModelProvider>) -> Option<Arc<dyn Tool>> {
+        self.inner.bind_model(provider).map(|inner| {
+            Arc::new(Self {
+                host: self.host.clone(),
+                inner,
+            }) as Arc<dyn Tool>
+        })
+    }
     fn name(&self) -> &str {
         self.inner.name()
     }

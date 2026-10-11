@@ -6,16 +6,14 @@ mod memories;
 use catalogs::{mcp_items, open_mcp, open_skills, open_tools, skill_items};
 
 use anyhow::Result;
-use model::{
-    AuthStorage, ModelInfo, OAuthCredential, PROVIDERS, ProviderAuthKind, ReasoningEffort, stats,
-};
+use model::{AuthStorage, ModelInfo, PROVIDERS, ProviderAuthKind, ReasoningEffort, stats};
 use tokio::sync::mpsc;
 
-/// Progress updates from the background, self-contained Codex device-code
+/// Progress updates from the background, self-contained account OAuth
 /// login, delivered back to the TUI so it never blocks while the user
 /// authorizes in a browser.
 pub enum LoginUpdate {
-    /// Show the verification link + one-time code to the user.
+    /// Show the authorization link and optional device code to the user.
     Prompt(String),
     /// Tokens were persisted to AX's provider-scoped `~/.ax/auth.json`.
     Success(String),
@@ -558,8 +556,16 @@ fn permission_items(config: &tool::PermissionStore) -> Vec<SurfaceItem> {
             &config.get("filesystem-read").to_string(),
         ),
         item("network", "Network", &config.get("network").to_string()),
-        item("computer-use", "Computer Use actions", &config.get("computer-use").to_string()),
-        item("browser-use", "Browser Use actions", &config.get("browser-use").to_string()),
+        item(
+            "computer-use",
+            "Computer Use actions",
+            &config.get("computer-use").to_string(),
+        ),
+        item(
+            "browser-use",
+            "Browser Use actions",
+            &config.get("browser-use").to_string(),
+        ),
         item("mcp", "MCP", &config.get("mcp").to_string()),
         item(
             "process",
@@ -1355,6 +1361,14 @@ pub(super) async fn apply_modal_action(
                         }
                     ),
                 );
+            } else if surface == "codex-login-method" {
+                pane.clear_views();
+                let method = if id == "device" {
+                    crate::args::CodexLoginMethod::Device
+                } else {
+                    crate::args::CodexLoginMethod::Browser
+                };
+                start_codex_login(app, login_tx, crate::bootstrap::ax_auth_path(), method);
             } else if let Some(auth_type) = surface.strip_prefix("login-provider:") {
                 let Some(provider) = model::provider(&id) else {
                     app.push(TranscriptKind::Error, format!("Unknown provider: {id}"));
@@ -1365,8 +1379,20 @@ pub(super) async fn apply_modal_action(
                 } else {
                     match provider.auth {
                         ProviderAuthKind::CodexOAuth => {
-                            pane.clear_views();
-                            start_codex_login(app, login_tx, crate::bootstrap::ax_auth_path());
+                            pane.push_view(SurfaceView::manager(
+                                "Sign in to Codex",
+                                "codex-login-method",
+                                Vec::new(),
+                                vec![
+                                    item("browser", "Sign in with browser", "local callback"),
+                                    item(
+                                        "device",
+                                        "Sign in with device code",
+                                        "verification link + one-time code",
+                                    ),
+                                ],
+                                "Enter select · Esc back",
+                            ));
                         }
                         ProviderAuthKind::ApiKey if model::provider_supports_oauth(provider.id) => {
                             pane.clear_views();
@@ -1453,6 +1479,9 @@ pub(super) async fn apply_modal_action(
                     login.abort();
                 }
                 if id == "openai-codex" {
+                    if let Some(login) = app.codex_login.take() {
+                        login.abort();
+                    }
                     AuthStorage::new(crate::bootstrap::ax_auth_path()).remove("openai-codex")?;
                     state.invalidate_runtime();
                     app.push(
@@ -1485,47 +1514,45 @@ pub(super) async fn apply_modal_action(
     Ok(())
 }
 
-/// Start AX's self-contained Codex `device-code` login (ported from OpenAI's
-/// open-source `codex-rs/login`, MIT). Runs on a background task so the TUI
+/// Start AX's self-contained Codex login. Runs on a background task so the TUI
 /// stays responsive while the user authorizes in a browser; progress is
 /// reported back through `login_tx` and rendered into the transcript.
 fn start_codex_login(
     app: &mut App,
     login_tx: &mpsc::UnboundedSender<LoginUpdate>,
     auth_path: std::path::PathBuf,
+    method: crate::args::CodexLoginMethod,
 ) {
+    if app
+        .codex_login
+        .as_ref()
+        .is_some_and(|login| !login.is_finished())
+    {
+        app.push(
+            TranscriptKind::Info,
+            "Codex login is already in progress; press Esc to cancel",
+        );
+        return;
+    }
     let tx = login_tx.clone();
-    tokio::spawn(async move {
-        let report = |update: LoginUpdate| {
-            let _ = tx.send(update);
-        };
-        let auth = match model::begin().await {
-            Ok(auth) => auth,
-            Err(error) => {
-                report(LoginUpdate::Failed(error.to_string()));
-                return;
-            }
-        };
-        report(LoginUpdate::Prompt(auth.prompt()));
-        match auth.poll_and_exchange().await {
-            Ok(tokens) => match AuthStorage::new(auth_path).store_oauth(
-                "openai-codex",
-                OAuthCredential {
-                    access: tokens.access_token,
-                    refresh: tokens.refresh_token,
-                    expires: tokens.expires_at,
-                    account_id: tokens.account_id,
-                },
-            ) {
-                Ok(()) => report(LoginUpdate::Success("openai-codex".into())),
-                Err(error) => report(LoginUpdate::Failed(error.to_string())),
+    app.codex_login = Some(tokio::spawn(async move {
+        let result = crate::auth_login::login_codex_credentials(
+            method,
+            |prompt| {
+                let _ = tx.send(LoginUpdate::Prompt(prompt.message));
             },
-            Err(error) => report(LoginUpdate::Failed(error.to_string())),
-        }
-    });
+            auth_path,
+        )
+        .await;
+        let update = match result {
+            Ok(()) => LoginUpdate::Success("openai-codex".into()),
+            Err(error) => LoginUpdate::Failed(error.to_string()),
+        };
+        let _ = tx.send(update);
+    }));
     app.push(
         TranscriptKind::Status,
-        "Starting Codex device-code login — the verification link will appear in the transcript",
+        "Starting Codex login — the authorization link will appear in the transcript; press Esc to cancel",
     );
 }
 

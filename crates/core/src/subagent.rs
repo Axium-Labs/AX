@@ -379,6 +379,7 @@ impl SubagentManager {
             .and_then(|name| self.controller.child_models.get(name))
             .cloned()
             .unwrap_or_else(|| Arc::clone(&self.controller.provider));
+        child.kernel.tools.bind_model(&child.kernel.provider);
         // deepseek-harness's delegation contract: the child's permission scope
         // was fixed at start and can never be widened from inside.
         child.kernel.messages.push(model::Message::system(

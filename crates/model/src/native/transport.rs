@@ -18,7 +18,7 @@ pub(super) async fn success(response: reqwest::Response) -> Result<reqwest::Resp
 
 /// Buffer bytes, not decoded strings: a network chunk may split a UTF-8 code
 /// point. SSE events may contain multiple data lines or use CRLF separators.
-pub(super) async fn sse(
+pub(crate) async fn sse(
     response: reqwest::Response,
     mut event: impl FnMut(Value) -> Result<(), ModelError> + Send,
 ) -> Result<(), ModelError> {

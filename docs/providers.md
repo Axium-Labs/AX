@@ -41,7 +41,7 @@ provider metadata. OpenAI Responses and Codex retain their existing adapter.
 |---|---|---|
 | DeepSeek | Chat Completions | API key (`DEEPSEEK_API_KEY`) |
 | OpenAI | Responses API | API key (`OPENAI_API_KEY`) |
-| OpenAI Codex | ChatGPT Codex Responses | OAuth login (device flow) or legacy `--codex-auth` path |
+| OpenAI Codex | ChatGPT Codex Responses | OAuth login (browser / device code) or legacy `--codex-auth` path |
 | OpenAI-compatible vendors | Chat Completions endpoint from provider metadata | Provider API key (stored or environment variable) |
 
 ## Native and resource-scoped providers
@@ -70,27 +70,23 @@ ids work with `--provider anthropic`, `--provider google`, etc. For Radius with
 no cache, the interactive startup opens discovery/model selection; noninteractive
 use requires an explicit provider and model.
 
-## Native Web Search Capabilities
+## Web Search capabilities
 
-AX's web search tool uses a two-tier routing system that automatically prioritizes
-native search when available. Providers marked with native web search capabilities
-will have their search features used directly, with no additional API keys required.
+All runnable providers use the unified `web(search)` tool. Actual model adapter,
+endpoint and credentials determine native protocol candidates; the first server
+search validates account/model availability. Registry hints and model names are
+not an entitlement guarantee. Compatible gateways default to Remote.
 
-| Provider | Native Search | Notes |
-|----------|---------------|-------|
-| `openai` | ✓ Yes | GPT-4 and GPT-4o models support web access through vision/reasoning |
-| `anthropic` | ✓ Yes | Claude models with native search (version-dependent) |
-| `google` | ✓ Yes | Gemini models include built-in search integration |
-| `google-vertex` | ✓ Yes | Vertex AI Gemini deployments with search |
-| All others | — | Use remote search providers (Brave, Bocha, SearXNG, DuckDuckGo) |
+Native candidates include official OpenAI/Codex/Azure Responses, Anthropic,
+Gemini/Vertex, Moonshot builtin search, OpenRouter native-only search and Groq
+browser search. Z.AI coding, Qwen Token Plan, Bedrock Converse and Mistral Chat
+are distinct from their vendors' other searchable APIs and use Remote. Explicit
+general Z.AI/Model Studio endpoints have documented extensions with source
+validation. Anonymous Exa/Parallel provide Remote for every other usable model.
+No extra search key is needed; model-account inference/search usage may be billed.
 
-When native search is unavailable or fails, AX automatically falls back to remote
-search providers. Users can optionally configure API keys for faster, more reliable
-remote search, but a working search experience is available out-of-the-box with zero
-configuration (using DuckDuckGo fallback).
-
-See [web-search-architecture.md](web-search-architecture.md) for complete details on
-search routing, configuration, and resilience patterns.
+See the exhaustive [provider matrix and official protocol basis](web-search-audit.md#complete-registry-classification),
+[architecture](web-search-architecture.md), and [live test limits](web-search-audit.md#execution-evidence-and-remaining-limits).
 
 Azure resource roots normalize to `/openai/v1/responses`; configured API bases
 and full Responses paths are also accepted. Model identity stays unchanged
@@ -224,9 +220,11 @@ the catalogue subset; absent capabilities do not produce invented UI choices.
 ## Auth flows
 
 - **`/login`** — connect a provider. API key providers open `SecretInput`; the
-  submitted key is stored through `AuthStorage`. Codex OAuth starts a
-  background device-code flow; the UI receives the verification prompt and
-  completion status. After saving an API key, AX invalidates the runtime and
+  submitted key is stored through `AuthStorage`. Codex OAuth offers browser
+  and device-code login before starting a background flow; the UI receives
+  the authorization URL, complete one-time code (device mode only), and
+  completion status. Esc cancels waiting; exiting or logging out also cancels
+  an active Codex login. After saving an API key, AX invalidates the runtime and
   refreshes model catalogs asynchronously. `/login` does not select a model —
   use `/model` afterwards.
 - **`/logout`** — remove the credential AX stores for a selected provider and
@@ -235,11 +233,38 @@ the catalogue subset; absent capabilities do not produce invented UI choices.
 - **Codex OAuth refresh**: `refresh_codex_credential_if_needed` refreshes the
   token before it expires (60s margin) when a Codex session is about to start.
 
+### Codex browser and device-code login
+
+`ax auth login openai-codex` defaults to browser authorization. Explicit choices:
+
+```sh
+ax auth login openai-codex --method browser
+ax auth login openai-codex --method device
+```
+
+Browser mode prints an authorization URL to open/copy and uses PKCE S256 plus
+a random state. AX listens only on `127.0.0.1:1455` (registered fallback `1457`)
+at `/auth/callback`, checks the state before exchanging the code, and releases
+the listener on completion/cancellation. Both modes expire after 15 minutes.
+If callback ports are occupied or the browser cannot reach the local callback,
+choose device mode. Device login can require enabling device-code authorization
+in ChatGPT account/workspace settings; see [OpenAI authentication documentation](https://learn.chatgpt.com/docs/auth).
+Both modes save provider-scoped credentials in AX's auth store and leave Codex's
+credential cache untouched.
+
+`--json` emits one JSON progress object per stderr line for desktop callers:
+`type` (`prompt`/`notice`), `message`, `url` (string/null), `code` (string/null).
+The device code is copied verbatim from the auth response; consumers must not
+assume its length or punctuation. Browser prompts have no device code. Process
+exit determines completion; errors remain diagnostic stderr lines. Tokens and
+PKCE verifiers are never emitted. WorkBuddy also accepts `--json`; `--method`
+is specific to Codex, while `--region` remains specific to WorkBuddy.
+
 ## Reference
 
 | Concern | Code |
 |---|---|
-| Provider abstraction, providers | `crates/model/src/lib.rs`, `crates/model/src/providers.rs`, `adapter.rs`, `native/`, `openai_compatible.rs`, `openai.rs`, `codex_device.rs` |
+| Provider abstraction, providers | `crates/model/src/lib.rs`, `crates/model/src/providers.rs`, `adapter.rs`, `native/`, `openai_compatible.rs`, `openai.rs`, `codex_device.rs`, `codex_browser.rs` |
 | Auth storage | `crates/model/src/auth.rs` |
 | Model catalog | `crates/model/src/registry.rs` |
 | User config | `crates/cli/src/config.rs` |
@@ -351,8 +376,9 @@ prompt. Only AX supplies conversation context and tool schemas.
 ACP catalogs include `auth_kind` (`api_key`, `oauth`, or `ambient`). Crew separates
 account sign-in from API keys and environment credentials, and rejects saving
 an API key for OAuth providers. `ax auth login openai-codex` also exposes AX's
-existing device-code flow to the desktop. Crew runs AX's login command, displays
-the URL and device code, and only opens the system browser after a user click.
+browser and device-code flows to the desktop. Crew lets the user choose a method,
+runs AX's login command with `--method` and `--json`, displays the URL and complete
+device code when applicable, and only opens the system browser after a user click.
 Closing the authorization dialog cancels the login process. AX remains the
 sole owner of token exchange, credential persistence and model discovery.
 

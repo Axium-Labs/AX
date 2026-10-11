@@ -17,6 +17,140 @@ fn base(provider: &NativeProvider) -> String {
         .trim_end_matches('/')
         .to_owned()
 }
+
+pub(super) fn search_supported(provider: &NativeProvider) -> bool {
+    crate::search::official_endpoint(&base(provider), "api.anthropic.com")
+        && reqwest::Url::parse(&base(provider)).is_ok_and(|u| matches!(u.path(), "" | "/" | "/v1"))
+        && provider
+            .config
+            .api_key
+            .as_ref()
+            .is_some_and(|k| !k.trim().is_empty())
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "One bounded server stream accumulates tool arguments, citations and terminal evidence"
+)]
+pub(super) async fn search(
+    provider: &NativeProvider,
+    query: &str,
+) -> Result<crate::search::SearchResponse, ModelError> {
+    let base = base(provider);
+    let endpoint = if base.ends_with("/v1") {
+        format!("{base}/messages")
+    } else {
+        format!("{base}/v1/messages")
+    };
+    let body = json!({"model":provider.model_id(),"max_tokens":2048,"stream":true,
+        "messages":[{"role":"user","content":crate::search::prompt(query)}],
+        "tools":[{"type":"web_search_20250305","name":"web_search","max_uses":1}],
+        "tool_choice":{"type":"tool","name":"web_search"}});
+    let http = authenticated(provider, provider.client.post(endpoint))?
+        .json(&body)
+        .send()
+        .await?;
+    let mut blocks = BTreeMap::<usize, Value>::new();
+    let mut stop = None;
+    let mut usage = json!({});
+    let mut finished = false;
+    crate::search::stream(http, |event| {
+        match event["type"].as_str() {
+            Some("message_start") => usage = event["message"]["usage"].clone(),
+            Some("content_block_start") => {
+                blocks.insert(
+                    super::index(&event, "index")?,
+                    event["content_block"].clone(),
+                );
+            }
+            Some("content_block_delta") => {
+                let block = blocks
+                    .get_mut(&super::index(&event, "index")?)
+                    .ok_or_else(|| {
+                        ModelError::InvalidResponse("search delta without block".into())
+                    })?;
+                let delta = &event["delta"];
+                if delta["type"] == "text_delta" {
+                    let text = format!(
+                        "{}{}",
+                        block["text"].as_str().unwrap_or_default(),
+                        delta["text"].as_str().unwrap_or_default()
+                    );
+                    block["text"] = json!(text);
+                } else if delta["type"] == "citations_delta" {
+                    if !block["citations"].is_array() {
+                        block["citations"] = json!([]);
+                    }
+                    block["citations"]
+                        .as_array_mut()
+                        .unwrap()
+                        .push(delta["citation"].clone());
+                } else if delta["type"] == "input_json_delta" {
+                    block["partial_json"] = json!(format!(
+                        "{}{}",
+                        block["partial_json"].as_str().unwrap_or_default(),
+                        delta["partial_json"].as_str().unwrap_or_default()
+                    ));
+                }
+            }
+            Some("content_block_stop") => {
+                if let Some(block) = blocks.get_mut(&super::index(&event, "index")?)
+                    && let Some(partial) = block["partial_json"].as_str()
+                {
+                    block["input"] = serde_json::from_str(partial).map_err(|_| {
+                        ModelError::InvalidResponse("invalid server tool arguments".into())
+                    })?;
+                    block.as_object_mut().unwrap().remove("partial_json");
+                }
+            }
+            Some("message_delta") => {
+                stop = event["delta"]["stop_reason"].as_str().map(str::to_owned);
+                usage["output"] = event["usage"].clone();
+            }
+            Some("message_stop") => finished = true,
+            _ => {}
+        }
+        Ok(())
+    })
+    .await?;
+    if !finished || stop.as_deref() != Some("end_turn") {
+        return Err(ModelError::InvalidResponse(
+            "native Messages search incomplete or paused".into(),
+        ));
+    }
+    let content = blocks.into_values().collect::<Vec<_>>();
+    let mut sources = vec![];
+    let mut answer = String::new();
+    let mut executed = false;
+    for block in &content {
+        if block["type"] == "text" {
+            answer.push_str(block["text"].as_str().unwrap_or_default());
+        }
+        if block["type"] == "web_search_tool_result" {
+            let entries = block["content"].as_array().ok_or_else(|| {
+                ModelError::InvalidResponse("server web search returned tool error".into())
+            })?;
+            executed = true;
+            sources.extend(entries.iter().filter_map(|s| {
+                crate::search::source(
+                    s,
+                    s["url"].as_str()?,
+                    s["title"].as_str().unwrap_or_default(),
+                )
+            }));
+        }
+    }
+    if !executed {
+        return Err(ModelError::InvalidResponse(
+            "no server web search executed".into(),
+        ));
+    }
+    crate::search::validated(crate::search::SearchResponse {
+        answer,
+        sources,
+        evidence: json!({"content":content,"usage":usage}),
+    })
+}
 fn authenticated(
     provider: &NativeProvider,
     request: reqwest::RequestBuilder,

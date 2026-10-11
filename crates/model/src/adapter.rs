@@ -9,7 +9,14 @@ use std::sync::Arc;
 /// # Errors
 /// Returns an actionable error for missing endpoint/key configuration.
 pub fn provider_adapter(config: NativeConfig) -> Result<Arc<dyn ModelProvider>, ModelError> {
-    provider_adapter_with_client(config, reqwest::Client::new())
+    provider_adapter_with_client(
+        config,
+        reqwest::Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(5))
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .map_err(|_| ModelError::Configuration("cannot create model HTTP transport".into()))?,
+    )
 }
 
 /// Construct an adapter using an explicit HTTP transport.

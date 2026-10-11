@@ -12,6 +12,9 @@ use crate::{
     ReasoningEffort, ToolCall, ToolSpec, stats,
 };
 
+#[path = "search/compatible.rs"]
+mod native_search;
+
 #[derive(Clone, Debug)]
 pub struct OpenAiCompatibleConfig {
     pub provider_id: String,
@@ -58,9 +61,16 @@ impl OpenAiCompatibleProvider {
     }
 
     #[must_use]
+    /// # Panics
+    ///
+    /// Panics if the system TLS/proxy configuration cannot build an HTTP client.
     pub fn new(config: OpenAiCompatibleConfig) -> Self {
         Self {
-            client: reqwest::Client::new(),
+            client: reqwest::Client::builder()
+                .connect_timeout(Duration::from_secs(5))
+                .redirect(reqwest::redirect::Policy::none())
+                .build()
+                .expect("HTTP client configuration"),
             config,
         }
     }
@@ -371,6 +381,19 @@ struct PartialToolCall {
 
 #[async_trait]
 impl ModelProvider for OpenAiCompatibleProvider {
+    fn native_search_protocol(&self) -> Option<crate::search::SearchProtocol> {
+        native_search::protocol(&self.config)
+    }
+
+    async fn native_search(
+        &self,
+        query: &str,
+    ) -> Result<crate::search::SearchResponse, ModelError> {
+        let protocol = self.native_search_protocol().ok_or_else(|| {
+            ModelError::Configuration("no native search protocol for this endpoint".into())
+        })?;
+        self.native_search_inner(query, protocol).await
+    }
     fn name(&self) -> &str {
         &self.config.provider_id
     }

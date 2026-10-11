@@ -1,5 +1,8 @@
 //! Browser login composed with AX's existing provider credential/catalog stores.
-use crate::args::{AuthCommand, WorkBuddyLoginRegion};
+#[cfg(test)]
+#[path = "../../../test/providers/codex_login_cli.rs"]
+mod codex_tests;
+use crate::args::{AuthCommand, CodexLoginMethod, WorkBuddyLoginRegion};
 use anyhow::{Result, anyhow};
 use model::workbuddy::WorkBuddyRegion;
 
@@ -80,30 +83,83 @@ pub(crate) async fn run(command: &AuthCommand) -> Result<()> {
             );
             Ok(())
         }
-        AuthCommand::Login { provider, region } => {
+        AuthCommand::Login {
+            provider,
+            region,
+            method,
+            json,
+        } => {
             if provider == "openai-codex" {
                 if region.is_some() {
                     return Err(anyhow!("--region only applies to WorkBuddy"));
                 }
                 return tokio::select! {
-                    result=login_codex()=>result,
+                    result=login_codex(method.unwrap_or_default(), *json)=>result,
                     result=tokio::signal::ctrl_c()=>{result?;Err(anyhow!("Codex login cancelled"))}
                 };
             }
+            if method.is_some() {
+                return Err(anyhow!("--method only applies to openai-codex"));
+            }
             let selected = selected_region(provider, *region)?;
             tokio::select! {
-                result=login_workbuddy(|text|eprintln!("{text}"), true, selected)=>result,
+                result=login_workbuddy(|text|report_progress(text, *json), true, selected)=>result,
                 result=tokio::signal::ctrl_c()=> {result?; Err(anyhow!("{} login cancelled", selected.label()))}
             }
         }
     }
 }
 
-async fn login_codex() -> Result<()> {
-    let auth = model::begin().await?;
-    eprintln!("{}", auth.prompt());
-    let tokens = auth.poll_and_exchange().await?;
-    model::AuthStorage::new(crate::bootstrap::ax_auth_path()).store_oauth(
+#[derive(serde::Serialize)]
+pub(crate) struct LoginPrompt {
+    pub message: String,
+    pub url: String,
+    pub code: Option<String>,
+}
+
+fn report_progress(message: &str, json: bool) {
+    if json {
+        let url = message
+            .split_whitespace()
+            .find(|part| part.starts_with("https://"));
+        eprintln!(
+            "{}",
+            serde_json::json!({"type":"notice", "message":message, "url":url, "code":null})
+        );
+    } else {
+        eprintln!("{message}");
+    }
+}
+
+pub(crate) async fn login_codex_credentials(
+    method: CodexLoginMethod,
+    report: impl Fn(LoginPrompt),
+    auth_path: std::path::PathBuf,
+) -> Result<()> {
+    let tokens = match method {
+        CodexLoginMethod::Browser => {
+            let login = model::codex_browser::BrowserLogin::begin().await?;
+            report(LoginPrompt {
+                message: format!(
+                    "Open or copy this URL to sign in to Codex (15 minute timeout):\n{}",
+                    login.auth_url
+                ),
+                url: login.auth_url.clone(),
+                code: None,
+            });
+            login.wait().await?
+        }
+        CodexLoginMethod::Device => {
+            let auth = model::begin().await?;
+            report(LoginPrompt {
+                message: auth.prompt(),
+                url: auth.verification_url.clone(),
+                code: Some(auth.user_code.clone()),
+            });
+            auth.poll_and_exchange().await?
+        }
+    };
+    model::AuthStorage::new(auth_path).store_oauth(
         "openai-codex",
         model::OAuthCredential {
             access: tokens.access_token,
@@ -112,7 +168,18 @@ async fn login_codex() -> Result<()> {
             account_id: tokens.account_id,
         },
     )?;
-    eprintln!("Codex credentials saved; discovering models…");
+    Ok(())
+}
+
+async fn login_codex(method: CodexLoginMethod, json: bool) -> Result<()> {
+    login_codex_credentials(method, |prompt| {
+        if json {
+            eprintln!("{}", serde_json::json!({"type":"prompt", "message":prompt.message, "url":prompt.url, "code":prompt.code}));
+        } else {
+            eprintln!("{}", prompt.message);
+        }
+    }, crate::bootstrap::ax_auth_path()).await?;
+    report_progress("Codex credentials saved; discovering models…", json);
     if let Some(catalog) = crate::tui::catalog_refresh::refresh_provider(
         &std::path::PathBuf::new(),
         None,
@@ -121,7 +188,7 @@ async fn login_codex() -> Result<()> {
     .await
         && let Some(warning) = catalog.warning
     {
-        eprintln!("Model discovery: {warning}");
+        report_progress(&format!("Model discovery: {warning}"), json);
     }
     Ok(())
 }
@@ -168,7 +235,10 @@ mod tests {
             }
             let cli = crate::args::Cli::try_parse_from(args).unwrap();
             let Some(crate::args::Command::Auth {
-                command: AuthCommand::Login { provider, region },
+                command:
+                    AuthCommand::Login {
+                        provider, region, ..
+                    },
             }) = cli.command
             else {
                 panic!("missing login command")

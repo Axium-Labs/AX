@@ -103,3 +103,5 @@ disappear.
 - Record decisions with lasting consequences as ADRs — see
   [adr/README.md](adr/README.md).
 - Update this map when adding or renaming a document.
+
+- [Web Search audit](web-search-audit.md) — complete provider capability matrix, production path, live evidence and remaining limits.

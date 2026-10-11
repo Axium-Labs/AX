@@ -24,6 +24,7 @@ impl AgentKernel {
     ) -> Self {
         let result_reader = tool::ResultReader::default();
         tool::kernel_baseline(&mut tools, provider.capabilities().vision);
+        tools.bind_model(&provider);
         // The kernel binds its own reader so children can rebind it.
         tools.register(result_reader.clone());
         Self {
@@ -117,6 +118,7 @@ impl AgentKernel {
     /// Register or replace a tool before the next turn.
     pub fn register_tool(&mut self, tool: impl tool::Tool + 'static) {
         let tool: Arc<dyn tool::Tool> = Arc::new(tool);
+        let tool = tool.bind_model(self.provider.clone()).unwrap_or(tool);
         self.tools.register_arc(self.extension.as_ref().map_or_else(
             || tool.clone(),
             |extension| extension.wrap_tool(tool.clone()),

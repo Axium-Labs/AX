@@ -19,9 +19,9 @@ mod search;
 pub use find::FindFilesTool;
 mod web;
 pub use web::{
-    BochaSearch, BraveSearch, DuckDuckGoSearch, FetchError, FetchErrorKind, MAX_FETCH_URLS,
-    MAX_PAGE_CHARS, MAX_QUERIES, MAX_TOTAL_CHARS, ProviderStats, ProviderTimeout, SearchCandidate,
-    SearchConfig, SearchProvider, SearchResult, SearchRouter, SearxngSearch, WebTool,
+    BochaSearch, BraveSearch, FetchError, FetchErrorKind, MAX_FETCH_URLS, MAX_PAGE_CHARS,
+    MAX_QUERIES, MAX_TOTAL_CHARS, ProviderStats, ProviderTimeout, SearchCandidate, SearchConfig,
+    SearchProvider, SearchResult, SearchRouter, WebTool,
 };
 mod view_image;
 pub use patch::PatchTool;
@@ -79,6 +79,11 @@ pub enum ToolError {
     InvalidInput(String),
     #[error("tool execution failed: {0}")]
     Execution(String),
+    #[error("search backend HTTP {status}")]
+    SearchHttp {
+        status: u16,
+        retry_after: Option<std::time::Duration>,
+    },
     #[error("web fetch failed for every url: {}", serde_json::to_string(.0).unwrap_or_default())]
     WebFetch(Vec<FetchError>),
     #[error("permission denied for tool: {0}")]
@@ -111,6 +116,10 @@ pub enum InheritanceClass {
 
 #[async_trait]
 pub trait Tool: Send + Sync {
+    /// Bind model-owned capabilities after provider selection, including child overrides.
+    fn bind_model(&self, _provider: Arc<dyn model::ModelProvider>) -> Option<Arc<dyn Tool>> {
+        None
+    }
     fn inheritance_class(&self) -> InheritanceClass {
         InheritanceClass::Tools
     }
@@ -318,6 +327,14 @@ impl ToolRegistry {
 
     pub fn remove(&mut self, name: &str) {
         self.tools.remove(name);
+    }
+
+    pub fn bind_model(&mut self, provider: &Arc<dyn model::ModelProvider>) {
+        for tool in self.tools.values_mut() {
+            if let Some(bound) = tool.bind_model(provider.clone()) {
+                *tool = bound;
+            }
+        }
     }
 
     pub fn iter(&self) -> impl Iterator<Item = &Arc<dyn Tool>> {

@@ -106,12 +106,14 @@ starts and cannot override an explicit Deny. The `telemetry` submodule
 provides in-process, no-sensitive-data latency metrics (`Timer`/`snapshot`)
 for the `/status` panel.
 
-Web search is query concurrency → a lazy reusable `SearchRouter` → independently
-bounded Bocha/Brave/SearXNG adapters and the final keyless DuckDuckGo fallback.
-The router owns latency/failure history, temporary circuits, bounded hedging and
-cancellation; protocol adapters only normalize responses. Search has separate
-transport timeout configuration; known-URL fetch keeps its existing semantics.
-See [tools.md](tools.md#web).
+Web search binds the selected model adapter into WebTool at kernel construction,
+registered tool insertion and child model override. Query concurrency enters
+NativeFirst, executing actual server search protocols before the shared remote
+SearchRouter. Anonymous Exa/Parallel MCP provide normal fallback, with independent
+health, latency, cooldown, bounded hedging and cancellation. Search outputs keep
+source/citation evidence for subsequent Agent generation. Known-URL fetch keeps
+its separate transport/permission semantics. See [tools.md](tools.md#web) and
+[complete provider/execution audit](web-search-audit.md).
 
 ### `runtime-core`
 

@@ -16,9 +16,9 @@ use serde_json::Value;
 use crate::ModelError;
 use crate::OAuthCredential;
 
-const ISSUER: &str = "https://auth.openai.com";
+pub(crate) const ISSUER: &str = "https://auth.openai.com";
 /// Codex's public OAuth client id (from `codex-rs/login/src/auth/manager.rs`).
-const CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
+pub(crate) const CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 const REDIRECT_URI: &str = "https://auth.openai.com/deviceauth/callback";
 /// Poll for at most 15 minutes, matching the device code expiry.
 const MAX_POLL: Duration = Duration::from_secs(15 * 60);
@@ -88,12 +88,30 @@ struct CodeSuccessResp {
 
 #[derive(Deserialize)]
 #[allow(clippy::struct_field_names)]
-struct TokenResp {
+pub(crate) struct TokenResp {
     access_token: String,
     refresh_token: Option<String>,
     id_token: String,
     #[serde(default = "default_expires_in")]
     expires_in: u64,
+}
+
+impl TokenResp {
+    pub(crate) fn into_tokens(self) -> DeviceTokens {
+        let account_id = account_id_from_token(&self.access_token)
+            .or_else(|| account_id_from_token(&self.id_token));
+        DeviceTokens {
+            id_token: self.id_token,
+            access_token: self.access_token,
+            refresh_token: self.refresh_token.unwrap_or_default(),
+            account_id,
+            expires_at: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs()
+                .saturating_add(self.expires_in),
+        }
+    }
 }
 
 const fn default_expires_in() -> u64 {
@@ -258,21 +276,7 @@ impl DeviceAuth {
             )));
         }
         let tokens: TokenResp = response.json().await?;
-        // Pi and Codex read the namespaced account claim from the access token.
-        // Keep the id-token fallback for older auth-server responses.
-        let account_id = account_id_from_token(&tokens.access_token)
-            .or_else(|| account_id_from_token(&tokens.id_token));
-        Ok(DeviceTokens {
-            id_token: tokens.id_token,
-            access_token: tokens.access_token,
-            refresh_token: tokens.refresh_token.unwrap_or_default(),
-            account_id,
-            expires_at: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs()
-                .saturating_add(tokens.expires_in),
-        })
+        Ok(tokens.into_tokens())
     }
 }
 

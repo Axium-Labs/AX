@@ -8,6 +8,7 @@ pub use retry::{ErrorClass, RetryPolicy};
 pub const DEFAULT_OUTPUT_RESERVE_TOKENS: usize = 8_000;
 mod adapter;
 mod auth;
+pub mod codex_browser;
 mod codex_device;
 mod hedge;
 mod native;
@@ -15,6 +16,7 @@ mod openai;
 mod openai_compatible;
 mod providers;
 mod registry;
+pub mod search;
 pub mod stats;
 pub mod workbuddy;
 
@@ -37,9 +39,9 @@ pub type DeepSeekConfig = OpenAiCompatibleConfig;
 pub type DeepSeekProvider = OpenAiCompatibleProvider;
 pub use openai::{FALLBACK_MODEL as OPENAI_FALLBACK_MODEL, OpenAiConfig, OpenAiProvider};
 pub use providers::{
-    PROVIDERS, ProviderAuthKind, ProviderProtocol, ProviderSpec, SearchCapability, builtin_models, provider,
-    provider_base_url, provider_chat_endpoint, provider_configuration_reason, provider_supported,
-    provider_supports_oauth, provider_unsupported_reason,
+    PROVIDERS, ProviderAuthKind, ProviderProtocol, ProviderSpec, SearchCapability, builtin_models,
+    provider, provider_base_url, provider_chat_endpoint, provider_configuration_reason,
+    provider_supported, provider_supports_oauth, provider_unsupported_reason,
 };
 pub use registry::{CatalogSource, ModelCatalog, ModelRegistry};
 
@@ -277,6 +279,16 @@ impl Default for ModelResponse {
 
 #[async_trait]
 pub trait ModelProvider: Send + Sync {
+    /// A protocol candidate, not a promise of model/account entitlement.
+    fn native_search_protocol(&self) -> Option<search::SearchProtocol> {
+        None
+    }
+    /// Execute the provider's server tool. Unsupported adapters use Remote Search.
+    async fn native_search(&self, _query: &str) -> Result<search::SearchResponse, ModelError> {
+        Err(ModelError::Configuration(
+            "native search is unavailable on this adapter".into(),
+        ))
+    }
     fn name(&self) -> &str;
     fn model_id(&self) -> &str;
     fn context_window(&self) -> usize;
@@ -342,3 +354,7 @@ mod multimodal_tests {
         assert_eq!(restored.content, "image.png");
     }
 }
+
+#[cfg(test)]
+#[path = "../../../test/web/http.rs"]
+pub(crate) mod search_test_http;

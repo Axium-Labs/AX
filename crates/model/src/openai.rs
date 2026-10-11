@@ -18,6 +18,9 @@ use crate::{
 };
 
 const API_ENDPOINT: &str = "https://api.openai.com/v1/responses";
+#[cfg(test)]
+#[path = "../../../test/web/openai_search.rs"]
+mod search_tests;
 const CODEX_ENDPOINT: &str = "https://chatgpt.com/backend-api/codex/responses";
 pub const FALLBACK_MODEL: &str = "gpt-5.6-sol";
 
@@ -180,9 +183,18 @@ pub struct OpenAiProvider {
 }
 
 impl OpenAiProvider {
+    /// # Panics
+    /// Panics if the platform cannot initialize its HTTP/TLS transport.
     #[must_use]
     pub fn new(config: OpenAiConfig) -> Self {
-        Self::with_client(config, reqwest::Client::new())
+        Self::with_client(
+            config,
+            reqwest::Client::builder()
+                .connect_timeout(std::time::Duration::from_secs(5))
+                .redirect(reqwest::redirect::Policy::none())
+                .build()
+                .expect("valid model transport"),
+        )
     }
 
     #[must_use]
@@ -190,8 +202,8 @@ impl OpenAiProvider {
         Self { client, config }
     }
 
-    fn auth_headers(&self) -> Result<HeaderMap, ModelError> {
-        let credentials = match &self.config.credentials {
+    fn resolved_credentials(&self) -> Result<ResolvedCredentials, ModelError> {
+        Ok(match &self.config.credentials {
             CredentialSource::ApiKey(key) => ResolvedCredentials {
                 token: key.clone(),
                 account_id: None,
@@ -203,7 +215,11 @@ impl OpenAiProvider {
                 account_id: account_id.clone(),
                 api_key: false,
             },
-        };
+        })
+    }
+
+    fn auth_headers(&self) -> Result<HeaderMap, ModelError> {
+        let credentials = self.resolved_credentials()?;
         let mut headers = HeaderMap::new();
         if self.config.provider_id == "azure-openai-responses" {
             headers.insert(
@@ -298,6 +314,49 @@ struct ResponsesResponse {
 
 #[async_trait]
 impl ModelProvider for OpenAiProvider {
+    fn native_search_protocol(&self) -> Option<crate::search::SearchProtocol> {
+        let endpoint = &self.config.endpoint;
+        let credentials = self.resolved_credentials().ok()?;
+        if credentials.token.trim().is_empty() {
+            return None;
+        }
+        let api_key = credentials.api_key;
+        let oauth = !api_key;
+        let official = (api_key
+            && crate::search::official_endpoint(endpoint, "api.openai.com")
+            && reqwest::Url::parse(endpoint).is_ok_and(|u| u.path() == "/v1/responses"))
+            || (self.config.is_codex
+                && oauth
+                && crate::search::official_endpoint(endpoint, "chatgpt.com")
+                && reqwest::Url::parse(endpoint)
+                    .is_ok_and(|u| u.path() == "/backend-api/codex/responses"));
+        let azure = api_key
+            && self.name() == "azure-openai-responses"
+            && reqwest::Url::parse(endpoint).is_ok_and(|u| {
+                u.scheme() == "https"
+                    && u.host_str().is_some_and(|h| {
+                        h.ends_with(".openai.azure.com")
+                            || h.ends_with(".cognitiveservices.azure.com")
+                    })
+                    && u.port_or_known_default() == Some(443)
+                    && u.path() == "/openai/v1/responses"
+                    && u.username().is_empty()
+                    && u.password().is_none()
+            });
+        (official || azure).then_some(crate::search::SearchProtocol::OpenAiResponses)
+    }
+    async fn native_search(
+        &self,
+        query: &str,
+    ) -> Result<crate::search::SearchResponse, ModelError> {
+        if self.native_search_protocol().is_none() {
+            return Err(ModelError::Configuration(
+                "Responses gateway has no verified web search contract".into(),
+            ));
+        }
+        self.native_search_inner(query).await
+    }
+
     fn capabilities(&self) -> crate::ModelCapabilities {
         crate::ModelCapabilities {
             vision: self.config.model.starts_with("gpt-4o")
@@ -406,6 +465,56 @@ impl ModelProvider for OpenAiProvider {
 }
 
 impl OpenAiProvider {
+    async fn native_search_inner(
+        &self,
+        query: &str,
+    ) -> Result<crate::search::SearchResponse, ModelError> {
+        let mut payload = json!({
+            "model":self.config.request_model.as_deref().unwrap_or(&self.config.model),
+            "input":[{"role":"user","content":[{"type":"input_text","text":crate::search::prompt(query)}]}],
+            "tools":[{"type":"web_search"}], "tool_choice":"required",
+            "include":["web_search_call.action.sources"], "stream":true, "store":false,
+            "max_output_tokens":2048, "max_tool_calls":1,
+        });
+        if self.config.is_codex && !self.resolved_credentials()?.api_key {
+            payload["instructions"] = json!("Research using web search and cite sources.");
+            // The subscription endpoint exposes the preview server tool.
+            payload["tools"] = json!([{"type":"web_search_preview"}]);
+            payload["tool_choice"] = json!("auto");
+            // The subscription transport does not advertise these API controls.
+            payload.as_object_mut().unwrap().remove("max_output_tokens");
+            payload.as_object_mut().unwrap().remove("max_tool_calls");
+        }
+        let response = self
+            .client
+            .post(&self.config.endpoint)
+            .headers(self.auth_headers()?)
+            .header("originator", "ax")
+            .json(&payload)
+            .send()
+            .await?;
+        let mut completed = None;
+        crate::search::stream(response, |event| {
+            if event["type"] == "response.completed" {
+                completed = Some(event["response"].clone());
+            }
+            if matches!(
+                event["type"].as_str(),
+                Some("response.failed" | "response.incomplete")
+            ) {
+                return Err(ModelError::InvalidResponse(
+                    "native search stream failed".into(),
+                ));
+            }
+            Ok(())
+        })
+        .await?;
+        crate::search::openai(
+            &completed.ok_or_else(|| {
+                ModelError::InvalidResponse("truncated native search stream".into())
+            })?,
+        )
+    }
     async fn complete_inner(&self, request: ModelRequest) -> Result<ModelResponse, ModelError> {
         let payload = ResponsesRequest {
             model: self

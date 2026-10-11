@@ -4,7 +4,10 @@ mod anthropic;
 mod bedrock;
 mod google;
 mod radius;
-mod transport;
+#[cfg(test)]
+#[path = "../../../../test/web/native_search.rs"]
+mod search_tests;
+pub(crate) mod transport;
 
 use crate::{
     ModelCapabilities, ModelError, ModelInfo, ModelProvider, ModelRequest, ModelResponse,
@@ -67,7 +70,16 @@ impl NativeProvider {
     /// # Errors
     /// Returns a configuration error for unknown providers or invalid URLs.
     pub fn new(config: NativeConfig) -> Result<Self, ModelError> {
-        Self::with_client(config, reqwest::Client::new())
+        Self::with_client(
+            config,
+            reqwest::Client::builder()
+                .connect_timeout(std::time::Duration::from_secs(5))
+                .redirect(reqwest::redirect::Policy::none())
+                .build()
+                .map_err(|_| {
+                    ModelError::Configuration("cannot create model HTTP transport".into())
+                })?,
+        )
     }
 
     /// Use an explicitly configured HTTP transport (including proxy policy).
@@ -133,6 +145,32 @@ impl NativeProvider {
 
 #[async_trait]
 impl ModelProvider for NativeProvider {
+    fn native_search_protocol(&self) -> Option<crate::search::SearchProtocol> {
+        match self.name() {
+            "anthropic" if anthropic::search_supported(self) => {
+                Some(crate::search::SearchProtocol::AnthropicMessages)
+            }
+            "google" | "google-vertex" if google::search_supported(self) => {
+                Some(crate::search::SearchProtocol::GoogleGrounding)
+            }
+            _ => None,
+        }
+    }
+    async fn native_search(
+        &self,
+        query: &str,
+    ) -> Result<crate::search::SearchResponse, ModelError> {
+        if self.native_search_protocol().is_none() {
+            return Err(ModelError::Configuration(
+                "this endpoint has no verified native search protocol".into(),
+            ));
+        }
+        match self.name() {
+            "anthropic" => anthropic::search(self, query).await,
+            "google" | "google-vertex" => google::search(self, query).await,
+            _ => unreachable!(),
+        }
+    }
     fn name(&self) -> &str {
         &self.config.provider_id
     }

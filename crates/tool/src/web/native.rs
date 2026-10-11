@@ -1,197 +1,189 @@
-#![allow(dead_code)] // Native search adapters are integrated progressively
-
-//! Native Web Search capability detection and protocol adapters.
-//!
-//! This module detects which models have native web search capabilities
-//! and routes search requests through the appropriate native provider when available.
-//!
-//! Native search is attempted first; if unavailable or fails, the remote search
-//! tier automatically takes over.
-
-use super::{SearchResult, ToolError};
+//! Sequential native-first routing bound to the selected model adapter.
+use super::{SearchProvider, SearchResult, ToolError, telemetry};
 use async_trait::async_trait;
+use std::{
+    sync::{Arc, Mutex},
+    time::{Duration, Instant},
+};
 
-/// Declares which providers support native web search capabilities.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum NativeSearchCapability {
-    /// OpenAI GPT models with web browsing (via extended thinking or vision)
-    OpenAi,
-    /// Anthropic Claude models (some versions have native search)
-    Anthropic,
-    /// Google Gemini with search-capable models
-    GoogleGemini,
-    /// None: requires remote search
-    None,
+#[derive(Default)]
+struct Health {
+    verified: bool,
+    unsupported: bool,
+    failures: u32,
+    open_until: Option<Instant>,
 }
-
-impl NativeSearchCapability {
-    /// Detect native search capability based on provider and model ID.
-    pub fn detect(provider_id: &str, model_id: &str) -> Self {
-        match provider_id {
-            "openai" | "openai-codex" | "azure-openai-responses" => {
-                // GPT-4 and GPT-4o models may have web browsing capability
-                // This is detected at request time based on model features
-                Self::OpenAi
+#[derive(Default)]
+pub(super) struct NativeState {
+    health: Mutex<Health>,
+    probe: tokio::sync::Mutex<()>,
+}
+pub(super) struct NativeFirst {
+    pub model: Option<Arc<dyn model::ModelProvider>>,
+    pub remote: Arc<dyn SearchProvider>,
+    pub state: Arc<NativeState>,
+    pub native_timeout: Duration,
+    pub task_timeout: Duration,
+}
+impl NativeFirst {
+    fn eligible(&self) -> bool {
+        let state = self
+            .state
+            .health
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        !state.unsupported && state.open_until.is_none_or(|until| until <= Instant::now())
+    }
+    #[allow(
+        clippy::too_many_lines,
+        reason = "One native entitlement attempt and its remote fallback share a task budget"
+    )]
+    async fn run(&self, query: &str, limit: usize) -> Result<Vec<SearchResult>, ToolError> {
+        let mut native_error = None;
+        if let Some(provider) = &self.model
+            && let Some(protocol) = provider.native_search_protocol()
+        {
+            let verified = self
+                .state
+                .health
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .verified;
+            // Serialize initial entitlement probes. Distinct searches can run
+            // concurrently once this concrete account/model has succeeded.
+            let mut probe = if verified {
+                None
+            } else {
+                Some(self.state.probe.lock().await)
+            };
+            if self
+                .state
+                .health
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .verified
+            {
+                probe.take();
             }
-            "anthropic" => {
-                // Claude models with native search (if configured server-side)
-                Self::Anthropic
-            }
-            "google" | "google-vertex" => {
-                // Gemini models may have search enabled
-                if model_id.contains("gemini") {
-                    Self::GoogleGemini
-                } else {
-                    Self::None
+            if self.eligible() {
+                let _timer = telemetry::Timer::new("web.search.native");
+                let outcome = tokio::time::timeout(
+                    self.native_timeout.min(self.task_timeout / 2),
+                    provider.native_search(query),
+                )
+                .await;
+                match outcome {
+                    Ok(Ok(response))
+                        if !response.sources.is_empty()
+                            && response.sources.iter().all(|s| {
+                                reqwest::Url::parse(&s.url)
+                                    .is_ok_and(|u| matches!(u.scheme(), "http" | "https"))
+                            }) =>
+                    {
+                        {
+                            let mut state = self
+                                .state
+                                .health
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner);
+                            state.verified = true;
+                            state.failures = 0;
+                            state.open_until = None;
+                        }
+                        telemetry::increment("web.search.native.success");
+                        let citations = serde_json::to_value(&response.sources).unwrap_or_default();
+                        let mut results = response
+                            .sources
+                            .into_iter()
+                            .enumerate()
+                            .map(|(index, s)| {
+                                // Keep the full answer once in evidence rather than
+                                // multiplying its tokens by the number of sources.
+                                let snippet = if index == 0 {
+                                    response.answer.as_str()
+                                } else {
+                                    s.citation["cited_text"].as_str().unwrap_or_default()
+                                };
+                                let mut result = SearchResult::new(
+                                    s.title,
+                                    s.url,
+                                    snippet.chars().take(2000).collect::<String>(),
+                                    format!("native:{}", provider.name()),
+                                );
+                                result.evidence.push(
+                                    serde_json::json!({"citation":s.citation,"protocol":protocol}),
+                                );
+                                result
+                            })
+                            .collect::<Vec<_>>();
+                        // Never discard platform citation offsets/suggestions,
+                        // server tool results or usage when normalizing URLs.
+                        results[0].evidence.push(serde_json::json!({"native_answer":response.answer,"provider_evidence":response.evidence,"sources":citations}));
+                        return Ok(results);
+                    }
+                    other => {
+                        let (status, retry_after) = match &other {
+                            Ok(Err(model::ModelError::HttpResponse {
+                                status,
+                                retry_after,
+                                ..
+                            })) => (Some(*status), *retry_after),
+                            Ok(Err(model::ModelError::HttpStatus { status, .. })) => {
+                                (Some(*status), None)
+                            }
+                            _ => (None, None),
+                        };
+                        // Bodies and tokens never enter tool errors or model context.
+                        native_error = Some(status.map_or_else(
+                            || "native search unavailable, invalid response or timed out".into(),
+                            |s| format!("native search HTTP {s}"),
+                        ));
+                        let mut state = self
+                            .state
+                            .health
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
+                        state.failures += 1;
+                        state.unsupported = status.is_some_and(|s| matches!(s, 400 | 404 | 422));
+                        if !state.verified
+                            || state.failures >= 3
+                            || status.is_some_and(|s| matches!(s, 401 | 403 | 429))
+                        {
+                            state.open_until = Instant::now()
+                                .checked_add(retry_after.unwrap_or(Duration::from_secs(30)));
+                        }
+                        telemetry::increment("web.search.native.failure");
+                    }
                 }
             }
-            _ => Self::None,
+            drop(probe);
+        }
+        telemetry::increment("web.search.remote");
+        match self.remote.search(query, limit).await {
+            Ok(mut results) => {
+                if let (Some(error), Some(result)) = (native_error, results.first_mut()) {
+                    result
+                        .evidence
+                        .push(serde_json::json!({"native_fallback":error}));
+                }
+                Ok(results)
+            }
+            Err(error) => Err(ToolError::Execution(format!(
+                "{}; remote: {error}",
+                native_error.unwrap_or_else(|| "native search unsupported or cooling down".into())
+            ))),
         }
     }
-
-    /// Returns true if this capability is available (not None).
-    pub fn is_available(self) -> bool {
-        self != Self::None
-    }
 }
-
-/// A native search provider adapter. These are attempted before remote search.
 #[async_trait]
-pub trait NativeSearchAdapter: Send + Sync {
-    /// Attempt to perform a web search using native provider capabilities.
-    /// Returns `None` if the provider doesn't support search in this configuration.
-    async fn search(
-        &self,
-        query: &str,
-        limit: usize,
-    ) -> Result<Option<Vec<SearchResult>>, ToolError>;
-}
-
-/// Placeholder for OpenAI native search. Currently returns None since
-/// OpenAI's web browsing is typically handled via retrieval augmentation
-/// rather than a direct search API.
-///
-/// Future implementation:
-/// - Would integrate with OpenAI's browsing capabilities
-/// - May use vision models to process web content
-/// - Or use file_search with web content retrieval
-pub struct OpenAiNativeSearch;
-
-#[async_trait]
-impl NativeSearchAdapter for OpenAiNativeSearch {
-    async fn search(
-        &self,
-        _query: &str,
-        _limit: usize,
-    ) -> Result<Option<Vec<SearchResult>>, ToolError> {
-        // OpenAI does not expose a direct web search API.
-        // Models using extended thinking or vision can process web content
-        // but search routing is handled at a different layer.
-        // 
-        // TODO: Implement when OpenAI exposes native search capabilities
-        Ok(None)
-    }
-}
-
-/// Placeholder for Anthropic native search. Claude models have a system
-/// to perform web searches internally, but this is typically routed through
-/// remote providers rather than a direct search API.
-///
-/// Future implementation:
-/// - Would call Anthropic's native search capabilities if exposed
-/// - Or document the system prompt configuration needed
-pub struct AnthropicNativeSearch;
-
-#[async_trait]
-impl NativeSearchAdapter for AnthropicNativeSearch {
-    async fn search(
-        &self,
-        _query: &str,
-        _limit: usize,
-    ) -> Result<Option<Vec<SearchResult>>, ToolError> {
-        // Anthropic Claude does not expose a native web search API.
-        // Search is provided through the remote search tier.
-        // 
-        // TODO: Implement if Anthropic adds explicit search APIs
-        Ok(None)
-    }
-}
-
-/// Placeholder for Google Gemini native search. Gemini has built-in search
-/// capabilities but they are typically integrated at the model level rather
-/// than exposed through a separate API call.
-///
-/// Future implementation:
-/// - Would integrate with Google's Grounding API
-/// - Or use Gemini's native_tools for search
-pub struct GoogleGeminiNativeSearch;
-
-#[async_trait]
-impl NativeSearchAdapter for GoogleGeminiNativeSearch {
-    async fn search(
-        &self,
-        _query: &str,
-        _limit: usize,
-    ) -> Result<Option<Vec<SearchResult>>, ToolError> {
-        // Google Gemini does not expose a direct web search API through
-        // the standard API surface. Search would be handled at a different layer
-        // through Grounding or native_tools.
-        // 
-        // TODO: Implement when Google exposes search through the API
-        Ok(None)
-    }
-}
-
-/// Creates a native search adapter for the given capability, or returns None
-/// if native search is not available.
-pub fn native_adapter_for(capability: NativeSearchCapability) -> Option<Box<dyn NativeSearchAdapter>> {
-    match capability {
-        NativeSearchCapability::OpenAi => Some(Box::new(OpenAiNativeSearch)),
-        NativeSearchCapability::Anthropic => Some(Box::new(AnthropicNativeSearch)),
-        NativeSearchCapability::GoogleGemini => Some(Box::new(GoogleGeminiNativeSearch)),
-        NativeSearchCapability::None => None,
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn detect_openai_native_search() {
-        assert_eq!(
-            NativeSearchCapability::detect("openai", "gpt-4o"),
-            NativeSearchCapability::OpenAi
-        );
-    }
-
-    #[test]
-    fn detect_anthropic_native_search() {
-        assert_eq!(
-            NativeSearchCapability::detect("anthropic", "claude-opus"),
-            NativeSearchCapability::Anthropic
-        );
-    }
-
-    #[test]
-    fn detect_google_native_search() {
-        assert_eq!(
-            NativeSearchCapability::detect("google", "gemini-2.0"),
-            NativeSearchCapability::GoogleGemini
-        );
-    }
-
-    #[test]
-    fn detect_unsupported_provider() {
-        assert_eq!(
-            NativeSearchCapability::detect("unknown", "model-x"),
-            NativeSearchCapability::None
-        );
-    }
-
-    #[test]
-    fn capability_is_available() {
-        assert!(NativeSearchCapability::OpenAi.is_available());
-        assert!(!NativeSearchCapability::None.is_available());
+impl SearchProvider for NativeFirst {
+    async fn search(&self, query: &str, limit: usize) -> Result<Vec<SearchResult>, ToolError> {
+        tokio::time::timeout(self.task_timeout, self.run(query, limit))
+            .await
+            .unwrap_or_else(|_| {
+                Err(ToolError::Execution(
+                    "web search task time budget exhausted".into(),
+                ))
+            })
     }
 }

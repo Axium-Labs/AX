@@ -162,6 +162,16 @@ impl HedgingProvider {
 
 #[async_trait]
 impl ModelProvider for HedgingProvider {
+    fn native_search_protocol(&self) -> Option<crate::search::SearchProtocol> {
+        self.primary.native_search_protocol()
+    }
+    async fn native_search(
+        &self,
+        query: &str,
+    ) -> Result<crate::search::SearchResponse, ModelError> {
+        // Search is never hedged: avoid duplicate billable server tool calls.
+        self.primary.native_search(query).await
+    }
     fn name(&self) -> &str {
         self.primary.name()
     }

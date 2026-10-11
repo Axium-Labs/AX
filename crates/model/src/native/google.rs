@@ -43,6 +43,129 @@ fn env(name: &str) -> Option<String> {
     std::env::var(name).ok().filter(|v| !v.trim().is_empty())
 }
 
+pub(super) fn search_supported(provider: &NativeProvider) -> bool {
+    if provider.name() == "google"
+        && provider
+            .config
+            .api_key
+            .as_ref()
+            .is_none_or(|k| k.trim().is_empty())
+    {
+        return false;
+    }
+    let base = provider.config.base_url.clone().or_else(|| {
+        (provider.name() == "google")
+            .then(|| env("GOOGLE_API_BASE_URL"))
+            .flatten()
+    });
+    base.is_none_or(|base| {
+        if provider.name() == "google" {
+            crate::search::official_endpoint(&base, "generativelanguage.googleapis.com")
+                && reqwest::Url::parse(&base)
+                    .is_ok_and(|u| matches!(u.path().trim_end_matches('/'), "/v1" | "/v1beta"))
+        } else {
+            reqwest::Url::parse(&base).is_ok_and(|u| {
+                u.host_str().is_some_and(|h| {
+                    h == "aiplatform.googleapis.com" || h.ends_with("-aiplatform.googleapis.com")
+                }) && u.scheme() == "https"
+                    && u.port_or_known_default() == Some(443)
+                    && vertex_search_path(u.path())
+                    && u.username().is_empty()
+                    && u.password().is_none()
+            })
+        }
+    })
+}
+
+fn vertex_search_path(path: &str) -> bool {
+    let parts = path.trim_matches('/').split('/').collect::<Vec<_>>();
+    matches!(
+        parts.as_slice(),
+        ["v1" | "v1beta1", "publishers", "google"]
+            | [
+                "v1" | "v1beta1",
+                "projects",
+                _,
+                "locations",
+                _,
+                "publishers",
+                "google"
+            ]
+    )
+}
+
+pub(super) async fn search(
+    provider: &NativeProvider,
+    query: &str,
+) -> Result<crate::search::SearchResponse, ModelError> {
+    // Reuse the exact API-key/ADC endpoint, refresh and quota-project headers.
+    let (url, headers) = endpoint(provider).await?;
+    let http = provider
+        .client
+        .post(url)
+        .headers(headers)
+        .json(&json!({
+            "contents":[{"role":"user","parts":[{"text":crate::search::prompt(query)}]}],
+            "tools":[{"google_search":{}}],"generationConfig":{"maxOutputTokens":2048}
+        }))
+        .send()
+        .await?;
+    let mut response = crate::search::SearchResponse {
+        answer: String::new(),
+        sources: vec![],
+        evidence: json!({"grounding":[],"usage":null}),
+    };
+    let mut finish = None;
+    crate::search::stream(http, |event| {
+        if let Some(candidates) = event["candidates"].as_array() {
+            for candidate in candidates.iter().take(1) {
+                if let Some(parts) = candidate
+                    .pointer("/content/parts")
+                    .and_then(Value::as_array)
+                {
+                    for part in parts {
+                        if part["thought"] != true {
+                            response
+                                .answer
+                                .push_str(part["text"].as_str().unwrap_or_default());
+                        }
+                    }
+                }
+                if let Some(reason) = candidate["finishReason"].as_str() {
+                    finish = Some(reason.to_owned());
+                }
+                let grounding = &candidate["groundingMetadata"];
+                if let Some(chunks) = grounding["groundingChunks"].as_array() {
+                    response.sources.extend(chunks.iter().filter_map(|s| {
+                        crate::search::source(
+                            s,
+                            s["web"]["uri"].as_str()?,
+                            s["web"]["title"].as_str().unwrap_or_default(),
+                        )
+                    }));
+                }
+                if grounding.is_object() {
+                    response.evidence["grounding"]
+                        .as_array_mut()
+                        .unwrap()
+                        .push(grounding.clone());
+                }
+            }
+        }
+        if !event["usageMetadata"].is_null() {
+            response.evidence["usage"] = event["usageMetadata"].clone();
+        }
+        Ok(())
+    })
+    .await?;
+    if finish.as_deref() != Some("STOP") {
+        return Err(ModelError::InvalidResponse(
+            "grounded search stream incomplete or blocked".into(),
+        ));
+    }
+    crate::search::validated(response)
+}
+
 pub(crate) fn configured() -> bool {
     env("GOOGLE_CLOUD_API_KEY").is_some()
         || adc_path().is_some_and(|path| path.is_file())

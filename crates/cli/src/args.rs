@@ -223,7 +223,19 @@ pub(crate) enum AuthCommand {
         /// `WorkBuddy` login region (intl or cn). Defaults to the provider's region.
         #[arg(long, value_enum)]
         region: Option<WorkBuddyLoginRegion>,
+        /// Codex authorization method. Browser uses a local callback; device shows a code.
+        #[arg(long, value_enum)]
+        method: Option<CodexLoginMethod>,
+        /// Emit JSON login progress on stderr for desktop clients.
+        #[arg(long)]
+        json: bool,
     },
+}
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
+pub(crate) enum CodexLoginMethod {
+    #[default]
+    Browser,
+    Device,
 }
 #[derive(Clone, Copy, Debug, ValueEnum)]
 pub(crate) enum WorkBuddyLoginRegion {

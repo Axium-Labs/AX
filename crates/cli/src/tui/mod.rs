@@ -188,6 +188,7 @@ struct ActiveTurn {
 }
 
 struct App {
+    codex_login: Option<tokio::task::JoinHandle<()>>,
     workbuddy_login: Option<tokio::task::JoinHandle<()>>,
     workbuddy_login_region: Option<model::workbuddy::WorkBuddyRegion>,
     transcript: Transcript,
@@ -216,6 +217,9 @@ struct App {
 
 impl Drop for App {
     fn drop(&mut self) {
+        if let Some(login) = self.codex_login.take() {
+            login.abort();
+        }
         if let Some(login) = self.workbuddy_login.take() {
             login.abort();
         }
@@ -236,6 +240,7 @@ impl App {
             &directory,
         ));
         Self {
+            codex_login: None,
             workbuddy_login: None,
             workbuddy_login_region: None,
             transcript,
@@ -534,15 +539,22 @@ pub(super) async fn run_tui(
 
             if key.code == KeyCode::Esc
                 && !pane.has_view()
-                && app
-                    .workbuddy_login
+                && (app
+                    .codex_login
                     .as_ref()
                     .is_some_and(|login| !login.is_finished())
+                    || app
+                        .workbuddy_login
+                        .as_ref()
+                        .is_some_and(|login| !login.is_finished()))
             {
+                if let Some(login) = app.codex_login.take() {
+                    login.abort();
+                }
                 if let Some(login) = app.workbuddy_login.take() {
                     login.abort();
                 }
-                app.push(TranscriptKind::Status, "WorkBuddy login cancelled");
+                app.push(TranscriptKind::Status, "Account login cancelled");
                 continue;
             }
 
@@ -737,7 +749,7 @@ pub(super) async fn run_tui(
         // ---- Phase 2: drain background updates. -----------------------------
         let mut updated = false;
 
-        // Drain background Codex login progress (link/code, success, failure).
+        // Drain background account login progress (link/code, success, failure).
         while let Ok(update) = login_rx.try_recv() {
             updated = true;
             match update {

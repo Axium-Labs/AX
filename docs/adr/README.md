@@ -77,3 +77,5 @@ What becomes easier, what becomes harder, and what we accepted.
 - [0022 — Lazy session Mods](0022-lazy-session-mods.md) — executable extensions with scoped metadata, session-owned Node state and explicit confinement limits.
 
 - [0024 — Independent host access](0024-independent-host-access.md) — workspace confinement, app/site access and action approvals remain separate.
+
+- [0025 — Native-first hosted search](0025-native-first-hosted-search.md) — actual model protocols and authorized anonymous MCP fallback.

@@ -1,8 +1,7 @@
 //! Independent search adapters; fallback and hedging belong to `SearchRouter`.
 use super::{SearchProvider, SearchResult, ToolError, network};
 use async_trait::async_trait;
-use html5ever::{parse_document, tendril::TendrilSink};
-use markup5ever_rcdom::{Handle, NodeData, RcDom};
+use futures_util::StreamExt;
 use serde_json::{Value, json};
 use std::time::Duration;
 #[derive(Clone, Debug)]
@@ -53,17 +52,17 @@ pub struct SearchConfig {
     pub bocha_url: String,
     pub brave_api_key: Option<String>,
     pub brave_url: String,
-    pub searxng_url: Option<String>,
-    pub duckduckgo_url: String,
+    pub exa_url: Option<String>,
+    pub parallel_url: Option<String>,
     pub bocha_timeout: ProviderTimeout,
     pub brave_timeout: ProviderTimeout,
-    pub searxng_timeout: ProviderTimeout,
-    pub duckduckgo_timeout: ProviderTimeout,
+    pub exa_timeout: ProviderTimeout,
+    pub parallel_timeout: ProviderTimeout,
+    pub native_timeout: Duration,
+    pub task_timeout: Duration,
     pub hedge_delay: Duration,
     pub circuit_failure_threshold: u32,
     pub circuit_cooldown: Duration,
-    /// Current provider ID, if available. Used to detect native search capability.
-    pub current_provider: Option<String>,
 }
 impl Default for SearchConfig {
     fn default() -> Self {
@@ -72,16 +71,17 @@ impl Default for SearchConfig {
             bocha_url: "https://api.bocha.cn/v1/web-search".into(),
             brave_api_key: None,
             brave_url: "https://api.search.brave.com/res/v1/web/search".into(),
-            searxng_url: None,
-            duckduckgo_url: "https://html.duckduckgo.com/html/".into(),
+            exa_url: Some("https://mcp.exa.ai/mcp".into()),
+            parallel_url: Some("https://search.parallel.ai/mcp".into()),
             bocha_timeout: ProviderTimeout::default(),
             brave_timeout: ProviderTimeout::default(),
-            searxng_timeout: ProviderTimeout::default(),
-            duckduckgo_timeout: ProviderTimeout::default(),
+            exa_timeout: ProviderTimeout::default(),
+            parallel_timeout: ProviderTimeout::default(),
+            native_timeout: Duration::from_secs(12),
+            task_timeout: Duration::from_secs(30),
             hedge_delay: Duration::from_millis(500),
             circuit_failure_threshold: 3,
             circuit_cooldown: Duration::from_secs(30),
-            current_provider: None,
         }
     }
 }
@@ -91,24 +91,26 @@ impl SearchConfig {
         Self {
             bocha_api_key: env("BOCHA_SEARCH_API_KEY"),
             brave_api_key: env("BRAVE_SEARCH_API_KEY"),
-            searxng_url: env("AX_SEARCH_SEARXNG_URL"),
+            exa_url: env("AX_SEARCH_EXA_URL").or_else(|| Self::default().exa_url),
+            parallel_url: env("AX_SEARCH_PARALLEL_URL").or_else(|| Self::default().parallel_url),
             bocha_timeout: ProviderTimeout::from_env("BOCHA"),
             brave_timeout: ProviderTimeout::from_env("BRAVE"),
-            searxng_timeout: ProviderTimeout::from_env("SEARXNG"),
-            duckduckgo_timeout: ProviderTimeout::from_env("DUCKDUCKGO"),
-            current_provider: env("AX_PROVIDER_ID"),
+            exa_timeout: ProviderTimeout::from_env("EXA"),
+            parallel_timeout: ProviderTimeout::from_env("PARALLEL"),
+            native_timeout: duration_env("AX_SEARCH_NATIVE_TIMEOUT_MS", 12000),
+            task_timeout: duration_env("AX_SEARCH_TASK_TIMEOUT_MS", 30000),
             ..Self::default()
         }
     }
-    
-    /// Returns true if the current provider supports native web search.
-    /// Used to prioritize native search over remote search providers.
-    pub fn supports_native_search(&self) -> bool {
-        matches!(
-            self.current_provider.as_deref(),
-            Some("openai") | Some("anthropic") | Some("google") | Some("google-vertex")
-        )
-    }
+}
+fn duration_env(name: &str, default: u64) -> Duration {
+    Duration::from_millis(
+        std::env::var(name)
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .filter(|ms| *ms > 0)
+            .unwrap_or(default),
+    )
 }
 pub struct BochaSearch {
     pub client: reqwest::Client,
@@ -120,19 +122,36 @@ pub struct BraveSearch {
     pub url: String,
     pub key: String,
 }
-pub struct SearxngSearch {
-    pub client: reqwest::Client,
-    pub url: String,
-}
-pub struct DuckDuckGoSearch {
-    pub client: reqwest::Client,
-    pub url: String,
-}
 async fn json_body(request: reqwest::RequestBuilder, url: &str) -> Result<Value, ToolError> {
-    let body = network::search_request(request, url, false)
-        .await
-        .map_err(|e| ToolError::Execution(e.error))?;
-    serde_json::from_slice(&body.bytes).map_err(|_| {
+    let _timer = super::telemetry::Timer::new("web.http.total");
+    let response = request.send().await.map_err(|_| {
+        ToolError::Execution(format!(
+            "search request failed for {}",
+            reqwest::Url::parse(url)
+                .ok()
+                .and_then(|u| u.host_str().map(str::to_owned))
+                .unwrap_or_default()
+        ))
+    })?;
+    if !response.status().is_success() {
+        return Err(ToolError::SearchHttp {
+            status: response.status().as_u16(),
+            retry_after: model::retry::retry_after_header(response.headers()),
+        });
+    }
+    let mut stream = response.bytes_stream();
+    let mut bytes = Vec::new();
+    while let Some(chunk) = stream.next().await {
+        let chunk =
+            chunk.map_err(|_| ToolError::Execution("search response read failed".into()))?;
+        if bytes.len() + chunk.len() > super::MAX_BYTES {
+            return Err(ToolError::Execution(
+                "search response exceeds size limit".into(),
+            ));
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    serde_json::from_slice(&bytes).map_err(|_| {
         ToolError::Execution("search returned a challenge or invalid JSON response".into())
     })
 }
@@ -215,134 +234,7 @@ impl SearchProvider for BraveSearch {
         results(&value, "/web/results", "title", "description", "brave")
     }
 }
-#[async_trait]
-impl SearchProvider for SearxngSearch {
-    async fn search(&self, query: &str, _: usize) -> Result<Vec<SearchResult>, ToolError> {
-        let mut url =
-            reqwest::Url::parse(&self.url).map_err(|e| ToolError::InvalidInput(e.to_string()))?;
-        if !url.path().trim_end_matches('/').ends_with("/search") {
-            url.set_path(&format!("{}/search", url.path().trim_end_matches('/')));
-        }
-        let value = json_body(
-            self.client
-                .get(url.clone())
-                .query(&[("q", query), ("format", "json")]),
-            url.as_str(),
-        )
-        .await?;
-        results(&value, "/results", "title", "content", "searxng")
-    }
-}
-#[async_trait]
-impl SearchProvider for DuckDuckGoSearch {
-    async fn search(&self, query: &str, _limit: usize) -> Result<Vec<SearchResult>, ToolError> {
-        let body = network::search_request(
-            self.client.get(&self.url).query(&[("q", query)]),
-            &self.url,
-            true,
-        )
-        .await
-        .map_err(|e| ToolError::Execution(e.error))?;
-        let html =
-            String::from_utf8(body.bytes).map_err(|e| ToolError::Execution(e.to_string()))?;
-        parse_duckduckgo(&html, usize::MAX)
-    }
-}
-fn has_class(node: &Handle, class: &str) -> bool {
-    let NodeData::Element { attrs, .. } = &node.data else {
-        return false;
-    };
-    attrs.borrow().iter().any(|attribute| {
-        attribute.name.local.as_ref() == "class"
-            && attribute
-                .value
-                .split_ascii_whitespace()
-                .any(|value| value == class)
-    })
-}
-
-fn find_class(node: &Handle, class: &str) -> Option<Handle> {
-    if has_class(node, class) {
-        return Some(node.clone());
-    }
-    node.children
-        .borrow()
-        .iter()
-        .find_map(|child| find_class(child, class))
-}
-
-fn text(node: &Handle) -> String {
-    fn append(node: &Handle, output: &mut String) {
-        if let NodeData::Text { contents } = &node.data {
-            output.push_str(&contents.borrow());
-        }
-        for child in node.children.borrow().iter() {
-            append(child, output);
-        }
-    }
-    let mut output = String::new();
-    append(node, &mut output);
-    output.split_whitespace().collect::<Vec<_>>().join(" ")
-}
-
 fn valid_url(raw: &str) -> Option<String> {
     let url = reqwest::Url::parse(raw).ok()?;
     matches!(url.scheme(), "http" | "https").then(|| url.to_string())
-}
-
-fn result_url(link: &Handle) -> Option<String> {
-    let NodeData::Element { attrs, .. } = &link.data else {
-        return None;
-    };
-    let attributes = attrs.borrow();
-    let raw = &attributes
-        .iter()
-        .find(|attribute| attribute.name.local.as_ref() == "href")?
-        .value;
-    let base = reqwest::Url::parse("https://html.duckduckgo.com/").ok()?;
-    let url = base.join(raw).ok()?;
-    if url
-        .host_str()
-        .is_some_and(|host| host == "duckduckgo.com" || host.ends_with(".duckduckgo.com"))
-    {
-        let target = url.query_pairs().find(|(key, _)| key == "uddg")?.1;
-        return valid_url(&target);
-    }
-    valid_url(url.as_str())
-}
-
-fn parse_duckduckgo(html: &str, limit: usize) -> Result<Vec<SearchResult>, ToolError> {
-    fn visit(node: &Handle, limit: usize, results: &mut Vec<SearchResult>) {
-        if results.len() >= limit {
-            return;
-        }
-        if has_class(node, "result") {
-            if has_class(node, "result--ad") {
-                return;
-            }
-            if let Some(link) = find_class(node, "result__a")
-                && let Some(url) = result_url(&link)
-            {
-                let title = text(&link);
-                if !title.is_empty() {
-                    let snippet = find_class(node, "result__snippet")
-                        .map_or_else(String::new, |node| text(&node));
-                    results.push(SearchResult::new(title, url, snippet, "duckduckgo"));
-                }
-            }
-            return;
-        }
-        for child in node.children.borrow().iter() {
-            visit(child, limit, results);
-        }
-    }
-    let dom = parse_document(RcDom::default(), html5ever::ParseOpts::default()).one(html);
-    let mut results = Vec::new();
-    visit(&dom.document, limit, &mut results);
-    if results.is_empty() && find_class(&dom.document, "no-results").is_none() {
-        return Err(ToolError::Execution(
-            "DuckDuckGo HTML search returned a challenge or unrecognized page".into(),
-        ));
-    }
-    Ok(results)
 }

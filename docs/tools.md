@@ -190,85 +190,54 @@ CLI `run` prints the same activity description to stderr.
 URLs). The legacy singular `query` and `url` keys remain as aliases and are
 normalized into the same lists, so a single-request call keeps working.
 
-Web search uses a two-tier routing system that automatically selects the best
-search backend available:
+Search binds the selected actual model adapter through the ordinary kernel and
+child composition. `NativeFirst` calls official server search when its concrete
+protocol is eligible; unsupported/rejected/incomplete/timeout requests fall back
+to `SearchRouter` and anonymous Exa/Parallel MCP. Optional user-key Brave/Bocha
+remain available. Native model-account usage can incur normal search/inference
+charges; anonymous Remote requires no extra search key. Gateway compatibility
+and model names never imply native support. See the exhaustive
+[provider audit](web-search-audit.md) and [architecture](web-search-architecture.md).
 
-1. **Native Search**: If your current provider (OpenAI, Anthropic, Google, etc.)
-   supports native web search, it's used directly with no configuration needed.
-2. **Remote Search**: Otherwise, AX routes through Brave, Bocha, SearXNG, or
-   DuckDuckGo with automatic failover.
+Queries run concurrently; duplicate input queries are removed. `limit` defaults
+to the total target of distinct valid URLs, while `target_results` can increase
+that target up to `limit * query_count`. Completed results merge in query order;
+remaining requests are dropped when enough results arrive. `cancelled_queries`
+identifies unfinished work. A partial failure retains useful results and reports
+`succeeded`, `failed` and `errors`; all query failures produce an accurate error.
 
-See [web-search-architecture.md](web-search-architecture.md) for the complete
-architecture, configuration options, resilience patterns, and provider capabilities.
+Canonical URL deduplication drops fragments/tracking parameters while retaining
+all matched queries, citations and alternative backend provenance. Records keep
+`title`, `url`, `snippet`, `source`, `matched_queries`, and add `evidence` for raw
+platform references, grounding/usage and source metadata. The response marks
+`content_trust: untrusted_external_data`; retrieved instructions do not authorize
+tool execution. Domain-restricted server search fails closed before network calls
+because remote visited sites cannot be enforced by local domain policy.
 
-Queries are executed concurrently against the selected search provider. The default
-total target is `limit` distinct valid URLs; optional `target_results` sets a
-different target (up to `limit * query_count`). As soon as the target is met,
-remaining futures are dropped. Results are merged in original query order,
-and `cancelled_queries` identifies unfinished queries; cancellation is not a
-failure. A short result is allowed when every query completes before reaching
-the target. A partial failure never discards successful requests: the response
-reports `succeeded`, `failed` and `errors`, and the call fails only when every
-query or URL fails.
+Native probe/health is bound to the account/model; initial failures are coalesced
+across a query batch. Search has a 30-second task budget, native attempt at most
+12 seconds or half the task budget, and remote 5/10/15-second connect/read/total
+limits. Independent remote circuits cool down after three errors; 429 immediately
+honors Retry-After. Reaching a result target drops outstanding futures. There are
+at most two hedged remote attempts per query and no transport replay retries.
+Schema/handshake sessions and health are shared across calls, clones and children;
+expired MCP sessions reinitialize on the next task without replaying a search.
+Configuration/client replacement resets remote state. Proxy/TLS uses reqwest's
+normal behavior; search redirects are rejected and response bodies are bounded.
 
-URL retrieval uses at most three in-flight requests per call. Optional
-`target_pages` returns as soon as that many pages succeed, dropping the rest
-and reporting `cancelled_urls`. Its default is all explicitly requested URLs;
-request a smaller target when only a subset is needed. Completed pages and
-their character budgets remain in original URL order. Dropping a request
-cancels local reads and retries; it cannot undo work already received by a
-remote server.
+Positive millisecond environment settings are
+`AX_SEARCH_NATIVE_TIMEOUT_MS`, `AX_SEARCH_TASK_TIMEOUT_MS`, and
+`AX_SEARCH_<EXA|PARALLEL|BRAVE|BOCHA>_{CONNECT_TIMEOUT_MS,READ_TIMEOUT_MS,TIMEOUT_MS}`.
+Remote endpoints use `AX_SEARCH_EXA_URL` and `AX_SEARCH_PARALLEL_URL`. Embedders
+retain `with_search_provider`, `with_client`, and `SearchConfig`; endpoint `None`
+disables that remote candidate. A lazy shared router preserves reachability and
+EWMA latency statistics; `SearchRouter::stats()` exposes them. No page-engine
+scraping, DOM search parsing or local engine fallbacks remain.
 
-Search results from completed queries are merged, canonicalized (fragment and known
-tracking parameters dropped, trailing slash trimmed) and deduplicated by URL.
-The first occurrence keeps its position in query order, so the highest-ranked
-copy of a URL is the one returned, and each record carries the
-`matched_queries` that surfaced it. Records are
-`title`/`url`/`snippet`/`source`/`matched_queries`. A lazy, reusable
-`SearchRouter` implements the unchanged `SearchProvider` trait. Configured
-Bocha (`BOCHA_SEARCH_API_KEY`), Brave (`BRAVE_SEARCH_API_KEY`), and SearXNG
-(`AX_SEARCH_SEARXNG_URL`) form the candidate list; DuckDuckGo HTML is the
-last keyless fallback. SearXNG accepts an instance base URL or `/search`
-endpoint and requires JSON enabled in `search.formats`.
-
-The concurrency hierarchy is queries → router → provider fallback/hedging.
-Configured candidates rank by consecutive failures then EWMA observed latency;
-initial ties use configuration order (Bocha, Brave, SearXNG), without country
-routing. DuckDuckGo always ranks last. One candidate starts first; after 500 ms
-without a sufficient response another starts, with at most two requests in
-flight per query. Errors, empty or short results advance the candidate list
-immediately. Completed responses are merged using the same canonical URL
-deduplication as the query layer, then limited. Reaching the requested distinct
-result count drops every remaining provider future, including body reads.
-Cancellation is counted separately from failure. Remote work already received
-cannot be undone, including provider billing.
-
-DNS/connection failures, timeouts, HTTP errors (including 429/5xx), invalid API
-responses and challenges fall back without transport retries. Three consecutive
-errors open a provider circuit for 30 seconds. Later calls may try that provider
-after cooldown; success closes its circuit. Candidates opened by another query
-are rechecked before launch. State and connection pools survive calls and clones
-of the same WebTool, and reset on configuration/client replacement; they are
-in-memory, with no proactive probes or durable cross-process history. A successful
-short/empty search remains valid if all candidates finish; all errors/open circuits
-return a tool error. Provider latency/success/failure/cancellation/circuit metrics
-are `web.search.provider.<name>.*`; embedders can inspect `SearchRouter::stats()`.
-
-Each provider owns an HTTP client with separate connect/read/total settings,
-defaulting to 5/10/15 seconds. Environment overrides (positive milliseconds):
-`AX_SEARCH_<PROVIDER>_CONNECT_TIMEOUT_MS`,
-`AX_SEARCH_<PROVIDER>_READ_TIMEOUT_MS`, and `AX_SEARCH_<PROVIDER>_TIMEOUT_MS`,
-where PROVIDER is `BOCHA`, `BRAVE`, `SEARXNG`, or `DUCKDUCKGO`.
-`SearchConfig` also exposes endpoints, timeouts, hedge delay and circuit settings.
-Injected clients keep their own connect/read settings; the router still bounds
-attempts by each provider's total timeout. Embedders may supply independent
-adapters or a router through `with_search_provider`. Search does not fetch
-destination page bodies, add model requests, or compute embeddings. Bocha uses
-a read-only JSON POST; other search adapters use GET. HTML parsing unwraps
-DuckDuckGo redirects and excludes ads/non-HTTP(S) links; challenges are errors.
-Protocol references: [Bocha](https://open.bochaai.com/),
-[Brave](https://api-dashboard.search.brave.com/api-reference/web/search/get),
-[SearXNG](https://docs.searxng.org/dev/search_api.html).
+Fetch remains separately scheduled, with at most three requests in flight.
+`target_pages` can return early, reporting `cancelled_urls`; completed pages keep
+original URL order and character budgets. Local reads/retries stop on cancellation,
+but work already received by a server cannot be undone.
 
 On search failure, the tool description, error and bundled web-research skill
 instruct the agent to report/configure/retry rather than automatically search via

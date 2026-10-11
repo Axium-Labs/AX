@@ -1,7 +1,8 @@
 //! Reachability/latency routing with bounded hedging and in-memory circuits.
 use super::{
     SearchConfig, SearchProvider, SearchResult, ToolError, merge_completed,
-    providers::{BochaSearch, BraveSearch, DuckDuckGoSearch, ProviderTimeout, SearxngSearch},
+    providers::{BochaSearch, BraveSearch, ProviderTimeout},
+    remote::{RemoteKind, RemoteSearch},
     telemetry,
 };
 use async_trait::async_trait;
@@ -96,26 +97,24 @@ impl SearchRouter {
                 false,
             );
         }
-        if let Some(url) = config.searxng_url.as_ref().filter(|s| !s.trim().is_empty()) {
-            add(
-                "searxng",
-                Arc::new(SearxngSearch {
-                    client: client(&config.searxng_timeout),
-                    url: url.clone(),
-                }),
-                &config.searxng_timeout,
-                false,
-            );
+        for (name, url, timeout, kind) in [
+            ("exa", &config.exa_url, &config.exa_timeout, RemoteKind::Exa),
+            (
+                "parallel",
+                &config.parallel_url,
+                &config.parallel_timeout,
+                RemoteKind::Parallel,
+            ),
+        ] {
+            if let Some(url) = url {
+                add(
+                    name,
+                    Arc::new(RemoteSearch::new(client(timeout), url.clone(), kind)),
+                    timeout,
+                    false,
+                );
+            }
         }
-        add(
-            "duckduckgo",
-            Arc::new(DuckDuckGoSearch {
-                client: client(&config.duckduckgo_timeout),
-                url: config.duckduckgo_url.clone(),
-            }),
-            &config.duckduckgo_timeout,
-            true,
-        );
         Self::new(
             candidates,
             config.hedge_delay,
@@ -219,8 +218,16 @@ impl SearchRouter {
             } else {
                 history.failures += 1;
                 history.consecutive_failures += 1;
-                if history.consecutive_failures >= self.failure_threshold {
-                    history.open_until = Some(Instant::now() + self.cooldown);
+                let retry_after = match &outcome {
+                    Err(ToolError::SearchHttp {
+                        status: 429,
+                        retry_after,
+                    }) => Some(retry_after.unwrap_or(self.cooldown)),
+                    _ => None,
+                };
+                if history.consecutive_failures >= self.failure_threshold || retry_after.is_some() {
+                    history.open_until =
+                        Instant::now().checked_add(retry_after.unwrap_or(self.cooldown));
                     telemetry::increment(&format!(
                         "web.search.provider.{}.circuit_open",
                         candidate.name

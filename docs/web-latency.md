@@ -1,5 +1,7 @@
 # Web scheduling latency benchmark
 
+Historical 2026-09-30 measurements. The scraped engine used in the live observation has been removed; these numbers do not measure current Native/Remote services. See [current audit](web-search-audit.md).
+
 Measured on 2026-09-30 in the local Windows development environment.
 
 ```powershell
