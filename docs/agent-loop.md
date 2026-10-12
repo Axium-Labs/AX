@@ -60,12 +60,15 @@ resets when the call changes and at the start of each turn. See
 
 ## Optional Goal
 
-Ordinary tasks finish directly without extra validation or provider requests.
+By default, ordinary tasks finish directly without extra validation or provider
+requests. Enabling the scoped Goal template applies its policy to new ordinary
+tasks through the shared CLI/TUI/ACP admission path.
 Explicit `/goal <target>` adds target-scoped deterministic or independent model
 verification to this same loop. A denial supplies concrete continuation reasons;
 blocked, failed, paused and cancelled states remain distinct from completion.
 Goal criteria, limits and consumption live in the existing queue checkpoint with
-the same goal ID. Configuration templates do not activate ordinary tasks.
+the same goal ID. Automatic template use defaults off and leaves saved Goal
+lifecycle actions, parked answers and worker policies intact.
 
 See [goal.md](goal.md) for commands, lifecycle, resource admission, migration and
 recovery. `GoalEvaluator` is the single extension boundary evolved from the old

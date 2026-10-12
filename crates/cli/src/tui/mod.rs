@@ -37,17 +37,14 @@ use std::{
 use anyhow::Result;
 use async_trait::async_trait;
 use crossterm::{
-    event::{
-        self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
-        KeyModifiers, MouseEventKind,
-    },
+    event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
     terminal::{disable_raw_mode, enable_raw_mode},
 };
 use model::{Message, Role};
 use ratatui::{
     Frame, Terminal, TerminalOptions, Viewport,
     backend::CrosstermBackend,
-    layout::{Constraint, Direction, Layout, Rect},
+    layout::{Constraint, Direction, Layout, Rect, Size},
     text::{Line, Span},
     widgets::{Paragraph, Widget, Wrap},
 };
@@ -438,12 +435,30 @@ impl App {
     }
 }
 
-struct TerminalGuard;
+struct TerminalGuard {
+    #[cfg(windows)]
+    input_mode: u32,
+}
+
+impl TerminalGuard {
+    fn enter() -> io::Result<Self> {
+        #[cfg(windows)]
+        let input_mode = terminal_backend::console_input_mode()?;
+        let guard = Self {
+            #[cfg(windows)]
+            input_mode,
+        };
+        enable_raw_mode()?;
+        terminal_backend::enable_native_selection()?;
+        Ok(guard)
+    }
+}
 
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
-        let _ = crossterm::execute!(io::stdout(), DisableMouseCapture);
         let _ = disable_raw_mode();
+        #[cfg(windows)]
+        let _ = terminal_backend::set_console_input_mode(self.input_mode);
     }
 }
 
@@ -464,9 +479,14 @@ pub(super) async fn run_tui(
     // so the OSC escape is processed by the shell.
     print!("\x1b]0;ax\x07");
     let _ = io::stdout().flush();
-    enable_raw_mode()?;
-    let _guard = TerminalGuard;
-    crossterm::execute!(io::stdout(), EnableMouseCapture)?;
+    let _guard = TerminalGuard::enter()?;
+    // Start this conversation on a clean visible screen. Older terminal
+    // scrollback remains available, but stale live rows do not frame the card.
+    crossterm::execute!(
+        io::stdout(),
+        crossterm::terminal::Clear(crossterm::terminal::ClearType::All),
+        crossterm::cursor::MoveTo(0, 0)
+    )?;
     let (_, terminal_height) = crossterm::terminal::size()?;
     // Leave a small real scrollback region above the live viewport. A full-height
     // inline viewport combined with `insert_before` causes previously drawn
@@ -478,11 +498,14 @@ pub(super) async fn run_tui(
         .max(8)
         .min(terminal_height);
     let mut terminal = Terminal::with_options(
-        terminal_backend::WideCellBackend(CrosstermBackend::new(io::stdout())),
+        terminal_backend::ConsoleBackend(terminal_backend::WideCellBackend(CrosstermBackend::new(
+            io::stdout(),
+        ))),
         TerminalOptions {
             viewport: Viewport::Inline(live_height),
         },
     )?;
+    let mut terminal_size = terminal.size()?;
 
     let mut state: Option<ReplState> = Some(ReplState::new(data_dir, skills_dir, mcp_config)?);
     state.as_mut().expect("initialized state").execution_budget = execution_budget;
@@ -543,20 +566,6 @@ pub(super) async fn run_tui(
         let mut key_handled = false;
         while event::poll(Duration::ZERO)? {
             let key = match event::read()? {
-                Event::Mouse(mouse) if !pane.has_view() => {
-                    match mouse.kind {
-                        MouseEventKind::ScrollUp => {
-                            app.transcript.scroll_up(3, scroll_width, visible_rows);
-                        }
-                        MouseEventKind::ScrollDown => app.transcript.scroll_down(3),
-                        _ => continue,
-                    }
-                    key_handled = true;
-                    if app.transcript.scroll_from_bottom == 0 {
-                        app.unseen_output = false;
-                    }
-                    continue;
-                }
                 Event::Resize(_, _) => {
                     force_redraw = true;
                     continue;
@@ -721,18 +730,6 @@ pub(super) async fn run_tui(
                     app.transcript.scroll_from_bottom = 0;
                     app.unseen_output = false;
                     if app.working {
-                        if !submitted.starts_with('/')
-                            && active_turn.as_ref().is_some_and(|turn| {
-                                turn.input.try_steer(submitted.clone()).is_some()
-                            })
-                        {
-                            app.push(TranscriptKind::User, submitted);
-                            app.push(
-                                TranscriptKind::Status,
-                                "Guidance sent — the current task continues",
-                            );
-                            continue;
-                        }
                         if matches!(submitted.as_str(), "/goal" | "/goal status") {
                             app.push(
                                 TranscriptKind::Info,
@@ -761,6 +758,18 @@ pub(super) async fn run_tui(
                                     "No optional Goal in the current turn",
                                 );
                             }
+                            continue;
+                        }
+                        if !submitted.starts_with('/')
+                            && active_turn.as_ref().is_some_and(|turn| {
+                                turn.input.try_steer(submitted.clone()).is_some()
+                            })
+                        {
+                            app.push(TranscriptKind::User, submitted);
+                            app.push(
+                                TranscriptKind::Status,
+                                "Guidance sent — the current task continues",
+                            );
                             continue;
                         }
                         // Commands and submissions arriving after the final boundary run next.
@@ -964,6 +973,41 @@ pub(super) async fn run_tui(
             }
         }
 
+        if !app.working
+            && active_turn.is_none()
+            && let Some(next) = app.pending.pop_front()
+        {
+            if next.starts_with('/')
+                && !next.starts_with("/mod:")
+                && state
+                    .as_ref()
+                    .is_some_and(|s| matches!(s.next_goal_turn, runtime_core::GoalTurn::New))
+            {
+                let keep = commands::execute_slash(
+                    &next,
+                    state.as_mut().expect("state available"),
+                    &mut selection,
+                    &mut app,
+                    &mut pane,
+                )
+                .await?;
+                if !keep {
+                    break 'outer;
+                }
+            } else {
+                app.push(TranscriptKind::User, next.clone());
+                start_turn(
+                    &next,
+                    &mut state,
+                    &selection,
+                    allow_dangerous,
+                    &worker_tx,
+                    &mut active_turn,
+                    &mut app,
+                );
+            }
+            updated = true;
+        }
         updated |= app.transcript.settle_transitions();
 
         // Preserve the reader's position even when a dense stream skips a frame.
@@ -996,6 +1040,7 @@ pub(super) async fn run_tui(
             pending_stream_frame = false;
             app.spin = app.spin.wrapping_add(1);
             app.sync_status_line(&mut pane);
+            prepare_terminal_frame(&mut terminal, &mut terminal_size)?;
             // Pi's main-screen renderer grows the real terminal buffer. Commit
             // completed overflow before redrawing the live composer viewport so
             // native terminal scrolling retains the entire conversation and the
@@ -1016,14 +1061,7 @@ pub(super) async fn run_tui(
                 Vec::new()
             };
             if !committed.is_empty() {
-                let height = Paragraph::new(committed.clone())
-                    .wrap(Wrap { trim: false })
-                    .line_count(screen_width.max(1));
-                terminal.insert_before(u16::try_from(height).unwrap_or(u16::MAX), |buffer| {
-                    Paragraph::new(committed)
-                        .wrap(Wrap { trim: false })
-                        .render(buffer.area, buffer);
-                })?;
+                insert_transcript_history(&mut terminal, committed)?;
             }
             terminal.draw(|frame| render(frame, &app, &pane))?;
             last_draw = Instant::now();
@@ -1053,7 +1091,10 @@ pub(super) async fn run_tui(
             .constraints([Constraint::Min(1)])
             .split(area);
         app.transcript.render(frame, chunks[0]);
-        frame.set_cursor_position(ratatui::layout::Position::new(0, area.height - 1));
+        frame.set_cursor_position(ratatui::layout::Position::new(
+            area.x,
+            area.bottom().saturating_sub(1),
+        ));
     });
     // Leave raw mode so a plain-text identifier can be printed for the user to
     // copy and resume later via `/resume`.
@@ -1071,6 +1112,43 @@ enum SlashRoute {
     Handled,
     Closed,
     Selected(&'static commands::SlashCommandDef),
+}
+
+fn insert_transcript_history<B: ratatui::backend::Backend>(
+    terminal: &mut Terminal<B>,
+    committed: Vec<Line<'static>>,
+) -> io::Result<()> {
+    let width = terminal.get_frame().area().width;
+    let height = Paragraph::new(committed.clone())
+        .wrap(Wrap { trim: false })
+        .line_count(width.max(1));
+    terminal.insert_before(u16::try_from(height).unwrap_or(u16::MAX), |buffer| {
+        Paragraph::new(committed)
+            .wrap(Wrap { trim: false })
+            .render(buffer.area, buffer);
+    })
+}
+
+/// Synchronize before either history insertion or draw can scroll the screen.
+fn prepare_terminal_frame<B: ratatui::backend::Backend>(
+    terminal: &mut Terminal<B>,
+    previous_size: &mut Size,
+) -> io::Result<()> {
+    let size = terminal.size()?;
+    if size != *previous_size {
+        // Inline autoresize appends lines to reposition the viewport. Clear the
+        // old live rows first so temporary answers/composers cannot be pushed
+        // into permanent scrollback and then appear again after redraw.
+        terminal.clear()?;
+        // Anchor resizing at the viewport origin, not the composer's cursor.
+        // This scrolls completed rows above the viewport into history instead
+        // of moving the new viewport upward and clearing those rows.
+        let origin = terminal.get_frame().area().as_position();
+        terminal.set_cursor_position(origin)?;
+        terminal.autoresize()?;
+        *previous_size = size;
+    }
+    Ok(())
 }
 
 /// Routing helpers for the slash popup, kept here to avoid borrow conflicts

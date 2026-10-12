@@ -287,9 +287,28 @@ impl AxConfig {
     }
 }
 
-/// Goal templates are read only on explicit Goal creation, never installed globally.
+/// Explicit Goal creation resolves the shared global/project template.
 pub(crate) fn goal_template(root: &Path) -> Result<runtime_core::GoalConfig> {
     project_goal_template(root, AxConfig::load()?.goal)
+}
+/// Ordinary turns opt in through the current template, without migrating legacy
+/// project verification files merely because an ordinary chat was sent.
+pub(crate) fn automatic_goal_template(root: &Path) -> Result<Option<runtime_core::GoalConfig>> {
+    let global = AxConfig::load()?.goal;
+    let mut config = if root.join(".ax/goal.json").try_exists()? {
+        project_goal_template(root, global)?
+    } else {
+        global
+    };
+    if !config.enabled {
+        return Ok(None);
+    }
+    if config.mode == runtime_core::GoalMode::Off {
+        config.mode = runtime_core::GoalMode::Model;
+    }
+    config.validate().map_err(anyhow::Error::msg)?;
+    resolve_goal_paths(root, &mut config);
+    Ok(Some(config))
 }
 pub(crate) fn project_goal_template(
     root: &Path,

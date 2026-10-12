@@ -24,7 +24,7 @@ cli ───────────────┬──> runtime-core ──>
 | Crate | Responsibility |
 |---|---|
 | `model` | Provider-neutral `ModelProvider`, text/image message parts, capabilities, tool calls, response types. One streaming entry point (`complete_stream`) with a non-streaming fallback. |
-| `tool` | `Tool`, `ToolRegistry`, JSON Schema, `SafetyLevel`, plus built-ins: `shell`, `filesystem`, `find_files`/`glob`, `patch`, `search`, `web`, `view_image`, `browser`, and opt-in native Windows `desktop`. Owns the `PermissionStore`. |
+| `tool` | `Tool`, `ToolRegistry`, JSON Schema, `SafetyLevel`, plus built-ins: `shell`, `filesystem`, `find_files`/`glob`, `patch`, `search`, `web`, `view_image`, `browser`, and native Windows `desktop` (enabled by default, with independent app access). Owns the `PermissionStore`. |
 | `runtime-core` | The model → tool → model agent loop, `AgentEvent` stream, context selection, `ContextBudget`, compaction, and `AgentSupervisor` for bounded-concurrency tasks. |
 | `mcp` | MCP client for stdio / Streamable HTTP / WebSocket, lazy connection, capability catalog, `McpToolProxy` and `McpGateway`. |
 | `skill` | `SKILL.md` frontmatter indexing, precomputed Unicode routing features, and language-independent similarity routing; Markdown body is loaded only when a route hits. Legacy packages remain supported. |
@@ -320,7 +320,9 @@ Every controller turn has the existing goal ID and an empty active queue head;
 ordinary direct completion closes that head without optional verification.
 Concrete queue items come from `task_queue` or typed work observations. Explicit
 Goal creation attaches acceptance and lifecycle metadata to this same head;
-an ordinary identity alone does not enable Goal. See [agent-runtime.md](agent-runtime.md)
+an ordinary identity alone does not enable Goal. The CLI composition root can
+opt new ordinary tasks into the enabled global/project Goal template through
+the existing Pursue intent; automatic template use defaults off. See [agent-runtime.md](agent-runtime.md)
 and [goal.md](goal.md).
 
 The existing Agent Loop and tool-round DAG remain the execution mechanisms. A
@@ -450,8 +452,10 @@ Completed/failed children persist their receipt before removing the workspace an
 Git worktree registration. Cleanup failures are retried by GC; terminal receipt
 recovery works without a workspace. Running/interrupted children retain their
 workspace for resume. Legacy `workspace/.ax` stores migrate into `state` on resume.
-File leases prevent GC from touching active children, and serialize provisioning
-across processes sharing a storage root. GC runs on child admission, removes
+File leases prevent GC from touching active children. The existing root admission
+guard covers publication of the state directory, child lease and manifest, so
+background GC cannot claim a partially published child. Workspace copying and
+child execution remain parallel. GC runs on child admission, removes
 terminal workspaces and expires unleased workspaces after the configured idle TTL;
 it never deletes raw session history. Expired children fail explicitly on resume
 rather than silently restarting. Workspace changes are disposable, are not merged
@@ -558,7 +562,7 @@ in local SSH execution contexts. See [mods.md](mods.md) and
 
 The independent `sandbox` crate sits below ToolRegistry and MCP stdio transport.
 Agent, subagent and Skill execution reach SandboxManager before local OS effects.
-The opt-in desktop and owned-browser tools instead use a declared `AuthorizedHost`
+The desktop and owned-browser tools instead use a declared `AuthorizedHost`
 service boundary, with exact application/site grants independent of file/terminal
 confinement and ordinary action approval. Neither access grant nor action approval
 changes the sandbox. Host services remain outside child registries unless explicitly

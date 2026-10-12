@@ -41,6 +41,11 @@ cargo fmt --all              # formatting
 
 Quick smoke test of a local build:
 
+Private regression tests remain outside formal source dependencies. Production
+modules and Cargo targets must not reference untracked local test files. Validate
+the intended production file set separately from any local test overlay; a clean
+clone must compile its tests and static checks without private fixtures.
+
 ```bash
 ./target/release/ax --version
 ./target/release/ax run "hello" --provider <configured-provider>
@@ -156,4 +161,9 @@ still in use by a running task is retained until it can be removed.
 
 ## Distributed collaboration validation
 
-Worker regression tests live in `test/distributed_worker.rs` and run with `cargo test --workspace` (Git/snapshot isolation and transport policy). Build AX and the sibling Crew, then run `python ../axcrew/tests/integration/distributed_process.py target/debug/ax.exe ../axcrew/target/debug/ax-crew.exe` from this repository on Windows, or corresponding executable paths on Linux. The fake-model scenario runs actual ACP workers; it needs no provider credential.
+Published worker regression tests cover Git/snapshot isolation and transport
+policy through `cargo test --workspace`. Maintainer integration validation also
+uses actual AX ACP workers and the Crew gateway with a controlled provider,
+including lease expiry, fenced takeover and cumulative Goal budget recovery.
+Local integration fixtures and their outputs are maintained outside the published
+build contract.

@@ -26,6 +26,9 @@ pub enum GoalMode {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct GoalConfig {
+    /// Host preference to apply this template to ordinary new tasks.
+    /// Explicit Goal admission and saved Goal lifecycle remain independent.
+    pub enabled: bool,
     pub mode: GoalMode,
     pub long_project: Option<crate::long_project::LongProjectConfig>,
     pub session_rotation: Option<crate::long_project::RotationConfig>,
@@ -60,6 +63,7 @@ pub enum StagnationAction {
 impl Default for GoalConfig {
     fn default() -> Self {
         Self {
+            enabled: false,
             mode: GoalMode::Off,
             long_project: None,
             session_rotation: None,

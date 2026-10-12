@@ -228,7 +228,6 @@ fn copy_files(source: &Path, target: &Path) -> Result<()> {
     Ok(())
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;

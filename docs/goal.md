@@ -1,9 +1,9 @@
 # AX Goal
 
 Goal is the in-place evolution of the former StopGuard. There is one completion
-validator and one existing model/tool Agent Loop. It is optional and off for
-ordinary tasks. Harness still owns reliable execution, Task Queue owns task
-identity and children, Goal owns acceptance policy, and Runtime enforces execution
+validator and one existing model/tool Agent Loop. It is optional and automatic
+use in ordinary tasks defaults off. Harness still owns reliable execution, Task
+Queue owns task identity and children, Goal owns acceptance policy, and Runtime enforces execution
 constraints using its existing budgets and usage statistics.
 
 ## Use
@@ -15,7 +15,8 @@ constraints using its existing budgets and usage statistics.
 - `/goal pause` preserves unfinished work. `/goal resume` explicitly resumes the
   same ID. Answer a parked user question before resuming.
 - `/goal cancel` or `/goal off` cancels the optional target. Ordinary next prompts
-  always start normal tasks; they never inherit the previous Goal's criteria.
+  use the current scoped template only when automatic Goal is enabled; they never
+  inherit the previous Goal's criteria.
 - `/goal create {"target":"produce report","mode":"deterministic","deliverables":["report.json"],"max_rounds":20}`
   sets per-target criteria and limits. Relative deliverables resolve against the
   project root (including paths supplied in this JSON command).
@@ -35,15 +36,30 @@ normal work. ACP uses the same prompt boundary and accepts the existing
 `resume`, `pause`, `cancel`, `answer`). A native `/goal` prompt preserves an existing
 caller `Start` identity instead of creating a competing Goal ID.
 Optional Goal state/usage updates are supplied in `session/update` metadata.
+A structured ACP `answer` retains its supplied goal/question identity and payload;
+the shared prompt entry does not reinterpret its accompanying text against a
+different parked question. The kernel validates it against the saved question.
 
 ## Configuration and migration
 
 Global `$AX_HOME/config.json` uses `goal`; a project may override the template in
-`.ax/goal.json`. Templates configure only explicit Goal creation, never ordinary
-conversations or automatic worker validation.
+`.ax/goal.json`. Templates configure explicit Goal creation and optionally
+ordinary new tasks.
+`enabled` defaults to false for existing and new configurations. Enabling it in
+AXCrew Settings → Goal automatically applies the resolved global/project template
+to each new ordinary task in CLI, TUI and ACP; `mode: off` uses model verification
+in this path. The prompt becomes the target. Changes apply on the next new task,
+without altering saved Goals, explicit resume/pause/cancel, parked answers or
+active steering. Disabling retains configured rules and explicit `/goal` use.
+Project templates replace the whole global policy, including this switch; reset
+inherits global settings. Ordinary admission does not migrate a legacy project
+verification file. Controller-owned distributed workers and local subagents keep
+their supplied policies rather than automatically adding acceptance from a host
+template.
 
 ```json
 {
+  "enabled": false,
   "mode": "model",
   "acceptance": ["report agrees with actual measured results"],
   "deliverables": ["report.json"],
@@ -78,7 +94,7 @@ project override. Reset archives a legacy project template so it cannot be
 silently migrated again. Other configuration fields are preserved. Project files
 replace the global template as a whole; missing fields use GoalConfig defaults.
 Portable relative references resolve in the selected project at Goal creation.
-Settings edits apply to new Goals; saved Goals retain their frozen configuration.
+Settings edits apply to new tasks/Goals; saved Goals retain their frozen configuration.
 
 ## Configured validators
 

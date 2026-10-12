@@ -81,6 +81,23 @@ while it reads history. Slash command hints, descriptions, and selected text use
 fixed high-contrast colors so they remain legible across terminal themes; the
 slash popup keeps its navigation hint visible while scrolling.
 
+Window resizing clears the live inline region before repositioning it, so
+temporary streaming text and the composer do not enter terminal scrollback as
+duplicate history. Completed overflow is inserted only after the viewport has
+been synchronized to the current terminal dimensions. Conversation state and
+unsent input remain in memory and are redrawn at the new width.
+
+A fresh launch clears the visible screen before drawing the startup card;
+older native scrollback is retained. Windows cursor queries account for both
+offsets of the visible console window. The Windows input hint uses ASCII dots
+to avoid ambiguous ellipsis widths and remnants when Chinese input replaces it.
+
+Mouse capture is disabled: left-click and drag select text using the terminal's
+native selection, then use its Copy action or keyboard shortcut. The mouse
+wheel scrolls native terminal history; PgUp/PgDn scroll the in-memory transcript
+(including active replies), and End returns to the latest output. On Windows,
+AX enables Quick Edit and restores the original console input mode on exit.
+
 The terminal palette uses a black canvas with quiet slate surfaces, teal for
 focus, and separate green, amber, and coral status colors. Text colors remain
 explicit so terminal theme defaults cannot make command hints or tool output

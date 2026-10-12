@@ -242,3 +242,7 @@ fn map_records(
     }
     Ok(json!({"count":tasks.len(),"ax_work_items":tasks}).to_string())
 }
+
+#[cfg(test)]
+#[path = "../../../test/harness/task_source.rs"]
+mod tests;

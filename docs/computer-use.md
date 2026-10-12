@@ -1,7 +1,7 @@
 # Computer Use
 
-Computer Use is an opt-in native Windows host capability. It reads application
-windows through Windows UI Automation and operates exposed controls. macOS,
+Computer Use is a native Windows host capability enabled by default. It reads
+application windows through Windows UI Automation and operates exposed controls. macOS,
 Linux, WSL execution and SSH contexts do not expose the desktop tool. Desktop
 access uses a separate authorized host transport, not the file/terminal worker;
 it no longer requires selecting sandbox off. This does not add native Windows
@@ -25,13 +25,18 @@ ax computer-use --include-screenshot false --max-nodes 1200 --screenshot-width 1
 ax computer-use --enabled false
 ```
 
-Defaults: `enabled=false`, `include_screenshot=true`, `max_nodes=1200`,
+Defaults: `enabled=true`, `include_screenshot=true`, `max_nodes=1200`,
 `screenshot_width=1280`. Node counts accept 1–10000, longest screenshot edges
 320–4096 pixels. Invalid edits fail before writing. Output contains `settings`,
 platform/environment `supported`, and `limits`. Reads do not create a config.
 Writes use AX's atomic save and retain other configuration, credentials and
 session data. AXCrew saves switches after host confirmation; number fields save
 on blur/Enter. Failed reads offer retry; failed writes retain confirmed values.
+
+Missing `computer_use` sections or `enabled` fields use the enabled default.
+An existing explicit `enabled=false` remains disabled; updating AX does not
+overwrite that choice. Application access and individual action approval remain
+required. Unsupported platforms/environments still do not expose the desktop tool.
 
 The runtime captures settings when building the turn registry. Off means the
 model receives no desktop tool. Enabling/increasing limits applies on the next

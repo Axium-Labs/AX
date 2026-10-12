@@ -123,10 +123,10 @@ Run on native Linux with bubblewrap, prlimit, Git, Python, cc, Cargo and npm:
 ```sh
 cargo test -p sandbox --test linux_escape_suite
 cargo test -p mcp --test runtime_sandbox
-cargo test -p cli --test linux_child_sandbox
 ```
 
-The suites exercise real OS execution, development workflows, traversal, symlinks,
+Published suites and local maintainer child-session validation exercise real OS
+execution, development workflows, traversal, symlinks,
 credential denial, /etc denial, nested mounts, hardlinks, namespace reuse, descendant
 teardown, initialization failure, builtin tools, unbound extensions, Skill scripts,
 stdio MCP and actual ChildHost provisioning and cleanup. Windows workspace tests

@@ -735,6 +735,7 @@ dependencies = [
  "base64",
  "clap",
  "crossterm",
+ "crossterm_winapi",
  "ed25519-dalek",
  "evolution",
  "flate2",

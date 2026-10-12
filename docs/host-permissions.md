@@ -27,7 +27,7 @@ The early CLI path works without a workspace/model/session. Reads do not create 
 
 ## Computer Use
 
-The Windows desktop worker is a host transport, separately authorized from confined file/terminal workers. Computer Use still defaults off and only the user settings path enables it. `list_windows` exposes minimal app/handle metadata for discovery, hides denied apps, and withholds titles for apps without a persistent allow. Targeted reads, screenshots and effects require app access. No arbitrary desktop-wide screenshot or shell command is added. Images use the existing multimodal `ToolOutput::Image` channel; their temporary storage does not grant the agent arbitrary host-file access. See [computer-use.md](computer-use.md).
+The Windows desktop worker is a host transport, separately authorized from confined file/terminal workers. Computer Use defaults on when its configuration is absent; explicit saved disable settings remain effective and can only be changed through the user settings path. The enabled default does not grant app access or action approval. `list_windows` exposes minimal app/handle metadata for discovery, hides denied apps, and withholds titles for apps without a persistent allow. Targeted reads, screenshots and effects require app access. No arbitrary desktop-wide screenshot or shell command is added. Images use the existing multimodal `ToolOutput::Image` channel; their temporary storage does not grant the agent arbitrary host-file access. See [computer-use.md](computer-use.md).
 
 ## Browser Use
 

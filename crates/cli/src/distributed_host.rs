@@ -173,3 +173,7 @@ async fn platform() -> anyhow::Result<Value> {
 async fn platform() -> anyhow::Result<Value> {
     anyhow::bail!("hardware inventory is unsupported on this platform")
 }
+
+#[cfg(test)]
+#[path = "../../../test/distributed_host.rs"]
+mod tests;

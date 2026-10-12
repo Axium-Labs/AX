@@ -17,7 +17,7 @@ on your laptop, servers, GPU boxes and cloud VMs. See
 [ACP and Crew integration](docs/acp-crew.md).
 
 - **Rust native** — one binary for the terminal agent; no Node or Docker needed for core use. Optional Browser Use needs Node and Playwright.
-- **Independent UI permissions** — app/site access and action approval are separate from the file/terminal sandbox. Windows Computer Use is opt-in; see [host access](docs/host-permissions.md) for platform support and browser limits.
+- **Independent UI permissions** — app/site access and action approval are separate from the file/terminal sandbox. Windows Computer Use is enabled by default and respects explicit disable settings; see [host access](docs/host-permissions.md) for platform support and browser limits.
 - **Fast startup** — providers, skills, MCP servers and memory load on demand.
 - **Local system resources** — `/system` shows measured CPU/memory usage and
   supported NVIDIA GPU usage/VRAM; collection runs only when requested.
@@ -263,6 +263,8 @@ existing registered-root execution restriction. See
 ### Optional Goal
 
 `/goal <target>` enables target-scoped completion checks and continued execution.
+AXCrew Settings → Goal can also enable automatic Goal policies for new ordinary
+tasks in the selected global/project scope; this defaults off.
 Use `/goal status`, `/goal pause`, `/goal resume` and `/goal cancel` to manage it.
 Ordinary prompts keep their direct execution path without additional validation.
 See [Goal commands, budgets and recovery](docs/goal.md).

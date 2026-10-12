@@ -1,4 +1,5 @@
-//! Opt-in Windows accessibility automation. The host supplies immutable settings.
+//! Windows accessibility automation, enabled by default with independent app access.
+//! The host supplies immutable settings.
 use crate::{Capability, SafetyLevel, Tool, ToolError};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -19,7 +20,7 @@ pub struct DesktopSettings {
 impl Default for DesktopSettings {
     fn default() -> Self {
         Self {
-            enabled: false,
+            enabled: true,
             include_screenshot: true,
             max_nodes: 1200,
             screenshot_width: 1280,
@@ -223,7 +224,7 @@ impl Tool for DesktopTool {
         "desktop"
     }
     fn description(&self) -> &'static str {
-        "Read and operate Windows application windows using accessibility controls. Opt-in only. Read a bounded UI tree, focus windows, invoke controls, enter text, send keys or use target-window coordinates. Optional window screenshots omit password-bearing windows."
+        "Read and operate Windows application windows using accessibility controls. Independent app access and action approval are required. Read a bounded UI tree, focus windows, invoke controls, enter text, send keys or use target-window coordinates. Optional window screenshots omit password-bearing windows."
     }
     fn input_schema(&self) -> Value {
         json!({"type":"object","required":["action"],"properties":{

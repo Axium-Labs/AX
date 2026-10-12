@@ -1258,6 +1258,9 @@ mod tests {
         }
         .import(&path);
         assert!(result.is_err());
+        // Remove only the fixture obstruction before session lookup attempts
+        // JSONL recovery; a directory is not a recoverable event file on Linux.
+        fs::remove_dir(&block).unwrap();
         assert!(project.session(&session_id).unwrap().is_none());
         assert!(
             project

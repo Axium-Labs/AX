@@ -822,18 +822,25 @@ impl LocalChildHost {
                 let directory = provision_root.join(uuid::Uuid::new_v4().to_string());
                 let state = directory.join("state");
                 let cwd = directory.join("workspace");
-                ctx("create child state", std::fs::create_dir_all(&state))?;
-                let lease = ctx("child state lease", workspace::lease(&state))?;
-                workspace::write_manifest(
-                    &state,
-                    &workspace::Manifest {
-                        cwd: cwd.clone(),
-                        repository: None,
-                        status: "running".into(),
-                        touched: workspace::now(),
-                    },
-                )
-                .map_err(failure)?;
+                let lease = {
+                    // GC must not acquire the new child's lease between directory
+                    // creation and ownership. Keep only publication serialized;
+                    // the workspace copy and child execution remain parallel.
+                    let _admission = workspace::admission(&provision_root);
+                    ctx("create child state", std::fs::create_dir_all(&state))?;
+                    let lease = ctx("child state lease", workspace::lease(&state))?;
+                    workspace::write_manifest(
+                        &state,
+                        &workspace::Manifest {
+                            cwd: cwd.clone(),
+                            repository: None,
+                            status: "running".into(),
+                            touched: workspace::now(),
+                        },
+                    )
+                    .map_err(failure)?;
+                    lease
+                };
                 if let Err(error) = workspace::provision_spec(
                     &source,
                     &cwd,
@@ -1132,7 +1139,13 @@ impl LocalChildHost {
     }
 }
 
+#[cfg(test)]
+#[path = "child_runtime_tests.rs"]
+mod tests;
 
+#[cfg(test)]
+#[path = "../../../test/harness/workspaces.rs"]
+mod harness_workspace_tests;
 
 fn validate_output(source: &Path, output: &Path) -> Result<(), AgentError> {
     if !output.is_absolute()

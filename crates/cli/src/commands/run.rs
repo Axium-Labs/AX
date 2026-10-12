@@ -193,11 +193,30 @@ where
             .expect("runtime initialized")
             .set_turn_input(runtime_core::TurnInput::default());
     }
-    if let Some((goal_id, answer)) = answer_intent(state, prompt)? {
+    if matches!(state.next_goal_turn, runtime_core::GoalTurn::Answer { .. }) {
+        // A host-supplied answer carries the authoritative question identity.
+        // Let the kernel validate it; parsing its text against a newer parked
+        // question would silently replace the caller's correlation.
+    } else if let Some((goal_id, answer)) = answer_intent(state, prompt)? {
         // The submission is the answer to the parked question: resume the same
         // goal from the exact tool call that asked, instead of planning again.
         state.next_goal_turn = runtime_core::GoalTurn::Answer { goal_id, answer };
     } else {
+        // Ordinary new tasks may use the user's scoped Goal defaults. Explicit
+        // lifecycle/host config and parked answers retain their own policy.
+        // Distributed workers receive their policy from the owning controller.
+        if matches!(
+            state.next_goal_turn,
+            runtime_core::GoalTurn::New | runtime_core::GoalTurn::Start { .. }
+        ) && std::env::var_os("AX_DISTRIBUTED_TASK").is_none()
+            && let Some(config) = config::automatic_goal_template(&state.project_root)?
+        {
+            let goal_id = match &state.next_goal_turn {
+                runtime_core::GoalTurn::Start { goal_id } => Some(goal_id.clone()),
+                _ => None,
+            };
+            state.next_goal_turn = runtime_core::GoalTurn::Pursue { config, goal_id };
+        }
         prepare_turn_context(state, selection, prompt)?;
     }
     let mut runtime = state.runtime.take().expect("runtime initialized");

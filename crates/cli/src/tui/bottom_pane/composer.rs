@@ -14,7 +14,10 @@ use super::textarea::TextArea;
 
 const PROMPT_COLS: usize = 2;
 const MAX_COMPOSER_ROWS: usize = 8;
+#[cfg(not(windows))]
 const PLACEHOLDER: &str = "Message AX…   (/ for commands, alt+enter for a new line)";
+#[cfg(windows)]
+const PLACEHOLDER: &str = "Message AX...   (/ for commands, alt+enter for a new line)";
 
 pub struct Composer {
     area: TextArea,

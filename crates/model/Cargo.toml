@@ -25,5 +25,13 @@ aws-smithy-types = "1"
 bytes = "1"
 jsonwebtoken = "9"
 
+[[test]]
+name = "native_providers"
+path = "../../test/providers/native.rs"
+
 [lints]
 workspace = true
+
+[[test]]
+name = "reasoning_catalogue"
+path = "../../test/providers/reasoning_catalogue.rs"

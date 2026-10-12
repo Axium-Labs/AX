@@ -9,8 +9,8 @@ is the authoritative statement for every frontend (CLI, TUI, ACP, Crew bridge)
 and every isolated child.
 
 The ordinary task queue uses a goal ID for identity. That ID does not enable the
-optional [Goal](goal.md) acceptance/continuation policy; only explicit Goal creation
-does so. Harness and Goal share this identity and one execution loop.
+optional [Goal](goal.md) acceptance/continuation policy. Explicit Goal creation
+or an enabled scoped automatic Goal template does so. Harness and Goal share this identity and one execution loop.
 
 ## Core contract
 

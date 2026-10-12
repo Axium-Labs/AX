@@ -5,10 +5,11 @@ requirements, and how the runtime and UI enforce them.
 
 ## Computer Use
 
-The opt-in Windows `desktop` tool provides real accessibility reads and control
+The Windows `desktop` tool provides real accessibility reads and control
 actions. `ax computer-use` owns its global configuration; AXCrew edits the same
-state. It defaults off, enforces node/image limits, redacts passwords and skips
-password-bearing window screenshots. See [computer-use.md](computer-use.md) for
+state. It defaults on, preserves explicit disable settings, enforces node/image
+limits, redacts passwords and skips password-bearing window screenshots.
+See [computer-use.md](computer-use.md) for
 the exact actions, permissions, platform boundaries and screenshot limitations.
 
 ## Agent environment and Crew terminal shell
@@ -740,3 +741,13 @@ There is no configured SSH host count limit or independent-host tool pool cap.
 Per-host resources serialize conflicting effects in one turn; separate hosts
 can run concurrently. Timeouts kill the local SSH process; remote process cleanup
 still depends on the remote SSH server/shell's disconnect handling.
+
+## Optional Long Project tool
+
+An explicitly enabled Goal registers runtime-owned `long_project`: evidence-linked
+section notes, current document/revision, archive lookup and paged raw tool receipt
+retrieval scoped to the same Goal's historical Sessions. Scheduler resource leases
+and declared filesystem read/write capabilities still apply. Notes cannot admit
+completion or replace Task state; credentials and unverified source IDs are
+rejected. Children do not inherit this host tool. Ordinary tasks register nothing.
+See [Long Project](long-project.md) for parameters and conflict handling.

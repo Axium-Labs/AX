@@ -11,6 +11,123 @@ use ratatui::buffer::Cell;
 use ratatui::layout::{Position, Size};
 use unicode_width::UnicodeWidthStr;
 
+#[cfg(windows)]
+pub fn console_input_mode() -> io::Result<u32> {
+    use crossterm_winapi::{ConsoleMode, Handle};
+    ConsoleMode::from(Handle::current_in_handle()?).mode()
+}
+
+#[cfg(windows)]
+pub fn set_console_input_mode(mode: u32) -> io::Result<()> {
+    use crossterm_winapi::{ConsoleMode, Handle};
+    ConsoleMode::from(Handle::current_in_handle()?).set_mode(mode)
+}
+
+/// Leave click/drag selection and copying to the terminal host.
+pub fn enable_native_selection() -> io::Result<()> {
+    use crossterm::Command;
+    use std::io::Write;
+    #[cfg(windows)]
+    let _ = crossterm::ansi_support::supports_ansi();
+    // Serialize the ANSI command directly: Crossterm's Windows disable command
+    // otherwise requires a prior enable and restores its saved input mode.
+    let mut sequence = String::new();
+    crossterm::event::DisableMouseCapture
+        .write_ansi(&mut sequence)
+        .map_err(io::Error::other)?;
+    io::stdout().write_all(sequence.as_bytes())?;
+    io::stdout().flush()?;
+    #[cfg(windows)]
+    {
+        // Quick Edit selects text in classic ConHost. Keep raw keyboard input,
+        // enable window resize events, and remove application mouse events.
+        let mode = console_input_mode()?;
+        set_console_input_mode((mode | 0x0040 | 0x0080 | 0x0008) & !0x0010)?;
+    }
+    Ok(())
+}
+
+/// The native Windows screen buffer may have a nonzero visible window origin.
+/// Crossterm 0.28 subtracts its top only for some cursor rows and ignores its
+/// left offset. Ratatui expects window-relative positions, while native ANSI
+/// cursor addressing uses the screen buffer's absolute column.
+pub struct ConsoleBackend<B>(pub WideCellBackend<B>);
+
+impl<B: Backend> Backend for ConsoleBackend<B> {
+    fn draw<'a, I>(&mut self, content: I) -> io::Result<()>
+    where
+        I: Iterator<Item = (u16, u16, &'a Cell)>,
+    {
+        #[cfg(windows)]
+        {
+            let left = crossterm_winapi::ScreenBuffer::current()?
+                .info()?
+                .terminal_window()
+                .left;
+            let left = u16::try_from(left.max(0)).unwrap_or_default();
+            self.0
+                .draw(content.map(|(x, y, cell)| (x.saturating_add(left), y, cell)))
+        }
+        #[cfg(not(windows))]
+        self.0.draw(content)
+    }
+    fn append_lines(&mut self, n: u16) -> io::Result<()> {
+        self.0.append_lines(n)
+    }
+    fn hide_cursor(&mut self) -> io::Result<()> {
+        self.0.hide_cursor()
+    }
+    fn show_cursor(&mut self) -> io::Result<()> {
+        self.0.show_cursor()
+    }
+    fn get_cursor_position(&mut self) -> io::Result<Position> {
+        #[cfg(windows)]
+        {
+            let info = crossterm_winapi::ScreenBuffer::current()?.info()?;
+            let cursor = info.cursor_pos();
+            let window = info.terminal_window();
+            Ok(Position::new(
+                u16::try_from(cursor.x.saturating_sub(window.left).max(0)).unwrap_or_default(),
+                u16::try_from(cursor.y.saturating_sub(window.top).max(0)).unwrap_or_default(),
+            ))
+        }
+        #[cfg(not(windows))]
+        self.0.get_cursor_position()
+    }
+    fn set_cursor_position<P: Into<Position>>(&mut self, position: P) -> io::Result<()> {
+        let position = position.into();
+        #[cfg(windows)]
+        let position = {
+            let left = crossterm_winapi::ScreenBuffer::current()?
+                .info()?
+                .terminal_window()
+                .left;
+            Position::new(
+                position
+                    .x
+                    .saturating_add(u16::try_from(left.max(0)).unwrap_or_default()),
+                position.y,
+            )
+        };
+        self.0.set_cursor_position(position)
+    }
+    fn clear(&mut self) -> io::Result<()> {
+        self.0.clear()
+    }
+    fn clear_region(&mut self, clear_type: ClearType) -> io::Result<()> {
+        self.0.clear_region(clear_type)
+    }
+    fn size(&self) -> io::Result<Size> {
+        self.0.size()
+    }
+    fn window_size(&mut self) -> io::Result<WindowSize> {
+        self.0.window_size()
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        self.0.flush()
+    }
+}
+
 pub struct WideCellBackend<B>(pub B);
 
 impl<B: Backend> Backend for WideCellBackend<B> {

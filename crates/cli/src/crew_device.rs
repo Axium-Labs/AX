@@ -304,3 +304,7 @@ async fn connected(url: &str, device_id: &str, key: &SigningKey) -> Result<()> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "../../../test/crew_compatibility.rs"]
+mod compatibility_tests;

@@ -19,20 +19,15 @@ The canonical [architecture](web-search-architecture.md) and
 - Kernel construction and child model override bind the actual provider; Mods
   must forward binding/fork hooks rather than discard the wrapped tool.
 
-Maintained tests are in `test/web/`. Native TCP fixtures call the production
-executor, not a public bypass flag; gateway capability remains false. Registry
-classification constructs every adapter. Runtime tests exercise actual kernel
-and SubagentManager. Explicit live tests consume existing legitimate credentials
-or anonymous public MCP, never baked-in keys. `acp_search.py` validates the real
-CLI ACP wire result with DeepSeek. Run live tests explicitly:
+Maintainer regression fixtures call the production executor, not a public bypass
+flag; gateway capability remains false. Registry classification constructs every
+adapter. Runtime validation exercises the actual kernel and SubagentManager.
+Private fixtures are kept outside formal source dependencies and published Cargo
+targets. Live validation is explicit and consumes existing legitimate credentials
+or anonymous public MCP, never baked-in keys; it also exercises the real CLI ACP
+wire result with a configured provider.
 
-```
-cargo test -p tool --test web_search live_anonymous_exa_and_parallel -- --ignored --nocapture
-cargo test -p model live_openai_native_search -- --ignored --nocapture
-python test/web/acp_search.py target/debug/ax.exe
-```
-
-The OpenAI test needs a legitimate API key and incurs normal provider usage;
+OpenAI live validation needs a legitimate API key and incurs normal provider usage;
 its failure must not be described as a native pass. `AX_HOME` may point to an
 existing credential home; live CLI data should use an isolated directory.
 Compile, format, Clippy, router/fetch regressions and platform tests are still
