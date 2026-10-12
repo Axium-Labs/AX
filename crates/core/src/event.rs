@@ -10,6 +10,11 @@ use tool::{ToolError, ToolOutput};
 #[derive(Clone, Debug, serde::Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AgentEvent {
+    SessionRotated {
+        goal_id: String,
+        previous_session: String,
+        session: String,
+    },
     Continuation {
         goal_id: Option<String>,
         step: usize,

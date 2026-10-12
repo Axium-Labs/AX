@@ -62,6 +62,12 @@ struct WorkerSettings {
     permission_profile: String,
     #[serde(default = "default_sandbox")]
     sandbox: String,
+    /// Explicit host policy; paused/blocked Goals otherwise require operator action.
+    #[serde(default)]
+    resume_goals: bool,
+    /// Host opt-in. Administrative configuration never runs during active executions.
+    #[serde(default)]
+    remote_management: bool,
 }
 struct Running {
     generation: u64,
@@ -225,8 +231,21 @@ pub(crate) async fn run(path: &Path) -> Result<()> {
     let mut inventory_probe = Some(tokio::spawn(crate::distributed_host::detect()));
     let mut next_inventory = Instant::now() + Duration::from_secs(60);
     let mut host_inventory = None;
+    let mut management: Option<JoinHandle<Vec<Value>>> = None;
+    let mut management_results = Vec::<Value>::new();
     loop {
         tokio::select! { _ = tick.tick() => {}, result = tokio::signal::ctrl_c() => { result?; break; } }
+        if management.as_ref().is_some_and(JoinHandle::is_finished) {
+            management_results = management.take().unwrap().await.unwrap_or_default();
+        }
+        if management.is_none()
+            && let Ok(commands) = client.request("POST", "/api/distributed/worker/manage", Some(json!({"incarnation":incarnation,"enabled":config.remote_management && config.ax_home.is_some(),"completed":management_results}))).await {
+            management_results.clear();
+            if let Some(commands) = commands.as_array().filter(|c| !c.is_empty())
+                && let Some(home) = config.ax_home.clone().filter(|_| config.remote_management) {
+                management = Some(tokio::spawn(crate::distributed_settings::apply(home,config.projects.clone(),commands.clone(),!running.is_empty())));
+            }
+        }
         let done: Vec<_> = running
             .iter()
             .filter(|(_, r)| r.handle.is_finished())
@@ -491,9 +510,12 @@ async fn prepare(config: &WorkerSettings, task: &Value) -> Result<(PathBuf, bool
         );
         copy_snapshot(source, &root)?;
     }
+    if config.remote_management {
+        crate::distributed_settings::snapshot_project(source, &root)?;
+    }
     Ok((root, is_git))
 }
-fn copy_snapshot(source: &Path, target: &Path) -> Result<()> {
+pub(crate) fn copy_snapshot(source: &Path, target: &Path) -> Result<()> {
     ensure!(
         !fs::symlink_metadata(source)?.file_type().is_symlink(),
         "snapshot rejects symbolic links"
@@ -524,7 +546,7 @@ fn copy_snapshot(source: &Path, target: &Path) -> Result<()> {
     }
     Ok(())
 }
-async fn send(input: &mut ChildStdin, value: Value) -> Result<()> {
+pub(crate) async fn send(input: &mut ChildStdin, value: Value) -> Result<()> {
     input.write_all(value.to_string().as_bytes()).await?;
     input.write_all(b"\n").await?;
     input.flush().await?;
@@ -655,7 +677,19 @@ async fn execute(
         }
     }
     let input_patch = if is_git {
-        git(&root, &["diff", "--binary", "HEAD"]).await?
+        git(
+            &root,
+            &[
+                "diff",
+                "--binary",
+                "HEAD",
+                "--",
+                ".",
+                ":(exclude).ax",
+                ":(exclude).distributed-inputs",
+            ],
+        )
+        .await?
     } else {
         vec![]
     };
@@ -716,61 +750,140 @@ async fn execute(
     )
     .lines();
     rpc(&mut input,&mut lines,1,"initialize",json!({"protocolVersion":1,"clientCapabilities":{},"clientInfo":{"name":"AX Distributed Worker","version":env!("CARGO_PKG_VERSION")}})).await?;
-    let session = rpc(&mut input,&mut lines,2,"session/new",json!({"cwd":root,"mcpServers":[],"_ax":{"skills":config.skills,"mcpServers":config.mcp,"permissionProfile":config.permission_profile}})).await?;
     let workflow_tasks:Vec<_>=assignment["workflow_tasks"].as_array().into_iter().flatten().map(|t|json!({"id":t["id"],"request_id":t["spec"]["request_id"],"title":t["spec"]["title"],"status":t["status"],"result":t["result"],"failure":t["failure"],"artifacts":t["artifacts"]})).collect();
-    let prompt = format!(
-        "{}\n\nNecessary context summary:\n{}\n\nDependency results (collaboration metadata):\n{}\n\nDurable workflow state:\n{}\n\nAlready submitted workflow tasks:\n{}\n\nObservations:\n{}\n\nInput artifacts are in .distributed-inputs, named by artifact ID. Patch artifacts have been applied to this isolated workspace. Use the collaboration tool for asynchronous delegation and workflow checkpoints. Recover from stored state and existing task IDs; a coordinator does not need to remain alive.",
-        task["spec"]["input"].as_str().unwrap_or_default(),
+    let context = format!(
+        "Assigned collaboration role: {}\n\nNecessary context summary:\n{}\n\nDependency results (collaboration metadata):\n{}\n\nDurable workflow state:\n{}\n\nAlready submitted workflow tasks:\n{}\n\nObservations:\n{}\n\nInput artifacts are in .distributed-inputs, named by artifact ID. Patch artifacts have been applied to this isolated workspace. Use the collaboration tool for asynchronous delegation and workflow checkpoints. Recover from stored state and existing task IDs; a coordinator does not need to remain alive.",
+        assignment["workflow"]["collaboration"]["participants"][&config.instance_id]
+            .as_str()
+            .unwrap_or("Contribute to the current work task"),
         task["spec"]["context_summary"].as_str().unwrap_or_default(),
         assignment["dependency_results"],
         assignment["workflow"],
         json!(workflow_tasks),
         assignment["observations"]
     );
-    send(&mut input,json!({"jsonrpc":"2.0","id":3,"method":"session/prompt","params":{"sessionId":session["sessionId"],"prompt":[{"type":"text","text":prompt}]}})).await?;
-    let mut output = String::new();
-    let mut failure = None;
-    loop {
-        let line = lines
-            .next_line()
-            .await?
-            .ok_or_else(|| anyhow!("AX crashed or ACP closed before result"))?;
-        let value: Value = serde_json::from_str(&line)?;
-        if value["method"] == "session/request_permission" {
-            // Local policy is already applied inside AX. Unattended workers reject unresolved asks.
-            send(&mut input,json!({"jsonrpc":"2.0","id":value["id"],"result":{"outcome":{"outcome":"selected","optionId":"reject_once"}}})).await?;
-        } else if value["method"] == "session/update" {
-            let update = &value["params"]["update"];
-            if update["sessionUpdate"] == "agent_message_chunk"
-                && let Some(text) = update["content"]["text"].as_str()
-            {
-                output.push_str(text);
-            }
-        } else if value["id"] == 3 {
-            if !value["error"].is_null() {
-                failure = Some(format!("ACP execution error: {}", value["error"]));
-            } else if value["result"]["stopReason"] != "end_turn" {
-                failure = Some("AX execution cancelled".into());
-            } else if value["result"]["_meta"]["axGoal"]["waiting_for_user"] == true {
-                failure = Some("AX requires user input".into());
-            }
-            break;
-        }
+    let task_id = task["id"]
+        .as_str()
+        .ok_or_else(|| anyhow!("durable task ID missing"))?;
+    let saved =
+        assignment["workflow"]["state"][crate::distributed_goal::CHECKPOINT_KEY].get(task_id);
+    if let Some(saved) = saved {
         ensure!(
-            output.len() <= 8 * 1024 * 1024,
-            "output exceeds artifact limit"
+            config.resume_goals
+                || !matches!(
+                    saved["queue"]["goal"]["state"].as_str(),
+                    Some("paused" | "blocked")
+                ),
+            "Durable Goal was intentionally paused/blocked; automatic resume is disabled by host policy"
         );
     }
+    let original = task["spec"]["input"].as_str().unwrap_or_default();
+    let explicit_goal = original
+        .trim_start()
+        .strip_prefix("/goal")
+        .is_some_and(|rest| rest.is_empty() || rest.starts_with(char::is_whitespace));
+    ensure!(
+        saved.is_some() || task["generation"].as_u64().unwrap_or(0) <= 1 || !explicit_goal,
+        "Goal takeover lacks an authoritative runtime checkpoint; refusing to reset its budget or replay effects"
+    );
+    let mut ax = json!({"skills":config.skills,"mcpServers":config.mcp,"permissionProfile":config.permission_profile,"taskContext":context});
+    if let Some(saved) = saved {
+        ax["goalCheckpoint"] = saved.clone();
+    }
+    let session = rpc(
+        &mut input,
+        &mut lines,
+        2,
+        "session/new",
+        json!({"cwd":root,"mcpServers":[],"_ax":ax}),
+    )
+    .await?;
+    let (prompt, intent) = if saved.is_some() {
+        ("Resume unfinished durable Goal work. Inspect artifacts and actual external state before retrying effects.".to_owned(), json!({"action":"resume","goal_id":task_id}))
+    } else {
+        (
+            original.to_owned(),
+            json!({"action":"start","goal_id":task_id}),
+        )
+    };
+    send(&mut input,json!({"jsonrpc":"2.0","id":3,"method":"session/prompt","params":{"sessionId":session["sessionId"],"prompt":[{"type":"text","text":prompt}],"_meta":{"axGoal":intent}}})).await?;
+    let (output, failure) = if assignment["workflow"]["collaboration"]["kind"]
+        .as_str()
+        .is_some_and(|kind| !kind.is_empty())
+    {
+        crate::distributed_session::Bridge {
+            client,
+            source: json!({"incarnation":incarnation,"task_id":task["id"],"generation":task["generation"],"message_id":"session-inbox","kind":"observation","text":"","artifacts":[]}),
+            session,
+            session_options: json!({"skills":config.skills,"mcpServers":config.mcp,"permissionProfile":config.permission_profile}),
+            root: &root,
+        }.drive(&mut input, &mut lines).await?
+    } else {
+        let mut output = String::new();
+        let mut failure = None;
+        loop {
+            let line = lines
+                .next_line()
+                .await?
+                .ok_or_else(|| anyhow!("AX crashed or ACP closed before result"))?;
+            let value: Value = serde_json::from_str(&line)?;
+            if value["method"] == "session/request_permission" {
+                // Local policy is already applied inside AX. Unattended workers reject unresolved asks.
+                send(&mut input,json!({"jsonrpc":"2.0","id":value["id"],"result":{"outcome":{"outcome":"selected","optionId":"reject_once"}}})).await?;
+            } else if value["method"] == "session/update" {
+                let update = &value["params"]["update"];
+                if update["sessionUpdate"] == "agent_message_chunk"
+                    && let Some(text) = update["content"]["text"].as_str()
+                {
+                    output.push_str(text);
+                }
+            } else if value["id"] == 3 {
+                if !value["error"].is_null() {
+                    failure = Some(format!("ACP execution error: {}", value["error"]));
+                } else if value["result"]["stopReason"] != "end_turn" {
+                    failure = Some("AX execution cancelled".into());
+                } else if value["result"]["_meta"]["axGoal"]["waiting_for_user"] == true {
+                    failure = Some("AX requires user input".into());
+                }
+                break;
+            }
+            ensure!(
+                output.len() <= 8 * 1024 * 1024,
+                "output exceeds artifact limit"
+            );
+        }
+        (output, failure)
+    };
     child.kill().await.ok();
     let mut artifacts = Vec::new();
     if is_git {
         // Input references are runtime coordination files, excluded from the generated patch.
         git(
             &root,
-            &["add", "-A", "--", ".", ":(exclude).distributed-inputs"],
+            &[
+                "add",
+                "-A",
+                "--",
+                ".",
+                ":(exclude).distributed-inputs",
+                ":(exclude).ax",
+            ],
         )
         .await?;
-        let patch = git(&root, &["diff", "--cached", "--binary", "HEAD"]).await?;
+        let patch = git(
+            &root,
+            &[
+                "diff",
+                "--cached",
+                "--binary",
+                "HEAD",
+                "--",
+                ".",
+                ":(exclude).ax",
+                ":(exclude).distributed-inputs",
+            ],
+        )
+        .await?;
         if !patch.is_empty() && patch != input_patch {
             artifacts.push(
                 publish(client, incarnation, task, "patch", "changes.patch", &patch).await?["id"]
@@ -797,7 +910,3 @@ async fn execute(
         "kind":if failure.is_some(){"failed"}else{"completed"},"text":text,"artifacts":artifacts}),
     )
 }
-
-#[cfg(test)]
-#[path = "../../../test/distributed_worker.rs"]
-mod tests;

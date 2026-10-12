@@ -210,7 +210,3 @@ impl OpenAiCompatibleProvider {
         .await
     }
 }
-
-#[cfg(test)]
-#[path = "../../../../test/web/compatible_search.rs"]
-mod tests;

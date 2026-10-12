@@ -47,6 +47,17 @@ fn read_answer() -> Result<Option<String>> {
 /// # Errors
 /// Returns an error when settings validation or the launcher fails.
 pub(crate) fn run_preflight(cli: &Cli) -> Result<bool> {
+    if let Some(Command::GoalSettings {
+        scope,
+        json_stdin,
+        reset,
+    }) = &cli.command
+    {
+        let root = crate::bootstrap::discover_project_root(&std::env::current_dir()?);
+        let settings = crate::goal_settings::manage(&root, scope, *json_stdin, *reset)?;
+        println!("{}", serde_json::to_string_pretty(&settings)?);
+        return Ok(true);
+    }
     if let Some(Command::HostPermissions {
         surface,
         target,
@@ -219,6 +230,7 @@ pub(crate) async fn dispatch(
             Command::Acp
             | Command::Environment { .. }
             | Command::Settings { .. }
+            | Command::GoalSettings { .. }
             | Command::Personalize { .. }
             | Command::ComputerUse { .. }
             | Command::HostPermissions { .. }

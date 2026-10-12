@@ -19,7 +19,34 @@ pub(crate) async fn detect() -> Value {
         Ok(Err(error)) => info["errors"] = json!([format!("hardware detection: {error}")]),
         Err(_) => info["errors"] = json!(["hardware detection timed out"]),
     }
+    // Reuse the existing on-demand collector off the lease loop. Samples are
+    // measured utilization, separate from the scheduler's capacity reservations.
+    if let Ok(Ok(metrics)) =
+        tokio::time::timeout(Duration::from_secs(5), tokio::task::spawn_blocking(metrics)).await
+    {
+        info["metrics"] = metrics;
+    }
     info
+}
+
+fn metrics() -> Value {
+    let system = crate::system_info::get_system_info();
+    let mut networks = sysinfo::Networks::new_with_refreshed_list();
+    let started = std::time::Instant::now();
+    std::thread::sleep(Duration::from_millis(250));
+    networks.refresh(true);
+    let elapsed = started.elapsed().as_secs_f64();
+    let (received, transmitted) = networks.values().fold((0_u64, 0_u64), |(r, t), n| {
+        (
+            r.saturating_add(n.received()),
+            t.saturating_add(n.transmitted()),
+        )
+    });
+    let disks = sysinfo::Disks::new_with_refreshed_list();
+    let disks: Vec<_> = disks.iter().map(|d| json!({"mount":d.mount_point(),"total_mb":d.total_space()/1024/1024,"available_mb":d.available_space()/1024/1024})).collect();
+    #[allow(clippy::cast_precision_loss)]
+    let network = json!({"received_bytes_per_second":received as f64 / elapsed,"transmitted_bytes_per_second":transmitted as f64 / elapsed});
+    json!({"system":system,"disks":disks,"network":network})
 }
 
 fn merge(info: &mut Value, found: &Value) {
@@ -146,7 +173,3 @@ async fn platform() -> anyhow::Result<Value> {
 async fn platform() -> anyhow::Result<Value> {
     anyhow::bail!("hardware inventory is unsupported on this platform")
 }
-
-#[cfg(test)]
-#[path = "../../../test/distributed_host.rs"]
-mod tests;

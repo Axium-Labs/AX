@@ -3,7 +3,8 @@
 Goal is the in-place evolution of the former StopGuard. There is one completion
 validator and one existing model/tool Agent Loop. It is optional and off for
 ordinary tasks. Harness still owns reliable execution, Task Queue owns task
-identity and children, and Goal owns acceptance and continuation limits.
+identity and children, Goal owns acceptance policy, and Runtime enforces execution
+constraints using its existing budgets and usage statistics.
 
 ## Use
 
@@ -21,6 +22,9 @@ identity and children, and Goal owns acceptance and continuation limits.
 - `/goal limits {"max_rounds":64,"max_tokens":200000}` changes limits on a paused
   or blocked target. Consumed resources remain cumulative; raising a limit does
   not reset usage or evidence. Explicit resume follows.
+- `/goal acknowledge <validator-id>` records explicit review of an interrupted
+  unsafe verifier's external effects. It clears that replay barrier without
+  running anything; inspect the saved call and real external state first.
 
 These commands work in TUI and through `ax run "/goal ..."`. Reopen the saved
 session with `--session` to inspect/manage a target after process exit. Active TUI
@@ -44,13 +48,18 @@ conversations or automatic worker validation.
   "acceptance": ["report agrees with actual measured results"],
   "deliverables": ["report.json"],
   "required_successful_calls": [],
+  "validators": [],
+  "validation_combination": "all",
   "max_rounds": 0,
   "max_seconds": 0,
   "max_tokens": 0,
   "max_cost_microusd": 0,
   "input_microusd_per_million": null,
   "output_microusd_per_million": null,
-  "max_stagnant_checks": 3
+  "max_stagnant_checks": 3,
+  "stagnant_seconds": 300,
+  "max_unobserved_checks": 12,
+  "stagnation_action": "pause"
 }
 ```
 
@@ -62,13 +71,96 @@ new file is absent. The original project file remains as a backup. Core only
 receives GoalConfig; it has no legacy configuration branch. Existing durable
 pending/allowed markers remain readable for old child recovery.
 
+`ax goal-settings --scope global|project` reads the same templates without opening
+a provider or Session. `--json-stdin` replaces that scope with validated GoalConfig
+JSON from stdin (1 MiB maximum); `--reset` restores global defaults or removes the
+project override. Reset archives a legacy project template so it cannot be
+silently migrated again. Other configuration fields are preserved. Project files
+replace the global template as a whole; missing fields use GoalConfig defaults.
+Portable relative references resolve in the selected project at Goal creation.
+Settings edits apply to new Goals; saved Goals retain their frozen configuration.
+
+## Configured validators
+
+The existing GoalEvaluator is wrapped with configured acceptance conditions;
+there is no separate loop or tool executor. A deterministic Goal can use custom
+conditions without declaring files or successful call IDs. Model mode retains
+its independent evaluation after custom conditions pass.
+
+```json
+{
+  "mode": "deterministic",
+  "validation_combination": "all",
+  "validators": [
+    {"id":"build","version":"v2","kind":"command",
+     "command":"python scripts/verify.py","reference":"scripts/verify.py",
+     "timeout_seconds":30,"replay_safe":false},
+    {"id":"ci","version":"v1","kind":"http",
+     "url":"https://ci.example.org/ax/acceptance","timeout_seconds":30},
+    {"id":"enterprise","version":"v3","kind":"host","tool":"mcp",
+     "input":{"action":"call","server":"enterprise","tool":"acceptance",
+              "arguments":{}},"timeout_seconds":30,"replay_safe":false}
+  ]
+}
+```
+
+Command calls the registered `shell` tool, with a JSON request on stdin rather
+than interpolating it into shell text. `reference` identifies an existing verifier
+file; it is checked before execution and again after restore. HTTP is GET through
+the existing `web.fetch` tool, with the JSON request in the `ax_goal` query
+parameter; responses must be nontruncated `application/json`. It inherits Web
+network policy, redirect checks and response limits. Host calls an existing
+registered tool/MCP capability with an `ax_goal` argument. For the lazy `mcp`
+gateway, context goes in `arguments.ax_goal` and `action` must be `call`.
+Direct JSON receipts and standard MCP `structuredContent` or a single text block
+are supported; MCP `isError` cannot admit completion.
+
+All three use Scheduler permission admission, resource leases and sandboxed tool
+registrations. Configuration cannot promote an unbound tool out of confinement,
+inject scheduler control fields, or grant permissions. A 1–86400 second timeout
+(default 30), bounded by the current Runtime tool timeout, covers approvals,
+resource waits and execution. Raw tool results, call IDs and typed receipts are
+checkpointed using the existing Session/Task Queue evidence path.
+
+The request contains `protocol: "ax.goal.v1"`, `goal_id`, `target`, `acceptance`,
+`validator_id` and `version`. A successful command writes exactly one JSON receipt
+on stdout (logs may use stderr); HTTP and host return the same receipt:
+
+```json
+{
+  "protocol":"ax.goal.v1", "goal_id":"<request goal_id>",
+  "validator_id":"build", "version":"v2",
+  "decision":{"status":"allow"},
+  "evidence":{"exit_code":0,"artifact":"report.json"}
+}
+```
+
+`allow` requires nonempty evidence. `continue` means acceptance is unfinished;
+`insufficient_evidence` means it cannot currently be established. `blocked` needs
+external action or permission, and `failed` is an explicit irrecoverable result.
+The latter four include a nonempty `reason`. Transport errors, malformed or
+truncated results yield insufficient evidence; identity/version mismatch and typed
+permission denial block. They never silently pass. `all` requires every condition;
+`any` requires one valid condition. Neither can hide blockers or irrecoverable
+failures. Configured file/call requirements still apply after that combination.
+
+The Goal persists the complete rules, declared versions/references, tool schemas,
+command OS/architecture binding, receipts and in-flight verifier. Restore rechecks
+availability/bindings; live service availability is established by the bounded
+call, not assumed from saved success. Host GoalEvaluator implementations must
+reinstall the same `policy_reference()` on the new host. Commands and host calls
+default to unsafe replay; interrupting one retains a barrier until explicit
+acknowledgment. Read-only HTTP GET is replay safe. A policy author may explicitly
+mark an idempotent command/host verifier `replay_safe`.
+
 ## Completion and limits
 
 Deterministic mode checks declared deliverable existence and successful **call
 IDs** from structured results belonging to this target. It never interprets
 assistant claims or shell prose as success. Existence does not prove freshness
 or semantic correctness. An empty deterministic check set, or natural-language
-acceptance in deterministic mode, yields insufficient evidence instead of success.
+acceptance in deterministic mode without a custom validator, yields insufficient
+evidence instead of success.
 
 Model mode first checks configured deterministic requirements, then makes an
 independent streaming provider request. Its only schema is `goal_decision`:
@@ -85,7 +177,7 @@ by remaining cumulative Goal rounds and uses the existing timeout path for the
 remaining active runtime. One execution or verification request chain is a round;
 bounded retries remain part of that step. Existing tool, child and execution budgets
 continue to apply. Child execution retains its own existing budgets and scheduler;
-Goal does not add a distributed/global worker budget. Completed child metrics are
+Goal does not add a distributed/global worker budget ledger. Completed child metrics are
 absorbed once from current queue receipts for display.
 
 Reported usage comes from existing `ModelResponse.usage` and child metrics. Token
@@ -99,10 +191,23 @@ No invoice price, cached-token discount or arbitrary tool-internal model cost is
 inferred. Reported caps stop subsequent work when exhausted; an in-flight request
 can cross a cap, since AX does not know its final usage before the response.
 
-Stagnation reuses Harness `ExecutionState.progress.advances` and declared deliverable
-metadata. The default is 3 unchanged completed loop rounds after the first observation;
-`max_stagnant_checks: 0` disables it. Repeated assistant claims, tool failures or
-unchanged observations do not establish progress. Resource exhaustion and stagnation
+Stagnation combines Harness `ExecutionState.progress.advances`, real queue/child
+transitions, deliverable metadata and fresh verifier work observations. A receipt
+may include `work` with `status` (`running`, `waiting_external`, `no_progress`,
+`blocked`, `unknown`), a concrete `reference`, optional measured `progress` and
+`valid_for_seconds`. Observations expire (freshness is capped at the larger of
+30 seconds and the configured idle interval). Unknown evidence is never failure.
+Inline tools and child collection are awaited; approvals, running children and
+retries do not count as stagnation. Observed background/external work parks the
+Goal with its activity and evidence, without spending inference polling it.
+The user/host resumes when actual work changes; Goal adds no background scheduler.
+
+Defaults require 3 unchanged observations **and** 300 active idle seconds, with a
+finite fallback at 12 unchanged observations. `max_unobserved_checks` is floored
+at `max_stagnant_checks`; the idle interval can be zero for immediate legacy
+thresholds. `max_stagnant_checks: 0` explicitly disables detection. `pause` is the
+default action; `request_human` blocks for evidence review. Repeated assistant
+claims, tool failures or unchanged reads do not establish progress. Resource exhaustion and stagnation
 pause without completion. Provider errors use the existing finite RetryPolicy:
 exhausted transient execution errors pause, permission/configuration faults block,
 and unrecoverable errors fail. Verifier failure never silently allows completion.
@@ -121,6 +226,11 @@ JSONL-first sink before advancing. Interrupted states restore as paused, without
 automatic execution. Unknown in-flight usage is displayed conservatively as an
 estimate, without a hard Token/cost cap. Interrupted wall time through recovery is counted conservatively;
 completed pauses exclude time.
+Single-machine CLI execution and Goal edits use an OS Session lease, released on
+process death. Opening an owned Goal session cannot repair/write its history;
+execution also rejects stale Goal/configuration/consumption snapshots. Loading
+state does not start execution. Embedders retain responsibility for their own
+Session ownership and choose whether to issue an explicit resume.
 Completed child receipts are reused. Pending tool calls get an unknown-side-effect
 placeholder and a recovery instruction to inspect actual external state before
 retrying. AX cannot independently prove all external effects, so no blind replay
@@ -135,14 +245,42 @@ reinstalled explicitly after restoring a session; they are executable host polic
 not serializable configuration. AXCrew retains distributed scheduling, ownership,
 failure detection and takeover responsibilities.
 
-## Validation
+## AXCrew durability boundary
 
-Scripts live in `test/`; run with isolated AX_HOME/TEMP and outputs under the
-workspace `axtest/`. `test/harness/goal.rs`, `test/goal_commands.rs`,
-`test/goal_tui.rs`, `test/goal_process.py` and existing continuation/child suites
-cover direct completion,
-verification, lifecycle, budgets, proof scoping, persistence, tool permissions and
-frontend wiring. `test/goal_process.py` runs the production binary against a local
-SSE provider and kills/restarts it after a persisted filesystem effect.
-Use `test/goal.ps1 -Workspace -Process` for the reproducible run; it restores the
-calling shell's environment variables afterwards.
+The existing distributed worker binds explicit `/goal` to the Durable Task ID.
+It stores the queue, cumulative usage/reservations and bounded existing Message
+evidence under `Workflow.state.ax_goal_runtime[task_id]`, using existing Workflow
+CAS and source lease/incarnation/generation checks. It checkpoints before model
+requests and effects, and before reporting completion. Missing authoritative
+state on takeover stops execution rather than resetting consumption. Normal
+distributed tasks do not write Goal checkpoints. Collaboration checkpoints
+preserve the reserved Goal key. Crew's existing 256 KiB Workflow limit applies;
+checkpoint failure stops advancement.
+
+Interrupted running Goals may use Crew's existing takeover policy. Intentionally
+paused/blocked Goals require explicit worker `resume_goals: true` (default false)
+before an unattended retry. This does not clear unsafe effects, bypass validators
+or reset limits. Goal pause/block remains in the Workflow; an unsuccessful worker
+attempt uses Crew's existing failed-attempt reporting, not a new Goal scheduler.
+
+Full local Session databases, child sessions and working-directory effects are
+not migrated. Unfinished Goals with ordinary tool calls or local children stop
+automatic takeover for host reconciliation of artifacts/effects. Policies with
+paths outside the saved workspace are rejected; workspace-relative references
+are rebased and verified on the new host. Available validators and unchanged
+budgets are prerequisites, not assumptions of identical machines. Final result
+submission remains fenced by Crew's existing task owner and generation.
+
+Design reference: [Claude Code Goal](https://code.claude.com/docs/en/goal) and
+[Hooks](https://code.claude.com/docs/en/hooks). AX keeps its own existing evaluator,
+Runtime permissions/budgets and AXCrew ownership boundaries.
+
+## Long Project and multi-Session execution
+
+An explicit Goal can opt into `long_project` and its default automatic Session
+rotation. Goal criteria, cumulative usage, runtime state and permission ceilings
+survive rotation; working Markdown remains a non-authoritative evidence projection.
+Native `/goal project` controls documents/configuration and `/goal rotate` requests
+a safe handoff. Ordinary tasks remain unchanged unless rotation is explicitly
+configured. See [Long Project and Session rotation](long-project.md) for defaults,
+scoped overrides, import/export, conflicts and recovery.

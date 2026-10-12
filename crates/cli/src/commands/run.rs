@@ -37,6 +37,11 @@ fn log_event(event: &AgentEvent) {
 
 fn render_event(event: AgentEvent) {
     match event {
+        AgentEvent::SessionRotated {
+            goal_id,
+            previous_session,
+            session,
+        } => eprintln!("Session rotated: {previous_session} -> {session} (Goal {goal_id})"),
         AgentEvent::ModelStarted { provider, model } => {
             eprintln!("[{provider}/{model}] thinking...");
         }
@@ -115,6 +120,7 @@ where
     let prompt = if prompt == "/goal" || prompt.starts_with("/goal ") {
         match crate::commands::goal::prepare(state, prompt)? {
             crate::commands::goal::GoalCommand::Output(output) => {
+                crate::distributed_goal::checkpoint_native(state, prompt).await?;
                 emit(AgentEvent::ContentDelta {
                     delta: output.clone(),
                 });
@@ -163,6 +169,10 @@ where
                 runtime.register_tool(tool);
             }
             runtime = runtime.with_runtime_extension(Arc::new(extension));
+        }
+        if let Some(host) = crate::distributed_goal::DistributedGoal::from_env(&state.project_root)
+        {
+            runtime = runtime.with_runtime_extension(Arc::new(host));
         }
         state.runtime = Some(runtime);
     } else {

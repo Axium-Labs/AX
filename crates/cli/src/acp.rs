@@ -24,9 +24,6 @@ use runtime_core::{AgentEvent, ApprovalPolicy};
 use tool::{Capability, PermissionDecision, PermissionStore, SafetyLevel, ToolPermission};
 
 type Outbox = mpsc::UnboundedSender<Value>;
-#[cfg(test)]
-#[path = "../../../test/host_acp.rs"]
-mod host_approval_tests;
 type PendingPermissions = Arc<Mutex<HashMap<String, oneshot::Sender<String>>>>;
 
 struct PendingPermissionGuard {
@@ -215,6 +212,13 @@ fn now_seconds() -> i64 {
 
 fn update(out: &Outbox, session_id: &str, event: AgentEvent, calls: &mut HashMap<String, String>) {
     let body = match event {
+        AgentEvent::SessionRotated {
+            goal_id,
+            previous_session,
+            session,
+        } => {
+            json!({"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":""},"_meta":{"axSessionRotation":{"goal_id":goal_id,"previous_session":previous_session,"session":session}}})
+        }
         AgentEvent::GoalUpdated { goal_id, goal } => {
             json!({"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":""},"_meta":{"axGoal":{"goal_id":goal_id,"goal":goal}}})
         }
@@ -808,6 +812,24 @@ pub async fn run(cli: &Cli, data_dir: PathBuf, skills_dir: PathBuf) -> Result<()
                     }
                     apply_mcp_names(&mut state, requested_mcp_names.as_ref())?;
                     state.create_session("ACP session")?;
+                    if let Ok(task) = std::env::var("AX_DISTRIBUTED_TASK") {
+                        if let Some(value) = params["_ax"].get("goalCheckpoint") {
+                            let queue = crate::distributed_goal::restored_queue(value, &task, &cwd)?;
+                            crate::long_project::restore_distributed_document(&cwd, &queue, value)?;
+                            let mut messages: Vec<model::Message> = serde_json::from_value(value["messages"].clone())?;
+                            // Stale queue/execution contexts carry the previous workspace scope.
+                            messages.retain(|m| m.role != model::Role::System);
+                            messages.extend(crate::session_restore::interrupted_results(&messages));
+                            messages.push(queue.snapshot());
+                            messages.push(model::Message::system("[ax-recovery]\nDurable task takeover restored Goal criteria, cumulative usage and bounded execution receipts. Inspect artifacts and external effects; never replay completed submissions. Full local Session/child workspaces are not migrated."));
+                            state.persist_messages(&messages)?;
+                        }
+                        if let Some(context) = params["_ax"]["taskContext"].as_str() {
+                            state.persist_messages(&[model::Message::system(format!("[ax-distributed-context]\n{context}"))])?;
+                        }
+                    } else if params["_ax"].get("goalCheckpoint").is_some() {
+                        anyhow::bail!("Goal takeover requires a host-bound durable task");
+                    }
                     Ok(state.current_session_id()?.to_owned())
                 }) {
                     Ok(session_id) => {
@@ -1148,7 +1170,7 @@ pub async fn run(cli: &Cli, data_dir: PathBuf, skills_dir: PathBuf) -> Result<()
                     "streaming":true,
                     "cancel":"abort_turn",
                     "steering":{"method":"_ax/steer","scope":"active_turn","interrupts":false},
-                    "goals":{"promptMetadata":"_meta.axGoal","actions":["new","start","resume","cancel"]},
+                    "goals":{"promptMetadata":"_meta.axGoal","actions":["new","start","pursue","resume","pause","cancel","answer"]},
                     "permissions":true,
                     "workspace":{"method":"_ax/workspace","readOnly":true},
                     "providers":{

@@ -116,6 +116,11 @@ pub enum InheritanceClass {
 
 #[async_trait]
 pub trait Tool: Send + Sync {
+    /// Model/delegated execution whose usage is not included in `ModelResponse`.
+    /// The runtime may display estimates but must not claim an aggregate hard cap.
+    fn execution_usage_incomplete(&self, _input: &Value) -> bool {
+        false
+    }
     /// Bind model-owned capabilities after provider selection, including child overrides.
     fn bind_model(&self, _provider: Arc<dyn model::ModelProvider>) -> Option<Arc<dyn Tool>> {
         None

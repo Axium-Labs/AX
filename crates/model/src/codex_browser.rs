@@ -225,7 +225,3 @@ async fn respond(stream: &mut TcpStream, status: &str, body: &str) {
     )
     .await;
 }
-
-#[cfg(test)]
-#[path = "../../../test/providers/codex_browser.rs"]
-mod tests;

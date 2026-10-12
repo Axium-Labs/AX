@@ -17,6 +17,16 @@ and constrain existing ExecutionBudget/timeout paths. Token/billing caps require
 complete reported statistics; estimates never enforce a hard cap. Harness progress
 advances drive configurable stagnation, and existing RetryPolicy handles retries.
 
+Configured Command, HTTP and host/MCP acceptance adapters wrap GoalEvaluator and
+use the existing Scheduler, tool sandbox, permissions and Session evidence sink.
+Rules, versions, bindings and unsafe in-flight effects persist with the Goal.
+Conservative stagnation incorporates measured external/child evidence and parks
+external waits for explicit host/user resume. Optional RuntimeExtension checkpoints
+reuse Crew's fenced Workflow CAS for cumulative consumption and bounded receipts;
+ordinary tasks do not incur those calls. Local Session leases protect execution
+and recovery writes. A missing verifier or unreconciled local effect prevents
+automatic takeover; neither a new budget ledger nor a distributed scheduler is added.
+
 Goals stop distinctly as completed, paused, blocked, failed or cancelled. Unknown
 proof cannot become success. Persist conservative reservations before inference
 and structured tool evidence before advancing; resume never automatically replays

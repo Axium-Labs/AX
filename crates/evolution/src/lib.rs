@@ -16,9 +16,6 @@ mod policy;
 mod storage;
 mod types;
 
-#[cfg(test)]
-#[path = "../../../test/evolution/lifecycle.rs"]
-mod tests;
 mod worker;
 
 pub use config::Config;

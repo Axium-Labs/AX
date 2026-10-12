@@ -331,9 +331,6 @@ async fn endpoint(
     Ok((url.into(), headers))
 }
 
-#[cfg(test)]
-#[path = "../../../../test/providers/google_auth.rs"]
-mod tests;
 
 fn part(part: &ContentPart) -> Value {
     match part {

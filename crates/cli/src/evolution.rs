@@ -166,17 +166,72 @@ pub(crate) async fn run_once(
 }
 
 /// The kernel retains sole ownership of execution; this adapter observes its callback.
+// One adapter orders ownership, raw persistence and Session activation.
+#[allow(clippy::too_many_lines)]
 pub(crate) async fn checkpointed_turn<F>(
     runtime: &mut runtime_core::AgentKernel,
     state: &mut ReplState,
     prompt: &str,
-    mut emit: F,
+    emit: F,
 ) -> Result<String, runtime_core::AgentError>
 where
     F: FnMut(AgentEvent) + Send,
 {
+    let project_config = match &state.next_goal_turn {
+        runtime_core::GoalTurn::Pursue { config, .. } => Some(config),
+        _ => runtime.goal().map(|g| &g.config),
+    };
+    if let Some(config) = project_config {
+        crate::long_project::validate(config)
+            .map_err(|e| runtime_core::AgentError::GoalMismatch(e.to_string()))?;
+    }
+    let project_enabled =
+        project_config.is_some_and(|c| c.long_project.as_ref().is_some_and(|p| p.enabled));
+    let project_host = if project_enabled {
+        let owner = crate::long_project::owner(state)
+            .map_err(|e| runtime_core::AgentError::GoalMismatch(e.to_string()))?;
+        Some(crate::long_project::ProjectHost::new(
+            state.project_root.clone(),
+            state.current_session_id().unwrap_or_default().to_owned(),
+            owner,
+        ))
+    } else {
+        None
+    };
+    runtime.configure_long_project_host(
+        project_host
+            .clone()
+            .map(|h| h as std::sync::Arc<dyn runtime_core::long_project::LongProjectHost>),
+    );
+    if let Some(host) = &project_host {
+        *host.database.lock().unwrap() = Some(crate::bootstrap::database_path(&state.data_dir));
+        runtime.register_tool(crate::long_project::ProjectTool(host.clone()));
+    } else {
+        runtime.remove_tool("long_project");
+    }
+    if std::mem::take(&mut state.next_rotation) {
+        runtime.request_session_rotation();
+    }
     let skills_used = Vec::new();
+    let _goal_lease = if runtime.has_session_rotation()
+        || runtime.goal().is_some()
+        || matches!(state.next_goal_turn, runtime_core::GoalTurn::Pursue { .. })
+        || state.current_session.as_ref().is_some_and(|session| {
+            state
+                .data_dir
+                .join(format!("session-{}.lock", session.id))
+                .exists()
+        }) {
+        Some(
+            state
+                .goal_session_lease(runtime.task_queue())
+                .map_err(|e| runtime_core::AgentError::GoalMismatch(e.to_string()))?,
+        )
+    } else {
+        None
+    };
     let mut recorder = Recorder::new(state, prompt, skills_used);
+    let emit = std::sync::Mutex::new(emit);
     let mut saved = 0;
     let intent = std::mem::take(&mut state.next_goal_turn);
     let result = runtime
@@ -185,15 +240,54 @@ where
             intent,
             |event| {
                 recorder.observe(&event);
-                emit(event);
+                (emit.lock().unwrap())(event);
             },
             |messages| {
+                let previous_session = state.current_session_id().unwrap_or_default().to_owned();
                 state
                     .persist_turn_messages(messages, &mut saved)
-                    .map_err(|error| runtime_core::AgentError::Persistence(error.to_string()))
+                    .map_err(|error| {
+                        if messages.last().is_some_and(|m| {
+                            m.content
+                                .starts_with(runtime_core::long_project::ROTATION_PREFIX)
+                        }) {
+                            runtime_core::AgentError::GoalStopped {
+                                state: runtime_core::GoalState::Paused,
+                                reason: format!(
+                                    "Session handoff failed; original history retained: {error}"
+                                ),
+                            }
+                        } else {
+                            runtime_core::AgentError::Persistence(error.to_string())
+                        }
+                    })?;
+                if previous_session != state.current_session_id().unwrap_or_default() {
+                    let goal_id = messages
+                        .last()
+                        .and_then(|m| {
+                            m.content
+                                .strip_prefix(runtime_core::long_project::ROTATION_PREFIX)
+                        })
+                        .and_then(|v| serde_json::from_str::<serde_json::Value>(v).ok())
+                        .and_then(|v| v["goal_id"].as_str().map(str::to_owned))
+                        .unwrap_or_default();
+                    (emit.lock().unwrap())(AgentEvent::SessionRotated {
+                        goal_id,
+                        previous_session,
+                        session: state.current_session_id().unwrap_or_default().to_owned(),
+                    });
+                }
+                if let Some(host) = &project_host {
+                    state
+                        .current_session_id()
+                        .unwrap_or_default()
+                        .clone_into(&mut host.session.lock().unwrap());
+                }
+                Ok(())
             },
         )
         .await;
+    state.rotation_leases.clear();
     recorder.experience.success =
         result.is_ok() || matches!(result, Err(runtime_core::AgentError::WaitingForUser(_)));
     if let Err(error) = &result

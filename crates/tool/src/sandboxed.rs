@@ -41,6 +41,9 @@ impl SandboxedTool {
 }
 #[async_trait]
 impl Tool for SandboxedTool {
+    fn execution_usage_incomplete(&self, input: &Value) -> bool {
+        self.inner.execution_usage_incomplete(input)
+    }
     fn execution_boundary(&self) -> crate::ExecutionBoundary {
         crate::ExecutionBoundary::Sandboxed
     }

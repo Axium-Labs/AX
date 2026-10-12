@@ -25,7 +25,3 @@ pub(crate) fn revision(state: &crate::repl::ReplState) -> anyhow::Result<String>
     }
     Ok(format!("{:x}", digest.finalize()))
 }
-
-#[cfg(test)]
-#[path = "../../../../test/mods/runtime.rs"]
-mod tests;

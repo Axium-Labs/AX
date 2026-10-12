@@ -332,6 +332,9 @@ impl App {
 
     fn apply_event(&mut self, event: AgentEvent) {
         match event {
+            AgentEvent::SessionRotated { session, .. } => {
+                self.push(TranscriptKind::Info, format!("Session rotated: {session}"));
+            }
             AgentEvent::GoalUpdated { goal_id, goal } => {
                 let status = format!(
                     "Goal {}: {:?} | checks {} | rounds {} | requests {} | tokens {}{} | cost {} | {}ms | {}",

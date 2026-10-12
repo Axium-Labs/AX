@@ -330,6 +330,8 @@ impl Tool for ChildShell {
 #[derive(Deserialize)]
 struct ShellInput {
     command: String,
+    #[serde(default)]
+    stdin: Option<String>,
 }
 
 #[async_trait]
@@ -360,6 +362,7 @@ impl Tool for ShellTool {
             "type": "object",
             "properties": {
                 "command": { "type": "string", "description": shell_description() }
+                ,"stdin": { "type": "string", "description": "Optional UTF-8 standard input; passed as data, never shell interpolation." }
             },
             "required": ["command"],
             "additionalProperties": false
@@ -412,12 +415,34 @@ async fn execute_shell(
             .env("AX_SESSION_ID", &context.session_id)
             .env("AX_MEMORY_SCOPE", &context.memory_scope);
     }
-    let output = command
+    let mut child = command
         .kill_on_drop(true)
-        .stdin(Stdio::null())
-        .output()
-        .await
+        .stdin(if input.stdin.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .map_err(|error| ToolError::Execution(error.to_string()))?;
+    // Drain output concurrently with feeding input: neither pipe can deadlock the other.
+    let stdin = child.stdin.take();
+    let output = if let Some(text) = input.stdin {
+        let feed = async move {
+            use tokio::io::AsyncWriteExt;
+            let mut stdin =
+                stdin.ok_or_else(|| ToolError::Execution("shell stdin unavailable".into()))?;
+            stdin.write_all(text.as_bytes()).await?;
+            stdin.shutdown().await?;
+            Ok::<_, ToolError>(())
+        };
+        let (input_result, output) = tokio::join!(feed, child.wait_with_output());
+        input_result?;
+        output?
+    } else {
+        child.wait_with_output().await?
+    };
     let stdout = decode(&output.stdout);
     let stderr = decode(&output.stderr);
     let text = format!(

@@ -9,6 +9,11 @@ use std::{
     path::PathBuf,
     sync::Arc,
 };
+mod validation;
+pub use validation::{
+    GoalValidator, PendingValidation, ValidationCombination, ValidationEvidence, ValidatorBinding,
+    ValidatorKind, WorkObservation, WorkStatus,
+};
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -22,9 +27,13 @@ pub enum GoalMode {
 #[serde(default, deny_unknown_fields)]
 pub struct GoalConfig {
     pub mode: GoalMode,
+    pub long_project: Option<crate::long_project::LongProjectConfig>,
+    pub session_rotation: Option<crate::long_project::RotationConfig>,
     pub acceptance: Vec<String>,
     pub deliverables: Vec<PathBuf>,
     pub required_successful_calls: Vec<String>,
+    pub validators: Vec<GoalValidator>,
+    pub validation_combination: ValidationCombination,
     /// Cumulative model steps, including verification; existing retries belong to one step.
     /// Zero leaves the existing execution budget unchanged.
     pub max_rounds: usize,
@@ -35,14 +44,30 @@ pub struct GoalConfig {
     pub input_microusd_per_million: Option<u64>,
     pub output_microusd_per_million: Option<u64>,
     pub max_stagnant_checks: usize,
+    /// Require an idle interval as well as unchanged observations; tools are awaited inline.
+    pub stagnant_seconds: u64,
+    /// Finite fallback for unknown evidence, even when no wall-clock threshold is reached.
+    pub max_unobserved_checks: usize,
+    pub stagnation_action: StagnationAction,
+}
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StagnationAction {
+    #[default]
+    Pause,
+    RequestHuman,
 }
 impl Default for GoalConfig {
     fn default() -> Self {
         Self {
             mode: GoalMode::Off,
+            long_project: None,
+            session_rotation: None,
             acceptance: vec![],
             deliverables: vec![],
             required_successful_calls: vec![],
+            validators: vec![],
+            validation_combination: ValidationCombination::All,
             max_rounds: 0,
             max_seconds: 0,
             max_tokens: 0,
@@ -50,6 +75,9 @@ impl Default for GoalConfig {
             input_microusd_per_million: None,
             output_microusd_per_million: None,
             max_stagnant_checks: 3,
+            stagnant_seconds: 300,
+            max_unobserved_checks: 12,
+            stagnation_action: StagnationAction::Pause,
         }
     }
 }
@@ -117,6 +145,18 @@ impl GoalDecision {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Goal {
     #[serde(default)]
+    pub validator_bindings: Vec<ValidatorBinding>,
+    #[serde(default)]
+    pub validation_evidence: Vec<ValidationEvidence>,
+    #[serde(default)]
+    pub pending_validation: Option<PendingValidation>,
+    #[serde(default)]
+    pub evaluator_reference: Option<String>,
+    #[serde(default)]
+    pub last_progress_ms: u64,
+    #[serde(default)]
+    pub activity: WorkStatus,
+    #[serde(default)]
     pub active_since_ms: Option<u64>,
     #[serde(default)]
     pub elapsed_base_ms: u64,
@@ -183,6 +223,12 @@ impl Goal {
     }
     pub(crate) fn new(target: String, config: GoalConfig) -> Self {
         Self {
+            validator_bindings: vec![],
+            validation_evidence: vec![],
+            pending_validation: None,
+            evaluator_reference: None,
+            last_progress_ms: 0,
+            activity: WorkStatus::Unknown,
             active_since_ms: None,
             elapsed_base_ms: 0,
             accounted_children: BTreeSet::default(),
@@ -202,6 +248,13 @@ impl Goal {
 }
 #[async_trait]
 pub trait GoalEvaluator: Send + Sync {
+    fn policy_reference(&self) -> &'static str {
+        self.name()
+    }
+    /// Configured checks run through the SAME scheduler, permissions and sandbox as tools.
+    fn validators(&self) -> &[GoalValidator] {
+        &[]
+    }
     fn name(&self) -> &'static str {
         "custom"
     }
@@ -238,10 +291,16 @@ impl GoalEvaluator for DeterministicGoal {
                 };
             }
         }
-        if self.config.deliverables.is_empty() && self.config.required_successful_calls.is_empty() {
+        if self.config.deliverables.is_empty()
+            && self.config.required_successful_calls.is_empty()
+            && self.config.validators.is_empty()
+        {
             return GoalDecision::InsufficientEvidence { reason: "Deterministic Goal needs explicit deliverables or successful call IDs; natural-language acceptance requires model mode.".into() };
         }
-        if !self.config.acceptance.is_empty() && self.config.mode != GoalMode::Model {
+        if !self.config.acceptance.is_empty()
+            && self.config.mode != GoalMode::Model
+            && self.config.validators.is_empty()
+        {
             return GoalDecision::InsufficientEvidence { reason: "Natural-language acceptance needs model mode; file existence and tool success alone cannot establish it.".into() };
         }
         GoalDecision::Allow
@@ -394,6 +453,7 @@ impl AgentKernel {
         self.task_queue.as_ref().and_then(|q| q.goal.as_ref())
     }
     pub(crate) fn install_goal(&mut self, config: Option<GoalConfig>) {
+        let configured = config.clone();
         self.goal_evaluator = config.and_then(|config| match config.mode {
             GoalMode::Off => None,
             GoalMode::Deterministic => {
@@ -410,6 +470,18 @@ impl AgentKernel {
         {
             self.goal_evaluator = Some(custom);
             self.pending_goal = None;
+        }
+        self.wrap_goal_validators(configured);
+    }
+    pub(crate) fn wrap_goal_validators(&mut self, config: Option<GoalConfig>) {
+        if let Some(config) = config.filter(|c| !c.validators.is_empty())
+            && let Some(inner) = self.goal_evaluator.take()
+        {
+            self.goal_evaluator = Some(Arc::new(validation::ConfiguredGoal {
+                inner,
+                validators: config.validators,
+                combination: config.validation_combination,
+            }));
         }
     }
     pub(crate) fn sync_goal_usage(&mut self) {
@@ -496,33 +568,115 @@ impl AgentKernel {
         reason.map_or(Ok(()), |reason| Err(AgentError::Budget(reason.into())))
     }
     /// Reuse Harness's measured advances; changing assistant claims is not progress.
+    // One classification updates the same persisted baseline and activity atomically.
+    #[allow(clippy::too_many_lines)]
     pub(crate) fn observe_goal_progress(&mut self) -> Result<(), AgentError> {
         if self.goal().is_none() {
             return Ok(());
         }
-        let advances = self.execution.lock().unwrap().progress.advances;
-        let Some(goal) = self.task_queue.as_mut().and_then(|q| q.goal.as_mut()) else {
+        let state = self.turn_state();
+        self.sync_goal_usage();
+        let execution = self.execution.lock().unwrap().clone();
+        let Some(queue) = self.task_queue.as_mut() else {
             return Ok(());
         };
         let mut hash = std::collections::hash_map::DefaultHasher::new();
-        advances.hash(&mut hash);
+        execution.progress.advances.hash(&mut hash);
+        for task in &queue.tasks {
+            // Concrete queue transitions and measured child receipts, not model prose.
+            format!("{:?}", task.status).hash(&mut hash);
+            task.child.as_ref().map(|c| &c.session_id).hash(&mut hash);
+        }
+        let Some(goal) = queue.goal.as_mut() else {
+            return Ok(());
+        };
         for path in &goal.config.deliverables {
             if let Ok(meta) = path.metadata() {
                 meta.len().hash(&mut hash);
                 meta.modified().ok().hash(&mut hash);
             }
         }
+        let now = now_ms();
+        let work: Vec<_> = goal
+            .validation_evidence
+            .iter()
+            .filter_map(|receipt| {
+                let work = receipt.work.as_ref()?;
+                (now.saturating_sub(receipt.observed_at_ms)
+                    < work
+                        .valid_for_seconds
+                        .min(goal.config.stagnant_seconds.max(30))
+                        .saturating_mul(1000))
+                .then_some(work)
+            })
+            .collect();
+        for observation in &work {
+            observation.reference.hash(&mut hash);
+            observation.progress.hash(&mut hash);
+        }
+        let waiting = work
+            .iter()
+            .any(|w| matches!(w.status, WorkStatus::Running | WorkStatus::WaitingExternal));
+        let blocked = work.iter().any(|w| w.status == WorkStatus::Blocked);
+        if blocked {
+            goal.activity = WorkStatus::Blocked;
+            return Err(AgentError::GoalStopped {
+                state: GoalState::Blocked,
+                reason: "Observed external work requires intervention".into(),
+            });
+        }
+        if waiting {
+            goal.activity = if work.iter().any(|w| w.status == WorkStatus::WaitingExternal) {
+                WorkStatus::WaitingExternal
+            } else {
+                WorkStatus::Running
+            };
+            // External hosts own wake-up/retry. Never spend inference polling an
+            // unchanging external task or mistake its wait for a failed Goal.
+            return Err(AgentError::GoalStopped { state:GoalState::Paused, reason:"Goal waiting for observed background/external work; resume when the host reports a change".into() });
+        }
+        if state.running_children > 0 || state.pending_approvals > 0 || state.retry_state {
+            goal.activity = WorkStatus::Running;
+            return Ok(());
+        }
         let signature = format!("{:x}", hash.finish());
         goal.stagnant_checks = if goal.evidence_signature.as_ref() == Some(&signature) {
             goal.stagnant_checks.saturating_add(1)
         } else {
+            goal.last_progress_ms = goal.usage.elapsed_ms;
             0
         };
         goal.evidence_signature = Some(signature);
+        goal.activity = if goal.stagnant_checks == 0 {
+            WorkStatus::Running
+        } else if work.iter().any(|w| w.status == WorkStatus::NoProgress)
+            || execution.progress.no_progress
+        {
+            WorkStatus::NoProgress
+        } else {
+            WorkStatus::Unknown
+        };
+        let idle = goal.usage.elapsed_ms.saturating_sub(goal.last_progress_ms);
         if goal.config.max_stagnant_checks > 0
             && goal.stagnant_checks >= goal.config.max_stagnant_checks
+            && (idle >= goal.config.stagnant_seconds.saturating_mul(1000)
+                || goal.stagnant_checks
+                    >= goal
+                        .config
+                        .max_unobserved_checks
+                        .max(goal.config.max_stagnant_checks))
         {
-            return Err(AgentError::GoalStopped { state: GoalState::Paused, reason: "Goal stagnated: completed rounds produced no new Harness evidence or deliverable changes".into() });
+            let state = match goal.config.stagnation_action {
+                StagnationAction::Pause => GoalState::Paused,
+                StagnationAction::RequestHuman => GoalState::Blocked,
+            };
+            return Err(AgentError::GoalStopped {
+                state,
+                reason: format!(
+                    "Goal progress is unconfirmed after {} observations and {}ms idle; inspect execution evidence before resuming",
+                    goal.stagnant_checks, idle
+                ),
+            });
         }
         Ok(())
     }
@@ -537,9 +691,6 @@ pub(crate) fn request_cost(config: &GoalConfig, input: u64, output: u64) -> u64 
                 .div_ceil(1_000_000),
         )
 }
-#[cfg(test)]
-#[path = "../../../test/harness/goal.rs"]
-mod tests;
 
 pub(crate) fn now_ms() -> u64 {
     u64::try_from(

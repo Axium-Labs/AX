@@ -303,3 +303,16 @@ AX processes open the same project database. Scoped-index migration uses the
 same writer reservation. Session-project registry updates acquire a file lock,
 write a unique staging file and rename it atomically; readers cannot observe
 truncated JSON and concurrent writers retain each registered project.
+
+## Optional Goal Session handoffs
+
+No schema migration is required for Long Project. Existing agent-state messages
+hold `[ax-session-handoff]` seed intent, `[ax-session-predecessor]`,
+`[ax-session-successor]` activation commit and optional
+`[ax-recent-tool-results]` raw latest-round cache. They use the same JSONL-first
+MemoryStore index and effective-context watermark. The queue remains authoritative;
+a successor without its matching predecessor commit cannot execute. Redirects
+preserve historical Session rows/streams and allow the same Goal ID to span many
+Sessions. Markdown projections and filtered revision archives live under the
+explicit Goal directory; they do not replace SQLite or Checkpoint. See
+[Long Project](long-project.md) for the handoff transaction and distributed limits.

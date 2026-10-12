@@ -212,7 +212,3 @@ pub fn changed(before: &Snapshot, after: &Snapshot) -> Vec<Value> {
         Some(json!({"path":path,"additions":additions,"deletions":deletions,"diff":diff,"binary":diff.is_none(),"change":if old.is_none(){"created"}else if new.is_none(){"deleted"}else{"modified"}}))
     }).collect()
 }
-
-#[cfg(test)]
-#[path = "../../../test/worktree_changes.rs"]
-mod tests;

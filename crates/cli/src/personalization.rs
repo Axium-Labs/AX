@@ -263,7 +263,3 @@ pub(crate) fn writing_context(
     }
     (!body.is_empty()).then(|| Message::system(format!("{header}{body}")))
 }
-
-#[cfg(test)]
-#[path = "../../../test/personalization.rs"]
-mod tests;

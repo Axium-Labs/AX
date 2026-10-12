@@ -19,9 +19,6 @@ use super::super::theme;
 use super::view::{ModalAction, PaneView, ViewOutcome};
 
 const MAX_INPUT_ROWS: usize = 8;
-#[cfg(test)]
-#[path = "../../../../../test/host_tui.rs"]
-mod host_dialog_tests;
 
 pub struct ApprovalDialog {
     host: bool,

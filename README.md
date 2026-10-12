@@ -252,7 +252,7 @@ See `benchmark/README.md` for the fixed three-task AX vs Codex runner, isolation
 
 ## Optional distributed collaboration
 
-AXCrew can schedule durable tasks across independent AX instances using capability and Host resource requirements. AX keeps its existing runtime, local memory and Subagents. Workers exchange selected summaries, Events and Artifacts through persistent Workflow State; a Coordinator Agent need not remain alive. Enroll an instance in AXCrew’s **Distributed** page, download its configuration and run `ax crew worker worker.json`. AX automatically reports Host CPU/RAM/GPU inventory after connection; configure skills, MCP, tools and models in the connected instance page and apply the generated local settings. This is additive functionality in AX 0.3.8 / AXCrew 0.3.4; ordinary AX and the existing device bridge remain available. See [setup and recovery boundaries](docs/distributed-collaboration.md).
+AXCrew can schedule durable tasks across independent AX instances using capability and Host resource requirements. AX keeps its existing runtime, local memory and Subagents. Workers exchange selected summaries, Events and Artifacts through persistent Workflow State; a Coordinator Agent need not remain alive. Enroll an instance in AXCrew’s **Distributed** collaboration workspace, download its configuration and run `ax crew worker worker.json`. AX automatically reports Host CPU/RAM/GPU inventory after connection; configure skills, MCP, tools and models in the connected instance page and apply the generated local settings. This is additive functionality in AX 0.3.8 / AXCrew 0.3.4; ordinary AX and the existing device bridge remain available. See [setup and recovery boundaries](docs/distributed-collaboration.md).
 
 
 AX ACP provides read-only directory discovery for AXCrew local project
@@ -266,3 +266,11 @@ existing registered-root execution restriction. See
 Use `/goal status`, `/goal pause`, `/goal resume` and `/goal cancel` to manage it.
 Ordinary prompts keep their direct execution path without additional validation.
 See [Goal commands, budgets and recovery](docs/goal.md).
+
+
+The collaboration workspace can enter real worker ACP Sessions, send guidance,
+answer pending questions and approve one identified tool request. Optional native
+remote management uses the existing AX settings/personalization/plugin commands
+and defaults off. Long Project stays optional inside a Goal; document edits and
+Session rotation retain the same fenced checkpoint and cumulative budget. See
+[workbench adapter and scope boundaries](docs/distributed-collaboration.md).

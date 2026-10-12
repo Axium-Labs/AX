@@ -182,6 +182,8 @@ impl crate::ApprovalPolicy for TrackedApproval {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct TurnState {
     #[serde(skip)]
+    pub goal_validation: Vec<crate::goal::ValidationEvidence>,
+    #[serde(skip)]
     pub goal_usage_messages: Option<Arc<std::sync::Mutex<Vec<model::Message>>>>,
     /// Supplied only to the optional Goal evaluator.
     #[serde(skip)]

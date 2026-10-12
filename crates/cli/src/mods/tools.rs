@@ -14,6 +14,9 @@ pub(super) struct WrappedTool {
 }
 #[async_trait]
 impl Tool for WrappedTool {
+    fn execution_usage_incomplete(&self, input: &Value) -> bool {
+        self.inner.execution_usage_incomplete(input)
+    }
     fn bind_model(&self, provider: Arc<dyn model::ModelProvider>) -> Option<Arc<dyn Tool>> {
         self.inner.bind_model(provider).map(|inner| {
             Arc::new(Self {

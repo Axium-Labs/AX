@@ -184,3 +184,64 @@ resource isolation require deployment-level verification.
 
 See [AXCrew's control-plane contract](../../axcrew/docs/distributed-collaboration.md)
 and [ADR 0021](adr/0021-durable-distributed-collaboration.md).
+
+
+## AXCrew collaboration workbench adapter
+
+AXCrew's desktop now groups collaboration around the existing durable Workflow
+and Task, with Host → AX Instance → Execution → reported AX Session relations.
+Session isolation alone is not a concurrency guarantee: each approved worker
+slot runs its own ACP child, isolated workspace and data directory; concurrency
+must match enrollment and shared Host reservations. The default enrollment is
+one execution. Workers can be shared across Goals without sharing effective
+Session context. Participant roles enter the existing task context.
+
+Workbench Workflow policy (`collaboration.kind`) enables the live ACP adapter
+`distributed_session`: bounded text/tool updates and actual Session IDs (including
+rotation successors) reach the existing Event stream/attempt history. Session
+commands use the existing worker credential, current generation/incarnation and
+recorded Session. Active guidance calls `_ax/steer`; answers use actual question
+identities; permission decisions are limited to the exact offered request and
+one-shot choice, with 90-second expiry. No persistent host permission is granted.
+Paused/blocked AX Goals and pending questions remain interactive while reserving
+the execution slot. Legacy Workflow behavior remains available.
+
+Crew pause/reassignment fences execution and keeps the authoritative checkpoint.
+Recovery imports the existing TaskQueue, Goal policy and cumulative usage;
+ordinary tool effects/local child workspaces still require reconciliation before
+cross-host replay. Complete local Session databases/workspaces are not migrated.
+Long Project document/config native edits checkpoint through the same CAS seam;
+rotation retains one Goal with historical native Sessions. Native project errors
+fail the command independently without turning a successful execution into a
+failure. Read/config/import/history/rotation use AX's existing `/goal` controls.
+
+Worker-only native configuration uses `distributed_settings`, invoking the same
+`ax settings`, `goal-settings`, `personalize`, and `capabilities` commands. It is
+explicitly disabled by default (`remote_management:false`) and requires a target
+`ax_home`. Writes require confirmed Instance/project scope and no active work;
+Crew blocks new placement during executing writes. Supported personalization
+includes Memory/style switches, project-contained sample folders and custom
+instructions with expected-content conflict checks. Temporary native inputs are
+removed on every outcome. Plugin import validates names and approved-project
+source containment. Results are bounded and credential fields are removed;
+provider secrets, raw Memory and credential files remain on the target host.
+A restarted worker never automatically retries an uncertain native write.
+
+Measured Host CPU/RAM/NVIDIA GPU, disks and network samples run in the inventory
+background job (60-second refresh), outside lease renewal. Unavailable readings
+remain unknown; reservations are placement capacity rather than OS quotas. The
+pull worker starts before interactive-store bootstrap, avoiding unrelated launch
+folder database contention between peer workers.
+
+See AXCrew's `docs/distributed-collaboration.md` for additive operator/worker API
+contracts and scope boundaries. Existing sandbox, device authentication, native
+permission policy and Goal effects reconciliation remain authoritative.
+
+
+For opt-in native management, new executions snapshot only approved source-project
+Goal/subagent/capability policy and plugin definitions into the isolated checkout.
+They never copy source Memory, Sessions, auth, permissions or Long Project stores.
+AX home settings remain the global base. Active executions retain their existing
+snapshot; already saved Goals retain policy from their authoritative checkpoint.
+Automatic result patches exclude `.ax` and execution-input metadata so local
+configuration, MCP credentials and runtime stores are not exported as code changes.

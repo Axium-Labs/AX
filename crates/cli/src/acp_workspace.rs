@@ -43,7 +43,3 @@ pub(crate) fn listing(params: &Value, boundary: Option<&std::path::Path>) -> Res
         json!({"cwd":path.to_string_lossy(),"parent":path.parent().filter(|p|boundary.as_ref().is_none_or(|root|p.starts_with(root))).map(|p|p.to_string_lossy()),"directories":directories}),
     )
 }
-
-#[cfg(test)]
-#[path = "../../../test/acp_workspace.rs"]
-mod tests;

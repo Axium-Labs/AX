@@ -68,8 +68,14 @@ impl CollaborationTool {
             }
             "checkpoint_workflow" => {
                 ensure!(!self.workflow.is_empty(),"workflow binding required");
+                let current = self.client.request("GET",&format!("/api/distributed/workflows/{}",self.workflow),None).await?;
+                let mut next = input["state"].clone();
+                ensure!(next.is_object(),"workflow state must be an object");
+                if let Some(runtime) = current["workflow"]["state"].get(crate::distributed_goal::CHECKPOINT_KEY) {
+                    next[crate::distributed_goal::CHECKPOINT_KEY] = runtime.clone();
+                }
                 self.client.request("POST",&format!("/api/distributed/workflows/{}/checkpoint",self.workflow),Some(json!({
-                    "expected_revision":input["expected_revision"],"state":input["state"],"source":{"incarnation":self.incarnation,
+                    "expected_revision":input["expected_revision"],"state":next,"source":{"incarnation":self.incarnation,
                     "task_id":self.parent,"generation":self.generation,"message_id":"checkpoint","kind":"observation","text":""}}))).await?
             }
             "wait" => {
@@ -122,6 +128,9 @@ impl CollaborationTool {
 }
 #[async_trait]
 impl Tool for CollaborationTool {
+    fn execution_usage_incomplete(&self, input: &Value) -> bool {
+        input["action"] == "delegate"
+    }
     fn name(&self) -> &'static str {
         "collaboration"
     }

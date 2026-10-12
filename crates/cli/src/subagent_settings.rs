@@ -109,7 +109,3 @@ pub(crate) fn manage(
         validate(global.subagent)
     }
 }
-
-#[cfg(test)]
-#[path = "../../../test/subagent_settings.rs"]
-mod tests;

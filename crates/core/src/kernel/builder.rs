@@ -29,6 +29,9 @@ impl AgentKernel {
         tools.register(result_reader.clone());
         Self {
             extension: None,
+            long_project_host: None,
+            session_rotation: None,
+            rotation_requested: false,
             goal_model_requests: 0,
             continuation: crate::TurnState::default(),
             activity: Arc::default(),
@@ -134,7 +137,10 @@ impl AgentKernel {
         for tool in tools {
             self.tools.register_arc(extension.wrap_tool(tool));
         }
-        self.extension = Some(extension);
+        self.extension = Some(match self.extension.take() {
+            Some(previous) => Arc::new(crate::extension::ExtensionChain(previous, extension)),
+            None => extension,
+        });
         self
     }
 
@@ -162,6 +168,18 @@ impl AgentKernel {
         self.child_results = child_result::restore(&mut messages);
         self.pending_question = user_input::restore(&mut messages);
         for message in &messages {
+            if let Some(value) = message
+                .content
+                .strip_prefix(crate::long_project::RESULT_PREFIX)
+                && let Ok(results) =
+                    serde_json::from_str::<std::collections::HashMap<String, String>>(value)
+                && let Ok(mut cache) = self.result_reader.0.write()
+            {
+                cache.extend(results);
+            }
+        }
+        messages.retain(|m| !m.content.starts_with(crate::long_project::RESULT_PREFIX));
+        for message in &messages {
             if let Some(id) = &message.tool_call_id
                 && let Ok(result) = serde_json::from_str::<tool::ToolResult>(&message.content)
                 && let Ok(mut store) = self.result_reader.0.write()
@@ -186,6 +204,9 @@ impl AgentKernel {
         tools.register(result_reader.clone());
         let mut worker = Self {
             extension: None,
+            long_project_host: None,
+            session_rotation: None,
+            rotation_requested: false,
             goal_model_requests: 0,
             continuation: crate::TurnState::default(),
             activity: Arc::default(),

@@ -193,7 +193,11 @@ async fn get_once(
     if text_only
         && !(content_type.starts_with("text/html")
             || content_type.starts_with("text/plain")
-            || content_type.starts_with("text/markdown"))
+            || content_type.starts_with("text/markdown")
+            || content_type
+                .split(';')
+                .next()
+                .is_some_and(|mime| mime.trim() == "application/json"))
     {
         return Err(policy_error(
             url,

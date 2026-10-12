@@ -66,16 +66,21 @@ impl AgentKernel {
             event_count -= 1;
         }
         self.set_context(execution::CONTEXT_PREFIX, Some(state.context(event_count)));
+        if self.long_project_host.is_some() {
+            self.checkpoint_goal_host().await?;
+            self.project_context("state")?;
+        }
         let compression = self
             .compress_if_needed(|event| (emit.lock().unwrap())(event))
             .await?;
-        if compression.is_some_and(|c| c.semantic_called)
+        if compression.as_ref().is_some_and(|c| c.semantic_called)
             && let Some(goal) = self.task_queue.as_mut().and_then(|q| q.goal.as_mut())
         {
             goal.usage.estimated = true;
             goal.usage.cost_estimated = true;
         }
 
+        self.rotate_context(compression.as_ref(), checkpoint)?;
         (emit.lock().unwrap())(AgentEvent::ModelStarted {
             provider: self.provider.name().to_owned(),
             model: self.provider.model_id().to_owned(),
@@ -119,6 +124,7 @@ impl AgentKernel {
         if goal_enabled {
             self.reserve_goal_checkpoint(input_estimate);
             self.checkpoint_queue(checkpoint)?;
+            self.checkpoint_goal_host().await?;
         }
         let requests = std::sync::atomic::AtomicUsize::new(0);
         let response = if goal_enabled {
@@ -192,6 +198,7 @@ impl AgentKernel {
         checkpoint(&self.raw_turn_messages)?;
         if goal_enabled {
             self.checkpoint_queue(checkpoint)?;
+            self.checkpoint_goal_host().await?;
         }
         if let Some(goal) = self.goal() {
             (emit.lock().unwrap())(AgentEvent::GoalUpdated {

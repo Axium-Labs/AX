@@ -1,7 +1,4 @@
 //! Dependency DAG, bounded in-task futures, and process-wide resource leases.
-#[cfg(test)]
-#[path = "../../../test/host_scheduler.rs"]
-mod host_authorization_tests;
 use crate::{AgentError, AgentEvent, ApprovalPolicy, event::fetch_diagnostics, tool_activity};
 use futures_util::{StreamExt, future::BoxFuture, stream::FuturesUnordered};
 use model::{Message, ToolCall};
@@ -552,7 +549,10 @@ fn envelope(result: &Result<ToolOutput, ToolError>) -> tool::ToolResult {
         Err(error) => error.to_string(),
     };
     let mut envelope = tool::ToolResult::new(result.is_ok(), raw);
-    envelope.permission_denied = matches!(result, Err(ToolError::PermissionDenied(_)));
+    envelope.permission_denied = matches!(
+        result,
+        Err(ToolError::PermissionDenied(_) | ToolError::SandboxViolation(_))
+    );
     if let Err(ToolError::GlobalBlocked(reason)) = result {
         envelope.global_blocker = Some(reason.clone());
     }

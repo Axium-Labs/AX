@@ -20,7 +20,10 @@ mod computer_use;
 mod config;
 mod crew_device;
 mod distributed_client;
+mod distributed_goal;
 mod distributed_host;
+mod distributed_session;
+mod distributed_settings;
 mod distributed_tool;
 mod distributed_worker;
 #[cfg(test)]
@@ -28,7 +31,9 @@ mod e2e_tests;
 mod evolution;
 mod execution;
 mod file_reference;
+mod goal_settings;
 mod host_permissions;
+mod long_project;
 mod memory_context;
 mod memory_tool;
 mod model_selection;
@@ -70,6 +75,14 @@ async fn main() -> Result<()> {
     }
     if app::run_preflight(&cli)? {
         return Ok(());
+    }
+    // The pull worker owns independent execution stores. Preparing the launch
+    // directory's interactive AX store makes peer workers race for an unrelated DB.
+    if let Some(args::Command::Crew {
+        command: args::CrewCommand::Worker { config },
+    }) = &cli.command
+    {
+        return distributed_worker::run(config).await;
     }
     let locations = bootstrap::prepare(&cli)?;
     let budget = runtime::execution_budget(&cli);

@@ -76,10 +76,18 @@ fn request_pool(message: &Message) -> RequestPool {
         return RequestPool::History;
     }
     let content = message.content.as_str();
+    if content.starts_with(crate::long_project::RESULT_PREFIX)
+        || content.starts_with(crate::long_project::ROTATION_PREFIX)
+        || content.starts_with(crate::long_project::COMMIT_PREFIX)
+    {
+        return RequestPool::Drop;
+    }
     if content.starts_with("[ax-changes]\n") || content.starts_with(execution::STATE_PREFIX) {
         return RequestPool::Drop;
     }
-    if content.starts_with(execution::CONTEXT_PREFIX)
+    if content.starts_with(crate::long_project::CONTEXT_PREFIX)
+        || content.starts_with("[ax-goal-context]")
+        || content.starts_with(execution::CONTEXT_PREFIX)
         || content.starts_with(task_queue::PROGRESS_PREFIX)
         || content.starts_with("[ax-task-summary]")
         || content.starts_with("[ax-recovery]")

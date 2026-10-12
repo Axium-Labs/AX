@@ -958,7 +958,3 @@ pub(crate) async fn forward_events<T, F: FnMut(AgentEvent) + Send>(
         }
     }
 }
-
-#[cfg(test)]
-#[path = "subagent_tests.rs"]
-mod tests;

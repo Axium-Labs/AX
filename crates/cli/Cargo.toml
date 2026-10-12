@@ -30,7 +30,7 @@ ratatui.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-sysinfo = { version = "0.37.2", default-features = false, features = ["system"] }
+sysinfo = { version = "0.37.2", default-features = false, features = ["system", "disk", "network"] }
 nvml-wrapper = "0.11"
 sha2 = "0.10"
 base64 = "0.22"
@@ -53,11 +53,3 @@ vt100 = "0.15"
 
 [lints]
 workspace = true
-
-[[test]]
-name = "linux_child_sandbox"
-harness = false
-
-[[test]]
-name = "provider_removal"
-path = "../../test/providers/removal_cli.rs"

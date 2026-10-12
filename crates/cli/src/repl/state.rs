@@ -66,6 +66,8 @@ pub(crate) struct ReplState {
     pub(crate) tool_schema_tokens: Option<usize>,
     pub(crate) permissions: PermissionStore,
     pub(crate) execution_budget: runtime_core::ExecutionBudget,
+    pub(crate) rotation_leases: Vec<std::fs::File>,
+    pub(crate) next_rotation: bool,
     pub(crate) next_goal_turn: runtime_core::GoalTurn,
     /// Question the current goal parked on. The next submission answers it
     /// instead of opening a new task.
@@ -75,6 +77,76 @@ pub(crate) struct ReplState {
     pub(crate) evolution_revision: u64,
 }
 impl ReplState {
+    /// Reuse the same OS file-lease primitive as local children and workers.
+    /// The handle dies with the turn/process; no heartbeat or lock database is added.
+    pub(crate) fn goal_session_lease(
+        &mut self,
+        expected: Option<&runtime_core::task_queue::TaskQueue>,
+    ) -> Result<std::fs::File> {
+        let id = self.current_session_id()?.to_owned();
+        let file = self.claim_goal_session(&id)?;
+        self.check_goal_session_revision(&id, expected)?;
+        Ok(file)
+    }
+    pub(crate) fn claim_goal_session(&self, id: &str) -> Result<std::fs::File> {
+        uuid::Uuid::parse_str(id)?;
+        let file = fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(self.data_dir.join(format!("session-{id}.lock")))?;
+        fs2::FileExt::try_lock_exclusive(&file).map_err(|_| {
+            anyhow!("This session is owned by another running process; reload after it stops")
+        })?;
+        Ok(file)
+    }
+    fn check_goal_session_revision(
+        &mut self,
+        id: &str,
+        expected_queue: Option<&runtime_core::task_queue::TaskQueue>,
+    ) -> Result<()> {
+        if let Some(marker) = self
+            .store()?
+            .latest_agent_state(id, runtime_core::long_project::COMMIT_PREFIX)?
+        {
+            let link: serde_json::Value = serde_json::from_str(
+                marker
+                    .content
+                    .strip_prefix(runtime_core::long_project::COMMIT_PREFIX)
+                    .unwrap_or_default(),
+            )?;
+            anyhow::bail!(
+                "Session rotated to {}; reopen it before executing or editing the Goal",
+                link["successor"]
+            );
+        }
+        // A process can finish between loading a session and acquiring its lease.
+        // Reject a stale Goal/consumption view instead of overwriting newer work.
+        let latest = self
+            .store()?
+            .latest_agent_state(id, runtime_core::task_queue::STATE_PREFIX)?;
+        if let Some(latest) = latest {
+            let mut messages = vec![restore_message(&latest)];
+            let current = runtime_core::task_queue::TaskQueue::restore(&mut messages);
+            let mut loaded = self.loaded_messages.clone();
+            let expected = expected_queue.cloned().or_else(|| {
+                self.runtime
+                    .as_ref()
+                    .and_then(|k| k.task_queue().cloned())
+                    .or_else(|| runtime_core::task_queue::TaskQueue::restore(&mut loaded))
+            });
+            let revision = |queue: Option<&runtime_core::task_queue::TaskQueue>| {
+                queue.map(|q| serde_json::json!({"id":q.goal_id,"config":q.goal.as_ref().map(|g|&g.config),"goal":q.goal.as_ref().map(|g|serde_json::json!({"rounds":g.usage.rounds,"requests":g.usage.requests,"input_tokens":g.usage.input_tokens,"output_tokens":g.usage.output_tokens,"cost":g.usage.cost_microusd,"pending_validation":g.pending_validation,"pending_usage":g.pending_usage,"checks":g.checks,"decision":g.last_decision,"terminal":matches!(g.state,runtime_core::GoalState::Completed|runtime_core::GoalState::Failed|runtime_core::GoalState::Cancelled)}))}))
+            };
+            if revision(current.as_ref()) != revision(expected.as_ref()) {
+                anyhow::bail!(
+                    "Saved Goal changed after this session was loaded; reload before executing or editing it"
+                );
+            }
+        }
+        Ok(())
+    }
     pub(crate) fn new(
         data_dir: PathBuf,
         skills_dir: PathBuf,
@@ -148,6 +220,8 @@ impl ReplState {
             tool_schema_tokens: None,
             permissions: PermissionStore::default(),
             execution_budget: runtime_core::ExecutionBudget::default(),
+            rotation_leases: Vec::new(),
+            next_rotation: false,
             next_goal_turn: runtime_core::GoalTurn::New,
             pending_question: None,
             child_timeout_secs: 0,
@@ -253,6 +327,70 @@ impl ReplState {
         id: &str,
         budget: &runtime_core::ContextBudget,
     ) -> Result<bool> {
+        // Follow only a committed handoff; never activate a partially seeded successor.
+        let mut owned_id = id.to_owned();
+        let has_goal_lease = self.data_dir.join(format!("session-{id}.lock")).exists();
+        let mut visited = std::collections::HashSet::new();
+        if has_goal_lease {
+            loop {
+                anyhow::ensure!(
+                    visited.insert(owned_id.clone()),
+                    "Session handoff cycle detected"
+                );
+                if let Some(pending) = self
+                    .store()?
+                    .latest_agent_state(&owned_id, "[ax-session-predecessor]\n")?
+                {
+                    let data: serde_json::Value = serde_json::from_str(
+                        pending
+                            .content
+                            .strip_prefix("[ax-session-predecessor]\n")
+                            .unwrap_or_default(),
+                    )?;
+                    let previous = data["previous"]
+                        .as_str()
+                        .context("handoff predecessor missing")?;
+                    let commit = self
+                        .store()?
+                        .latest_agent_state(previous, runtime_core::long_project::COMMIT_PREFIX)?
+                        .context(
+                            "Session handoff was not committed; reopen the predecessor to recover",
+                        )?;
+                    let link: serde_json::Value = serde_json::from_str(
+                        commit
+                            .content
+                            .strip_prefix(runtime_core::long_project::COMMIT_PREFIX)
+                            .unwrap_or_default(),
+                    )?;
+                    anyhow::ensure!(
+                        link["successor"].as_str() == Some(owned_id.as_str()),
+                        "Uncommitted successor cannot execute"
+                    );
+                }
+                let Some(commit) = self
+                    .store()?
+                    .latest_agent_state(&owned_id, runtime_core::long_project::COMMIT_PREFIX)?
+                else {
+                    break;
+                };
+                let data: serde_json::Value = serde_json::from_str(
+                    commit
+                        .content
+                        .strip_prefix(runtime_core::long_project::COMMIT_PREFIX)
+                        .unwrap_or_default(),
+                )?;
+                data["successor"]
+                    .as_str()
+                    .context("Session successor missing")?
+                    .clone_into(&mut owned_id);
+            }
+        }
+        let id = owned_id.as_str();
+        // Opening a Goal session may repair interrupted results. Claim ownership
+        // before that write, not only when the next execution starts.
+        let _goal_lease = has_goal_lease
+            .then(|| self.claim_goal_session(id))
+            .transpose()?;
         self.evolution_end_session();
         let session = self.store()?.session(id)?;
         let Some(session) = session else {
@@ -371,6 +509,17 @@ impl ReplState {
         } else {
             self.pending_question = None;
         }
+        self.loaded_messages.retain(|m| {
+            !m.content
+                .starts_with(runtime_core::long_project::RESULT_PREFIX)
+        });
+        if has_goal_lease
+            && let Some(results) = self
+                .store()?
+                .latest_agent_state(id, runtime_core::long_project::RESULT_PREFIX)?
+        {
+            self.loaded_messages.push(restore_message(&results));
+        }
         self.active_skills = self
             .loaded_messages
             .iter()
@@ -457,6 +606,14 @@ impl ReplState {
                 },
             )?;
             *saved += 1;
+            if message
+                .content
+                .starts_with(runtime_core::long_project::ROTATION_PREFIX)
+                && message.role == Role::System
+            {
+                crate::long_project::handoff(self, message)?;
+                *saved = 0;
+            }
         }
         Ok(())
     }

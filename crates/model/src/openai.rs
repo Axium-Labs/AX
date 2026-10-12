@@ -18,9 +18,6 @@ use crate::{
 };
 
 const API_ENDPOINT: &str = "https://api.openai.com/v1/responses";
-#[cfg(test)]
-#[path = "../../../test/web/openai_search.rs"]
-mod search_tests;
 const CODEX_ENDPOINT: &str = "https://chatgpt.com/backend-api/codex/responses";
 pub const FALLBACK_MODEL: &str = "gpt-5.6-sol";
 

@@ -608,6 +608,9 @@ const fn default_limit() -> usize {
 
 #[async_trait]
 impl Tool for WebTool {
+    fn execution_usage_incomplete(&self, input: &Value) -> bool {
+        input["operation"] == "search" && self.model.is_some()
+    }
     fn execution_boundary(&self) -> crate::ExecutionBoundary {
         crate::ExecutionBoundary::Remote
     }

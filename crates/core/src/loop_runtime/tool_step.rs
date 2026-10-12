@@ -91,6 +91,16 @@ impl AgentKernel {
             state.goal_usage_messages = Some(Arc::default());
             state.evidence.clone_from(&self.messages);
             self.sync_goal_usage();
+            state.goal_validation = self
+                .evaluate_goal_validators(evaluator.validators(), emit, checkpoint, calls_used)
+                .await?;
+            // Give the same evaluator the lossless, current checker receipts.
+            for evidence in &state.goal_validation {
+                state.evidence.push(Message::system(format!(
+                    "[ax-goal-validation]\n{}",
+                    serde_json::to_string(evidence).unwrap()
+                )));
+            }
             state.successful_tool_calls = self
                 .goal()
                 .map_or_else(Default::default, |g| g.successful_calls.clone());
@@ -119,6 +129,7 @@ impl AgentKernel {
                 self.reserve_goal_checkpoint(crate::token::estimate_tokens(&state.evidence));
             }
             self.checkpoint_queue(checkpoint)?;
+            self.checkpoint_goal_host().await?;
             if let Some(goal) = self.goal() {
                 (emit.lock().unwrap())(AgentEvent::GoalUpdated {
                     goal_id: self.goal_id.clone(),
@@ -244,6 +255,7 @@ impl AgentKernel {
                 queue.final_response = Some(content.clone());
                 queue.summarized = true;
                 self.checkpoint_queue(checkpoint)?;
+                self.checkpoint_goal_host().await?;
             }
             if let Some(goal) = self.goal() {
                 (emit.lock().unwrap())(AgentEvent::GoalUpdated {
@@ -278,6 +290,18 @@ impl AgentKernel {
             return Err(AgentError::Budget("tool call limit".into()));
         }
         *calls_used = calls_used.saturating_add(tool_calls.len());
+        if self.goal().is_some()
+            && tool_calls.iter().any(|call| {
+                self.tools.get(&call.function.name).is_some_and(|tool| {
+                    serde_json::from_str::<Value>(&call.function.arguments)
+                        .is_ok_and(|input| tool.execution_usage_incomplete(&input))
+                })
+            })
+            && let Some(goal) = self.task_queue.as_mut().and_then(|q| q.goal.as_mut())
+        {
+            goal.usage.estimated = true;
+            goal.usage.cost_estimated = true;
+        }
         if tool_calls
             .iter()
             .any(|call| call.function.name == user_input::TOOL_NAME)

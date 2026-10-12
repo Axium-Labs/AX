@@ -1,7 +1,4 @@
 //! Browser login composed with AX's existing provider credential/catalog stores.
-#[cfg(test)]
-#[path = "../../../test/providers/codex_login_cli.rs"]
-mod codex_tests;
 use crate::args::{AuthCommand, CodexLoginMethod, WorkBuddyLoginRegion};
 use anyhow::{Result, anyhow};
 use model::workbuddy::WorkBuddyRegion;

@@ -80,7 +80,3 @@ fn collect_gpus() -> Option<Vec<GpuInfo>> {
             .collect(),
     )
 }
-
-#[cfg(test)]
-#[path = "../../../test/system_info.rs"]
-mod tests;

@@ -670,6 +670,7 @@ mod tests {
             goal: runtime_core::GoalConfig::default(),
             child_models: std::collections::BTreeMap::default(),
             context_pool: runtime_core::ContextPoolPolicy::default(),
+            session_rotation: None,
             permissions: tool::PermissionProfile::default(),
             retry: model::RetryPolicy::default(),
             sandbox: sandbox::SandboxMode::default(),

@@ -193,6 +193,7 @@ impl Runtime {
         }
         kernel.configure_retry(config.retry);
         kernel.configure_context_pool(config.context_pool);
+        kernel.configure_session_rotation(config.session_rotation);
         kernel.constrain_permissions(config.permissions);
         Ok(kernel)
     }

@@ -83,6 +83,8 @@ pub struct AxConfig {
     #[serde(default)]
     pub context_pool: runtime_core::ContextPoolPolicy,
     #[serde(default)]
+    pub session_rotation: Option<runtime_core::long_project::RotationConfig>,
+    #[serde(default)]
     pub permissions: tool::PermissionProfile,
     #[serde(default)]
     pub retry: model::RetryPolicy,
@@ -239,11 +241,32 @@ impl AxConfig {
 
     /// Persists the config to a specific path (tests inject a temporary file).
     pub(crate) fn save_to(&self, path: &Path) -> Result<()> {
+        Self::save_document_to(path, &serde_json::to_value(self)?)
+    }
+
+    /// Update only the Goal template, retaining unrelated and forward-compatible fields.
+    pub(crate) fn save_goal_template(&self) -> Result<()> {
+        let path = config_path();
+        let mut document = match fs::read(&path) {
+            Ok(bytes) => serde_json::from_slice::<serde_json::Value>(&bytes)?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                serde_json::to_value(self)?
+            }
+            Err(error) => return Err(error.into()),
+        };
+        document
+            .as_object_mut()
+            .context("config.json must be an object")?
+            .insert("goal".into(), serde_json::to_value(&self.goal)?);
+        Self::save_document_to(&path, &document)
+    }
+
+    fn save_document_to(path: &Path, document: &serde_json::Value) -> Result<()> {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
         let contents =
-            serde_json::to_string_pretty(self).context("failed to encode config.json")?;
+            serde_json::to_string_pretty(document).context("failed to encode config.json")?;
         let temporary = path.with_extension("json.tmp");
         fs::write(&temporary, contents)
             .with_context(|| format!("failed to write {}", temporary.display()))?;
@@ -275,7 +298,26 @@ pub(crate) fn project_goal_template(
     let path = root.join(".ax/goal.json");
     let legacy = root.join(".ax/verification.json");
     match fs::read(&path) {
-        Ok(bytes) => config = serde_json::from_slice(&bytes).context("invalid .ax/goal.json")?,
+        Ok(bytes) => {
+            let mut local: serde_json::Value =
+                serde_json::from_slice(&bytes).context("invalid .ax/goal.json")?;
+            let inherited = config
+                .long_project
+                .as_ref()
+                .map(serde_json::to_value)
+                .transpose()?;
+            if let Some(mut inherited) = inherited {
+                if let Some(patch) = local.get("long_project") {
+                    if patch.is_object() {
+                        crate::long_project::merge(&mut inherited, patch)?;
+                        local["long_project"] = inherited;
+                    }
+                } else {
+                    local["long_project"] = inherited;
+                }
+            }
+            config = serde_json::from_value(local).context("invalid .ax/goal.json")?;
+        }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             match fs::read(&legacy) {
                 Ok(bytes) => {
@@ -299,6 +341,13 @@ pub(crate) fn resolve_goal_paths(root: &Path, config: &mut runtime_core::GoalCon
     for path in &mut config.deliverables {
         if path.is_relative() {
             *path = root.join(&*path);
+        }
+    }
+    for validator in &mut config.validators {
+        if let runtime_core::goal::ValidatorKind::Command { reference, .. } = &mut validator.kind
+            && reference.is_relative()
+        {
+            *reference = root.join(&*reference);
         }
     }
 }

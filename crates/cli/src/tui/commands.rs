@@ -74,7 +74,7 @@ pub static SLASH_COMMANDS: &[SlashCommandDef] = &[
         "/goal",
         "start, inspect or manage an optional target",
         SlashPresentation::DirectAction,
-        Some("<target>|status|pause|resume|cancel"),
+        Some("<target>|status|pause|resume|cancel|rotate|project"),
     ),
     cmd(
         "/login",

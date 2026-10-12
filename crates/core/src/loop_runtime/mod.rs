@@ -352,6 +352,7 @@ impl AgentKernel {
         self.turn_input.close();
         if goal_config.is_some() && !mismatched {
             self.checkpoint_queue(&mut checkpoint)?;
+            self.checkpoint_goal_host().await?;
             if result.is_err()
                 && let Some(goal) = self.goal()
             {
@@ -381,6 +382,9 @@ impl AgentKernel {
             if result.is_ok() {
                 completion?;
             }
+        }
+        if self.long_project_host.is_some() && !mismatched {
+            self.project_context("state")?;
         }
         result
     }
@@ -430,6 +434,11 @@ impl AgentKernel {
         }
         if let Some(cached) = replay {
             return Ok(cached);
+        }
+        if self.goal().is_some() {
+            self.prepare_goal_validators()?;
+            self.checkpoint_queue(checkpoint)?;
+            self.checkpoint_goal_host().await?;
         }
         (emit.lock().unwrap())(AgentEvent::TurnStarted);
         if let Some(goal) = self.goal() {

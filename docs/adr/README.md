@@ -81,3 +81,5 @@ What becomes easier, what becomes harder, and what we accepted.
 - [0025 — Native-first hosted search](0025-native-first-hosted-search.md) — actual model protocols and authorized anonymous MCP fallback.
 
 - [0026 - Optional Goal](0026-optional-goal.md) - target-scoped acceptance in the existing loop and queue.
+
+- [0027 — Optional Long Project and Session rotation](0027-long-project-session-rotation.md) — evidence projection and committed handoff in existing Goal/Session persistence.

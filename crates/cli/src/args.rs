@@ -104,6 +104,16 @@ pub(crate) enum Command {
         #[arg(long, conflicts_with_all = ["max_concurrent", "max_depth"])]
         reset: bool,
     },
+    /// Read/write defaults for explicitly created Goals; never enables ordinary tasks.
+    GoalSettings {
+        #[arg(long, default_value = "global", value_parser = ["global", "project"])]
+        scope: String,
+        /// Replace this scope's template with `GoalConfig` JSON from stdin.
+        #[arg(long, conflicts_with = "reset")]
+        json_stdin: bool,
+        #[arg(long)]
+        reset: bool,
+    },
     /// Show or change memory, custom instructions and the writing-style folder.
     Personalize {
         /// Master memory switch: retrieval, `remember` declarations and the memory tool.

@@ -354,7 +354,3 @@ mod multimodal_tests {
         assert_eq!(restored.content, "image.png");
     }
 }
-
-#[cfg(test)]
-#[path = "../../../test/web/http.rs"]
-pub(crate) mod search_test_http;

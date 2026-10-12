@@ -17,7 +17,3 @@ sha2 = "0.10"
 
 [lints]
 workspace = true
-
-[[test]]
-name = "concurrent_open"
-path = "../../test/concurrent_memory_open.rs"

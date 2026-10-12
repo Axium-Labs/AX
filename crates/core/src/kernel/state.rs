@@ -21,6 +21,9 @@ use crate::{
 };
 
 pub struct AgentKernel {
+    pub(crate) long_project_host: Option<Arc<dyn crate::long_project::LongProjectHost>>,
+    pub(crate) session_rotation: Option<crate::long_project::RotationConfig>,
+    pub(crate) rotation_requested: bool,
     pub(crate) extension: Option<Arc<dyn crate::RuntimeExtension>>,
     pub(crate) turn_input: crate::continuation::TurnInput,
     pub(crate) activity: Arc<crate::continuation::RuntimeActivity>,

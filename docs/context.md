@@ -251,3 +251,15 @@ calls. Legacy/compressed sessions without a checkpoint expose an unknown total
 and only backfill retained actual call/result pairs. Child completion events use the same session-prefixed IDs as UI events;
 controller cursors prevent duplicate counting after reconnect. Child state remains
 independent of controller state.
+
+## Optional Session rotation
+
+Enabled Long Project, or an explicit separate rotation policy, can replace a
+pressured effective context with a new ordinary Session at a safe model boundary.
+Pressure and compaction gain derive from ContextBudget, never fixed message counts.
+The old raw stream, Goal/queue identity, budgets, permissions and completed receipts
+remain intact. Latest-round `tool_output` data is checkpointed as optional agent
+state; older evidence is retrieved from existing Session storage on demand.
+Required handoff context that cannot fit pauses instead of being silently removed.
+See [Long Project](long-project.md). The default ordinary loop has no document,
+rotation host or extra model request.

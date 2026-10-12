@@ -64,9 +64,6 @@ pub fn estimate_tokens(messages: &[Message]) -> usize {
         .sum()
 }
 
-#[cfg(test)]
-#[path = "../../../test/providers/context.rs"]
-mod native_context_tests;
 
 pub(crate) fn estimate_text_tokens(text: &str) -> usize {
     let (ascii, non_ascii) = text.chars().fold((0_usize, 0_usize), |counts, character| {

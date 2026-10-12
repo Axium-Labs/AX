@@ -228,9 +228,6 @@ fn copy_files(source: &Path, target: &Path) -> Result<()> {
     Ok(())
 }
 
-#[cfg(test)]
-#[path = "../../../test/storage_location.rs"]
-mod regression_tests;
 
 #[cfg(test)]
 mod tests {

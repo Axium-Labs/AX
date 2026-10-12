@@ -600,3 +600,20 @@ process workspace. The SSH tool declares remote-host resources, permission
 requirements and an exemption from the fixed local tool pool; same-host
 dependencies and approvals remain enforced. Parallel ACP startup uses immediate
 SQLite migration transactions and locked atomic project-registry writes.
+
+### Optional long-lived Goal context
+
+`runtime-core::long_project` owns explicit rotation policy, safe boundary checks
+and bounded handoff construction. CLI `long_project` projects working Markdown
+and commits new ordinary Sessions through existing ReplState/MemoryStore
+persistence. No model or background service is needed for document maintenance.
+Execution remains in Goal/Task Queue/Harness; reused Memory is kept distinct.
+Existing Crew Workflow fencing can carry the working document for takeover. See
+[Long Project](long-project.md) and [ADR 0027](adr/0027-long-project-session-rotation.md).
+
+
+`distributed_session` bridges existing ACP live Sessions to the same Crew durable
+attempts/events/inbox; `distributed_settings` invokes validated native CLI setting
+and capability operations under opt-in target-host scope. Neither module changes
+Core reasoning or creates a Session store/scheduler. Native Goal/document changes
+also call `distributed_goal` checkpoint CAS before reporting command success.

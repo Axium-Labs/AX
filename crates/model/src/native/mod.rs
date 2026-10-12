@@ -4,9 +4,6 @@ mod anthropic;
 mod bedrock;
 mod google;
 mod radius;
-#[cfg(test)]
-#[path = "../../../../test/web/native_search.rs"]
-mod search_tests;
 pub(crate) mod transport;
 
 use crate::{

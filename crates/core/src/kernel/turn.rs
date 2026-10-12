@@ -76,8 +76,16 @@ impl AgentKernel {
                 self.task_queue = next;
                 let custom = self.pending_goal_evaluator.take();
                 self.install_goal(self.goal().map(|g| g.config.clone()));
-                if custom.is_some() && self.goal().is_some() {
-                    self.goal_evaluator = custom;
+                if let Some(custom) = custom.filter(|_| self.goal().is_some()) {
+                    self.task_queue
+                        .as_mut()
+                        .unwrap()
+                        .goal
+                        .as_mut()
+                        .unwrap()
+                        .evaluator_reference = Some(custom.policy_reference().into());
+                    self.goal_evaluator = Some(custom);
+                    self.wrap_goal_validators(self.goal().map(|g| g.config.clone()));
                 }
                 if let Some(goal) = self.task_queue.as_mut().and_then(|q| q.goal.as_mut()) {
                     goal.state = crate::GoalState::Running;
