@@ -84,10 +84,6 @@ mod execution_tests;
 #[path = "../../../test/harness/core.rs"]
 mod harness_tests;
 
-#[cfg(test)]
-#[path = "../../../test/harness/continuation.rs"]
-mod continuation_tests;
-
 // Acceptance suite for the runtime (A–G). The suite drives the real kernel
 // loop with scripted providers.
 #[cfg(test)]

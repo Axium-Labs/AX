@@ -276,3 +276,10 @@ remote management uses the existing AX settings/personalization/plugin commands
 and defaults off. Long Project stays optional inside a Goal; document edits and
 Session rotation retain the same fenced checkpoint and cumulative budget. See
 [workbench adapter and scope boundaries](docs/distributed-collaboration.md).
+
+
+Distributed worker model discovery reuses native ACP catalogs in its AX_HOME.
+Crew can select a Provider/Model for each execution without changing AX's global
+model. Task work duties enter the execution context; capability tags only match
+nodes. Session rotation keeps guidance, approvals and document operations bound
+to the actual current Session. See [execution model and Session binding](docs/distributed-collaboration.md#per-execution-model-and-current-session-binding).

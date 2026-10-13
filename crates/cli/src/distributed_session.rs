@@ -41,7 +41,7 @@ impl Bridge<'_> {
         input: &mut ChildStdin,
         lines: &mut Lines<BufReader<ChildStdout>>,
     ) -> Result<(String, Option<String>)> {
-        self.report("session", &json!({"session_id":self.session["sessionId"],"model_source":"worker configuration","sandbox_source":"host policy"})).await?;
+        self.report("session", &json!({"session_id":self.session["sessionId"],"model":self.session["_crewModel"],"model_source":"execution ACP configuration","sandbox_source":"host policy"})).await?;
         let mut session_id = self.session["sessionId"].clone();
         let mut bound_session = session_id.clone();
         let mut binding = None;
@@ -65,7 +65,7 @@ impl Bridge<'_> {
                     let line = line?.ok_or_else(|| anyhow!("ACP closed before result"))?;
                     let value: Value = serde_json::from_str(&line)?;
                     if value["method"] == "session/request_permission" {
-                        self.report("activity", &json!({"session_id":self.session["sessionId"],"permission":value["params"],"request_id":value["id"]})).await?;
+                        self.report("activity", &json!({"session_id":session_id,"permission":value["params"],"request_id":value["id"]})).await?;
                         permission = Some((value["id"].clone(), value["params"]["options"].clone(), Instant::now() + Duration::from_secs(90)));
                     } else if value["method"] == "session/update" {
                         let update = &value["params"]["update"];
@@ -115,6 +115,7 @@ impl Bridge<'_> {
                     if binding.is_some() { continue; }
                     let commands = self.client.request("POST", "/api/distributed/worker/inbox", Some(self.source.clone())).await?;
                     for command in commands.as_array().into_iter().flatten() {
+                        if command["session_id"] != session_id { self.ack(command, "failed", "Session rotated; send to the current active Session").await?; continue; }
                         let kind = command["kind"].as_str().unwrap_or_default();
                         let text = command["text"].as_str().unwrap_or_default();
                         if kind == "permission" {
@@ -168,8 +169,8 @@ impl Bridge<'_> {
                     }
                     if let Some((id, _, deadline)) = &permission && Instant::now() >= *deadline {
                         crate::distributed_worker::send(input, json!({"jsonrpc":"2.0","id":id,"result":{"outcome":{"outcome":"selected","optionId":"reject_once"}}})).await?;
+                        self.report("activity", &json!({"session_id":session_id,"request_id":id,"permission_expired":true})).await?;
                         permission = None;
-                        self.report("activity", &json!({"permission_expired":true})).await?;
                     }
                     if let Some((deadline, _)) = &finished && deadline.elapsed() >= Duration::from_secs(3) && requests.is_empty() { break; }
                 }

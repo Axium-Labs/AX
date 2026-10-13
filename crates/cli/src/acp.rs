@@ -1184,6 +1184,9 @@ pub async fn run(cli: &Cli, data_dir: PathBuf, skills_dir: PathBuf) -> Result<()
             ),
             "_ax/models" => {
                 let configured = crate::providers::configured_providers(cli.codex_auth.as_ref());
+                let current = model_selection::require_resolved(cli).ok()
+                    .filter(|selection| configured.contains(&selection.provider_id))
+                    .map(|selection| json!({"provider":selection.provider_id,"model":selection.model}));
                 let providers = configured
                     .iter()
                     .map(|name| json!({"id":name,"models":model_selection::local_catalog_models(name).into_iter().filter(|item| item.supports_tools).collect::<Vec<_>>()}))
@@ -1192,6 +1195,7 @@ pub async fn run(cli: &Cli, data_dir: PathBuf, skills_dir: PathBuf) -> Result<()
                     &out,
                     id,
                     json!({
+                        "current":current,
                         "providers":providers,
                         "catalog": provider_catalog(cli.codex_auth.as_ref()),
                         "unsupported": unsupported_configured_providers(&configured, cli.codex_auth.as_ref()),

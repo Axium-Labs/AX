@@ -74,8 +74,9 @@ Example configuration (replace the credential and IDs from enrollment):
 Paths are relative to the configuration file unless absolute. `execution_root`
 must be outside project sources. `ax_home` is optional; use separate homes for
 independent instance memory/configuration. Optional `skills_dir` and `mcp_config`
-select local configuration files. Advertised models must match the explicit
-model setting; advertised Skill/MCP names must be enabled in worker settings.
+select local configuration files. Pending model settings must match the explicit
+worker model when staged; active model lists come from native AX discovery.
+Advertised Skill/MCP names must be enabled in worker settings.
 Concurrency and project mappings must match enrollment. Optional `roles`, `tools`
 and `environments` select capability metadata. Tools must name AX built-ins; MCP
 servers use the separate MCP selection. Default tools advertise built-ins and the
@@ -245,3 +246,27 @@ AX home settings remain the global base. Active executions retain their existing
 snapshot; already saved Goals retain policy from their authoritative checkpoint.
 Automatic result patches exclude `.ax` and execution-input metadata so local
 configuration, MCP credentials and runtime stores are not exported as code changes.
+
+
+## Per-execution model and current Session binding
+
+Worker discovery reuses ACP `_ax/models` in its own AX_HOME. The response's
+optional `current` contains the locally resolved Provider/Model for the same CLI
+arguments. A bounded background process reports credential-filtered local models,
+current selection and errors every 60 seconds without blocking lease renewals.
+The Crew picker excludes offline/expired/error catalogs. Local catalog membership
+is not a successful remote inference probe; unavailable services fail execution
+with the native provider error. No credential is sent to Crew.
+
+Crew freezes the exact model and work duty in each Attempt. The worker validates
+that Provider/Model against native discovery and passes it to the existing ACP
+process using `--provider` and `--model`. Session reports include that process's
+resolved model. This overrides only the attempt, with no writes to the home
+model setting. Rotation/resume stay in the same ACP process and retain model,
+Skill/MCP, permission profile and cumulative Goal state. Work duties come from
+the task/member assignment; capability roles/tags never become agent prompts.
+
+Activity and permission metadata carry the actual current Session ID after
+rotation. The inbox accepts only commands targeting that current Session; stale
+commands fail instead of being applied to a successor. The existing execution
+lease still fences all command acknowledgements and result publication.

@@ -152,17 +152,16 @@ pub(crate) async fn run(path: &Path) -> Result<()> {
                 &approved["capabilities"],
                 |_| &approved["pending_capabilities"],
             );
-    if let Some(model) = &config.model {
+    if approved["pending_capabilities"].is_object() {
         ensure!(
             policy["models"]
                 .as_array()
-                .is_none_or(|models| models.is_empty() || models == &vec![json!(model)]),
-            "advertised models must match the configured model"
-        );
-    } else {
-        ensure!(
-            policy["models"].as_array().is_none_or(Vec::is_empty),
-            "an advertised model requires an explicit local model setting"
+                .is_none_or(|models| models.len() != 1
+                    || config
+                        .model
+                        .as_ref()
+                        .is_some_and(|model| models == &vec![json!(model)])),
+            "pending model setting differs from local worker model"
         );
     }
     for (field, selected) in [("skills", &config.skills), ("mcp", &config.mcp)] {
@@ -203,7 +202,7 @@ pub(crate) async fn run(path: &Path) -> Result<()> {
             .all(|name| builtin_tools.contains(&name.as_str())),
         "tools must name available AX built-ins; configure MCP separately"
     );
-    let capabilities = json!({
+    let mut capabilities = json!({
         "roles": config.roles.clone().map_or_else(|| policy["roles"].clone(), |roles| json!(roles)),
         "skills":config.skills, "mcp":config.mcp, "tools":tools,
         "models":config.model.iter().collect::<Vec<_>>(), "permissions":[config.permission_profile],
@@ -231,6 +230,13 @@ pub(crate) async fn run(path: &Path) -> Result<()> {
     let mut inventory_probe = Some(tokio::spawn(crate::distributed_host::detect()));
     let mut next_inventory = Instant::now() + Duration::from_secs(60);
     let mut host_inventory = None;
+    let probe_config = config.clone();
+    let mut model_probe = Some(tokio::spawn(
+        async move { model_catalog(&probe_config).await },
+    ));
+    let mut next_models = Instant::now() + Duration::from_secs(60);
+    let mut catalog_report =
+        Some(json!({"current":null,"models":[],"error":"AX model discovery is in progress"}));
     let mut management: Option<JoinHandle<Vec<Value>>> = None;
     let mut management_results = Vec::<Value>::new();
     loop {
@@ -285,16 +291,42 @@ pub(crate) async fn run(path: &Path) -> Result<()> {
             inventory_probe = Some(tokio::spawn(crate::distributed_host::detect()));
             next_inventory = Instant::now() + Duration::from_secs(60);
         }
+        if model_probe.as_ref().is_some_and(JoinHandle::is_finished) {
+            let result = model_probe.take().unwrap().await;
+            let catalog = match result {
+                Ok(Ok(catalog)) => catalog,
+                _ => {
+                    json!({"current":null,"models":[],"error":"AX model discovery failed; check local credentials and provider configuration"})
+                }
+            };
+            capabilities["models"] = json!(
+                catalog["models"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|m| m["model"].as_str())
+                    .collect::<std::collections::BTreeSet<_>>()
+            );
+            catalog_report = Some(catalog);
+        }
+        if model_probe.is_none() && Instant::now() >= next_models {
+            let probe_config = config.clone();
+            model_probe = Some(tokio::spawn(
+                async move { model_catalog(&probe_config).await },
+            ));
+            next_models = Instant::now() + Duration::from_secs(60);
+        }
         let response = client
             .request(
                 "POST",
                 "/api/distributed/worker/heartbeat",
-                Some(json!({"incarnation":incarnation,"active":active,"host_inventory":host_inventory,"capabilities":capabilities})),
+                Some(json!({"incarnation":incarnation,"active":active,"host_inventory":host_inventory,"capabilities":capabilities,"model_catalog":catalog_report})),
             )
             .await;
         match response {
             Ok(response) => {
                 host_inventory = None;
+                catalog_report = None;
                 let server_time = response["server_time"]
                     .as_i64()
                     .ok_or_else(|| anyhow!("server time missing"))?;
@@ -552,7 +584,7 @@ pub(crate) async fn send(input: &mut ChildStdin, value: Value) -> Result<()> {
     input.flush().await?;
     Ok(())
 }
-async fn rpc(
+pub(crate) async fn rpc(
     input: &mut ChildStdin,
     lines: &mut Lines<BufReader<ChildStdout>>,
     id: i64,
@@ -575,6 +607,37 @@ async fn rpc(
             return Ok(value["result"].clone());
         }
     }
+}
+/// Reuse native ACP model discovery under this worker's `AX_HOME`. No credentials leave AX.
+async fn model_catalog(config: &WorkerSettings) -> Result<Value> {
+    tokio::time::timeout(Duration::from_secs(15), async {
+        let mut command = Command::new(std::env::current_exe()?);
+        command.args(["acp", "--data-dir"]).arg(config.execution_root.join("model-discovery"))
+            .current_dir(config.ax_home.as_ref().unwrap_or(&config.execution_root))
+            .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()).kill_on_drop(true);
+        if let Some(home) = &config.ax_home { fs::create_dir_all(home)?; command.env("AX_HOME", home); }
+        if let Some(provider) = &config.provider { command.arg("--provider").arg(provider); }
+        if let Some(model) = &config.model { command.arg("--model").arg(model); }
+        #[cfg(windows)]
+        command.creation_flags(0x0800_0000);
+        let mut child = command.spawn()?;
+        let mut input = child.stdin.take().ok_or_else(|| anyhow!("model discovery stdin missing"))?;
+        let mut lines = BufReader::new(child.stdout.take().ok_or_else(|| anyhow!("model discovery stdout missing"))?).lines();
+        rpc(&mut input, &mut lines, 1, "initialize", json!({"protocolVersion":1,"clientCapabilities":{}})).await?;
+        let discovered = rpc(&mut input, &mut lines, 2, "_ax/models", json!({})).await?;
+        let current = discovered["current"].clone();
+        let mut models = vec![];
+        for provider in discovered["providers"].as_array().into_iter().flatten() {
+            for m in provider["models"].as_array().into_iter().flatten() {
+                models.push(json!({"provider":provider["id"],"model":m["id"],"name":m["display_name"].as_str().unwrap_or_else(||m["id"].as_str().unwrap_or_default()),"source":"local catalog; call availability checked at execution"}));
+            }
+            if current["provider"] == provider["id"] && !models.iter().any(|m| m["provider"] == current["provider"] && m["model"] == current["model"]) {
+                models.push(json!({"provider":current["provider"],"model":current["model"],"name":current["model"],"source":"current locally resolved configuration; not a service health check"}));
+            }
+        }
+        child.kill().await?;
+        Ok(json!({"current":current,"models":models,"error":if current.is_null() && models.is_empty() {json!("no configured provider/model; configure AX locally")} else {Value::Null}}))
+    }).await.map_err(|_| anyhow!("AX model discovery timed out"))?
 }
 async fn publish(
     client: &Client,
@@ -722,11 +785,38 @@ async fn execute(
         "AX_DISTRIBUTED_WORKFLOW",
         task["spec"]["workflow_id"].as_str().unwrap_or_default(),
     );
-    if let Some(provider) = &config.provider {
-        command.arg("--provider").arg(provider);
-    }
-    if let Some(model) = &config.model {
-        command.arg("--model").arg(model);
+    let selected = task["attempts"]
+        .as_array()
+        .and_then(|a| a.last())
+        .map(|a| &a["model"])
+        .filter(|m| m.is_object());
+    if let Some(selected) = selected {
+        let catalog = model_catalog(config).await?;
+        ensure!(
+            catalog["error"].is_null()
+                && catalog["models"].as_array().is_some_and(|models| models
+                    .iter()
+                    .any(|m| m["provider"] == selected["provider"]
+                        && m["model"] == selected["model"])),
+            "selected execution model is no longer available on this AX"
+        );
+        command.arg("--provider").arg(
+            selected["provider"]
+                .as_str()
+                .ok_or_else(|| anyhow!("model provider missing"))?,
+        );
+        command.arg("--model").arg(
+            selected["model"]
+                .as_str()
+                .ok_or_else(|| anyhow!("model ID missing"))?,
+        );
+    } else {
+        if let Some(provider) = &config.provider {
+            command.arg("--provider").arg(provider);
+        }
+        if let Some(model) = &config.model {
+            command.arg("--model").arg(model);
+        }
     }
     if let Some(skills) = &config.skills_dir {
         command.arg("--skills-dir").arg(skills);
@@ -752,9 +842,12 @@ async fn execute(
     rpc(&mut input,&mut lines,1,"initialize",json!({"protocolVersion":1,"clientCapabilities":{},"clientInfo":{"name":"AX Distributed Worker","version":env!("CARGO_PKG_VERSION")}})).await?;
     let workflow_tasks:Vec<_>=assignment["workflow_tasks"].as_array().into_iter().flatten().map(|t|json!({"id":t["id"],"request_id":t["spec"]["request_id"],"title":t["spec"]["title"],"status":t["status"],"result":t["result"],"failure":t["failure"],"artifacts":t["artifacts"]})).collect();
     let context = format!(
-        "Assigned collaboration role: {}\n\nNecessary context summary:\n{}\n\nDependency results (collaboration metadata):\n{}\n\nDurable workflow state:\n{}\n\nAlready submitted workflow tasks:\n{}\n\nObservations:\n{}\n\nInput artifacts are in .distributed-inputs, named by artifact ID. Patch artifacts have been applied to this isolated workspace. Use the collaboration tool for asynchronous delegation and workflow checkpoints. Recover from stored state and existing task IDs; a coordinator does not need to remain alive.",
-        assignment["workflow"]["collaboration"]["participants"][&config.instance_id]
-            .as_str()
+        "Assigned work responsibility: {}\n\nNecessary context summary:\n{}\n\nDependency results (collaboration metadata):\n{}\n\nDurable workflow state:\n{}\n\nAlready submitted workflow tasks:\n{}\n\nObservations:\n{}\n\nInput artifacts are in .distributed-inputs, named by artifact ID. Patch artifacts have been applied to this isolated workspace. Use the collaboration tool for asynchronous delegation and workflow checkpoints. Recover from stored state and existing task IDs; a coordinator does not need to remain alive.",
+        task["attempts"]
+            .as_array()
+            .and_then(|a| a.last())
+            .and_then(|a| a["duty"].as_str())
+            .filter(|d| !d.is_empty())
             .unwrap_or("Contribute to the current work task"),
         task["spec"]["context_summary"].as_str().unwrap_or_default(),
         assignment["dependency_results"],
@@ -790,7 +883,7 @@ async fn execute(
     if let Some(saved) = saved {
         ax["goalCheckpoint"] = saved.clone();
     }
-    let session = rpc(
+    let mut session = rpc(
         &mut input,
         &mut lines,
         2,
@@ -798,6 +891,8 @@ async fn execute(
         json!({"cwd":root,"mcpServers":[],"_ax":ax}),
     )
     .await?;
+    let models = rpc(&mut input, &mut lines, 4, "_ax/models", json!({})).await?;
+    session["_crewModel"] = models["current"].clone();
     let (prompt, intent) = if saved.is_some() {
         ("Resume unfinished durable Goal work. Inspect artifacts and actual external state before retrying effects.".to_owned(), json!({"action":"resume","goal_id":task_id}))
     } else {
