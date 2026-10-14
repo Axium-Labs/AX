@@ -17,8 +17,8 @@ keeps sessions, memory, credentials and model config on your machine — no
 service to sign up for, no remote telemetry.
 
 AX is the agent; [AX Crew](https://github.com/Axium-Labs/AXCrew) is the control
-plane built alongside it — connect, control and orchestrate AX agents running
-on your laptop, servers, GPU boxes and cloud VMs. See
+plane built alongside it — it orchestrates and controls AX across multiple
+machines and keeps their work running when a machine goes offline. See
 [ACP and Crew integration](docs/acp-crew.md).
 
 - **Rust native** — one binary for the terminal agent; no Node or Docker needed for core use. Optional Browser Use needs Node and Playwright.
@@ -238,53 +238,3 @@ scheduling, SQLite schema, module layout — is documented in
 ## License
 
 MIT OR Apache-2.0.
-
-### Import Skills and MCP
-
-```powershell
-ax skill import C:/downloads/my-skill           # project skills/
-ax skill import C:/downloads/my-skill --global  # <install-dir>/.ax/skills
-ax mcp import C:/downloads/mcp.json             # installation .ax/projects/<project-key>/mcp.toml
-ax mcp import C:/downloads/mcp.toml --global     # <install-dir>/.ax/mcp.toml
-```
-
-Imports validate their contents, preserve existing names and do not run scripts
-or MCP servers. MCP JSON accepts the common `mcpServers` format.
-
-## Local coding benchmark
-
-See `benchmark/README.md` for the fixed three-task AX vs Codex runner, isolation requirements and measured results. The included run was blocked by gateway 403 responses before coding and does not establish a performance ranking.
-
-## Optional distributed collaboration
-
-AXCrew can schedule durable tasks across independent AX instances using capability and Host resource requirements. AX keeps its existing runtime, local memory and Subagents. Workers exchange selected summaries, Events and Artifacts through persistent Workflow State; a Coordinator Agent need not remain alive. Enroll an instance in AXCrew’s **Distributed** collaboration workspace, download its configuration and run `ax crew worker worker.json`. AX automatically reports Host CPU/RAM/GPU inventory after connection; configure skills, MCP, tools and models in the connected instance page and apply the generated local settings. This is additive functionality in AX 0.3.8 / AXCrew 0.3.4; ordinary AX and the existing device bridge remain available. See [setup and recovery boundaries](docs/distributed-collaboration.md).
-
-
-AX ACP provides read-only directory discovery for AXCrew local project
-selection. SSH projects run local AX with an SSH tool; remote hosts need no AX. Paired devices advertise registered project roots while keeping the
-existing registered-root execution restriction. See
-[the ACP design note](docs/adr/0004-acp-control-plane.md).
-
-### Optional Goal
-
-`/goal <target>` enables target-scoped completion checks and continued execution.
-AXCrew Settings → Goal can also enable automatic Goal policies for new ordinary
-tasks in the selected global/project scope; this defaults off.
-Use `/goal status`, `/goal pause`, `/goal resume` and `/goal cancel` to manage it.
-Ordinary prompts keep their direct execution path without additional validation.
-See [Goal commands, budgets and recovery](docs/goal.md).
-
-
-The collaboration workspace can enter real worker ACP Sessions, send guidance,
-answer pending questions and approve one identified tool request. Optional native
-remote management uses the existing AX settings/personalization/plugin commands
-and defaults off. Long Project stays optional inside a Goal; document edits and
-Session rotation retain the same fenced checkpoint and cumulative budget. See
-[workbench adapter and scope boundaries](docs/distributed-collaboration.md).
-
-
-Distributed worker model discovery reuses native ACP catalogs in its AX_HOME.
-Crew can select a Provider/Model for each execution without changing AX's global
-model. Task work duties enter the execution context; capability tags only match
-nodes. Session rotation keeps guidance, approvals and document operations bound
-to the actual current Session. See [execution model and Session binding](docs/distributed-collaboration.md#per-execution-model-and-current-session-binding).

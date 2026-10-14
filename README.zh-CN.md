@@ -9,7 +9,7 @@
 
 AX 是一个小巧的原生终端 Agent：启动快、流式响应，会话、记忆、凭证与模型配置都留在你的机器上——无需注册任何服务，没有远程遥测。
 
-AX 是 Agent；[AX Crew](https://github.com/Axium-Labs/AXCrew) 是与它一同构建的控制平面——连接、控制并编排运行在笔记本、服务器、GPU 服务器与云虚拟机上的 AX Agent。参见 [ACP 与 Crew 集成](docs/acp-crew.md)。
+AX 是 Agent；[AX Crew](https://github.com/Axium-Labs/AXCrew) 是与它一同构建的控制平面——编排并控制多台机器上的 AX，并在机器掉线时让工作继续运行。参见 [ACP 与 Crew 集成](docs/acp-crew.md)。
 
 - **Rust 原生** — 核心终端 Agent 为单一二进制，不需要 Node 或 Docker；可选的浏览器操作需要 Node 和 Playwright。
 - **独立界面权限** — 应用、网站访问与具体操作审批分别管理，不改变文件和终端的沙箱。Windows 电脑操作默认关闭；平台支持和浏览器限制见 [主机访问权限](docs/host-permissions.md)。
