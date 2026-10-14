@@ -23,6 +23,10 @@ pub(crate) fn select(
         config.execution.environment = environment;
     }
     if let Some(shell) = shell {
+        anyhow::ensure!(
+            shell.supported(),
+            "This terminal shell is unavailable on this platform"
+        );
         config.execution.terminal_shell = shell;
     }
     if environment.is_some() || shell.is_some() {
@@ -249,7 +253,7 @@ mod tests {
     fn execution_defaults_and_round_trip() {
         let config: AxConfig = serde_json::from_str("{}").unwrap();
         assert_eq!(config.execution.environment, AgentEnvironment::Native);
-        assert_eq!(config.execution.terminal_shell, TerminalShell::Powershell);
+        assert_eq!(config.execution.terminal_shell, TerminalShell::default());
         let config: AxConfig = serde_json::from_str(r#"{"execution":{"environment":"wsl","terminal_shell":"git_bash"},"model":{"provider":"deepseek","model":"test"}}"#).unwrap();
         let restored: AxConfig =
             serde_json::from_str(&serde_json::to_string(&config).unwrap()).unwrap();

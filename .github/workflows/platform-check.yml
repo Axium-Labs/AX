@@ -1,0 +1,25 @@
+name: Platform checks
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths: ["crates/**", "Cargo.*", "scripts/**", ".github/workflows/platform-check.yml"]
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-22.04, macos-15]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo check --workspace --locked
+      - run: cargo clippy --workspace --all-targets --locked
+      - run: cargo test --workspace --locked
+      - name: Check embedded desktop Python syntax
+        run: python -m compileall -q crates/tool/src/desktop_unix

@@ -27,7 +27,7 @@ The early CLI path works without a workspace/model/session. Reads do not create 
 
 ## Computer Use
 
-The Windows desktop worker is a host transport, separately authorized from confined file/terminal workers. Computer Use defaults on when its configuration is absent; explicit saved disable settings remain effective and can only be changed through the user settings path. The enabled default does not grant app access or action approval. `list_windows` exposes minimal app/handle metadata for discovery, hides denied apps, and withholds titles for apps without a persistent allow. Targeted reads, screenshots and effects require app access. No arbitrary desktop-wide screenshot or shell command is added. Images use the existing multimodal `ToolOutput::Image` channel; their temporary storage does not grant the agent arbitrary host-file access. See [computer-use.md](computer-use.md).
+The native desktop worker is a host transport, separately authorized from confined file/terminal workers. Computer Use defaults on when its configuration is absent; explicit saved disable settings remain effective and can only be changed through the user settings path. The enabled default does not grant app access or action approval. `list_windows` exposes minimal app/handle metadata for discovery, hides denied apps, and withholds titles for apps without a persistent allow. Targeted reads, screenshots and effects require app access. No arbitrary desktop-wide screenshot or shell command is added. Images use the existing multimodal `ToolOutput::Image` channel; their temporary storage does not grant the agent arbitrary host-file access. See [computer-use.md](computer-use.md).
 
 ## Browser Use
 
@@ -50,7 +50,7 @@ Accessibility snapshots have a 32000-character transport cap and titles/URLs are
 
 ## Platform and trust limits
 
-Permission separation does not create a missing OS backend. Real native workspace/strict isolation currently exists only on Linux; explicit confined modes on native Windows/macOS still fail closed, and the platform default remains off there. Native Computer Use is still Windows-only; WSL/Linux/macOS desktop drivers and an IPC bridge from Linux AX to a Windows desktop broker are not implemented. SSH contexts do not expose local host UI tools. Browser use needs a supported Node/Playwright/browser installation and was live-tested here on Windows Edge.
+Permission separation does not create a missing OS backend. Real native workspace/strict isolation currently exists only on Linux; explicit confined modes on native Windows/macOS still fail closed, and the platform default remains off there. Native Computer Use has Windows UIA, Linux AT-SPI and macOS Accessibility adapters. Unix needs the documented runtime dependencies; macOS also needs OS privacy grants. Wayland currently allows accessibility actions only. WSL can operate Linux GUI apps but has no IPC bridge to the Windows desktop. SSH contexts do not expose local host UI tools. Browser use needs a supported Node/Playwright/browser installation and was live-tested here on Windows Edge.
 
 These settings govern AX's trusted tool entry points, not arbitrary programs already running as the same OS user. Unrestricted shell access or controlling a general-purpose terminal/browser application can perform broader actions. Keep the existing OS sandbox wherever supported; application/site permission checks are a separate service boundary, not a substitute for OS confinement. Local native AX extensions remain part of the trusted computing base.
 

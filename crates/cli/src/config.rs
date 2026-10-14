@@ -120,14 +120,37 @@ pub enum AgentEnvironment {
     Wsl,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, clap::ValueEnum)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, clap::ValueEnum)]
 #[serde(rename_all = "snake_case")]
 pub enum TerminalShell {
-    #[default]
     Powershell,
     Cmd,
     GitBash,
     Wsl,
+    Default,
+    Sh,
+    Bash,
+    Zsh,
+    Fish,
+}
+
+impl Default for TerminalShell {
+    fn default() -> Self {
+        if cfg!(windows) {
+            Self::Powershell
+        } else {
+            Self::Default
+        }
+    }
+}
+
+impl TerminalShell {
+    pub(crate) fn supported(self) -> bool {
+        match self {
+            Self::Powershell | Self::Cmd | Self::GitBash | Self::Wsl => cfg!(windows),
+            Self::Default | Self::Sh | Self::Bash | Self::Zsh | Self::Fish => cfg!(unix),
+        }
+    }
 }
 
 /// The last model selection AX successfully switched to via `/model`.

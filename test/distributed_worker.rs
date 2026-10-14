@@ -99,3 +99,22 @@ fn large_failure_results_use_artifact_references_instead_of_unreportable_message
         "test failed"
     );
 }
+
+#[tokio::test]
+async fn native_project_policy_is_snapshotted_without_private_runtime_state() {
+    let root=std::env::temp_dir().join(format!("ax-policy-test-{}",uuid::Uuid::new_v4()));
+    let source=root.join("source");fs::create_dir_all(source.join(".ax/skills/test-skill")).unwrap();
+    fs::write(source.join("file.txt"),"original").unwrap();
+    fs::write(source.join(".ax/config.toml"),"[subagent]\nmax_depth=2\n[host_permissions]\nprivate_grant=true\n").unwrap();
+    fs::write(source.join(".ax/goal.json"),serde_json::to_vec(&runtime_core::GoalConfig::default()).unwrap()).unwrap();
+    fs::write(source.join(".ax/skills/test-skill/SKILL.md"),"fixture").unwrap();
+    fs::write(source.join(".ax/memory.sqlite3"),"private").unwrap();
+    fs::write(source.join(".ax/auth.json"),"private").unwrap();
+    let mut config=config(&root,&source);config.remote_management=true;
+    let (snapshot,_)=prepare(&config,&task(1)).await.unwrap();
+    assert!(snapshot.join(".ax/goal.json").is_file());assert!(snapshot.join(".ax/skills/test-skill/SKILL.md").is_file());
+    let policy=scoped::read_document(&snapshot.join(".ax/config.toml")).unwrap();assert_eq!(policy["subagent"]["max_depth"].as_integer(),Some(2));assert!(policy.get("host_permissions").is_none());
+    assert!(!snapshot.join(".ax/auth.json").exists());assert!(!snapshot.join(".ax/memory.sqlite3").exists());
+    fs::write(source.join(".ax/config.toml"),"[subagent]\nmax_depth=3\n").unwrap();assert_eq!(scoped::read_document(&snapshot.join(".ax/config.toml")).unwrap()["subagent"]["max_depth"].as_integer(),Some(2));
+    fs::remove_dir_all(root).unwrap();
+}

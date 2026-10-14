@@ -83,3 +83,5 @@ What becomes easier, what becomes harder, and what we accepted.
 - [0026 - Optional Goal](0026-optional-goal.md) - target-scoped acceptance in the existing loop and queue.
 
 - [0027 — Optional Long Project and Session rotation](0027-long-project-session-rotation.md) — evidence projection and committed handoff in existing Goal/Session persistence.
+
+- [0028 - Native desktop adapters](0028-native-desktop-adapters.md) - shared app/action permissions with native Windows, Linux and macOS drivers.

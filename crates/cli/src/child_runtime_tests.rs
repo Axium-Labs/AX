@@ -220,8 +220,25 @@ async fn optional_subagent_uses_local_child_session_and_durable_artifact() {
     assert!(!fixture.host.source.join("result.txt").exists());
     drop(store);
 }
+// Libtest cannot serve production worker entry points. Lifecycle-only fixtures
+// use Off, while test/web/linux_runtime.rs checks Strict in the actual AX binary.
+#[cfg(target_os = "linux")]
+pub(super) fn initialize_test_sandbox() {
+    static INIT: std::sync::Once = std::sync::Once::new();
+    INIT.call_once(|| {
+        if sandbox::SandboxManager::configured_mode().is_none() {
+            sandbox::SandboxManager::configure(sandbox::SandboxMode::Off, vec![]).unwrap();
+        }
+        assert_eq!(
+            sandbox::SandboxManager::configured_mode(),
+            Some(sandbox::SandboxMode::Off)
+        );
+    });
+}
 impl Fixture {
     fn new() -> Self {
+        #[cfg(target_os = "linux")]
+        initialize_test_sandbox();
         let root = std::env::temp_dir().join(format!("ax-child-test-{}", uuid::Uuid::new_v4()));
         let source = root.join("source");
         std::fs::create_dir_all(&source).unwrap();

@@ -62,7 +62,7 @@ fn tools_in_session(mcp_tools: &[McpToolProxy], session: &str) -> ToolRegistry {
     ));
     // Desktop and browser access are independently authorized host capabilities.
     // An invalid configuration fails closed; constructing the tool is lazy.
-    if cfg!(windows)
+    if tool::desktop_supported()
         && let Ok(config) = AxConfig::load()
         && config.computer_use.enabled
     {

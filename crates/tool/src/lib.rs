@@ -35,10 +35,11 @@ pub use host_access::{
     HostSurface, HostTarget, app_id, browser_origin, host_home, reset_host_session,
 };
 mod desktop;
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux", target_os = "macos"))]
 pub use desktop::desktop_worker;
 pub use desktop::{
     DesktopSettings, DesktopTool, MAX_DESKTOP_NODES, MAX_SCREENSHOT_WIDTH, MIN_SCREENSHOT_WIDTH,
+    desktop_supported,
 };
 mod permission;
 mod resources;

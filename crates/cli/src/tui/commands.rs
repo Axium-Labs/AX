@@ -1166,10 +1166,20 @@ pub(super) async fn apply_modal_action(
                 config.save()?;
                 pane.push_view(subagent_settings()?);
             } else if surface == "execution" {
-                let options: Vec<(&str, &str)> = if id == "environment" {
+                let options: Vec<(&str, &str)> = if id == "environment" && !cfg!(windows) {
+                    vec![("native", "Native")]
+                } else if id == "environment" {
                     vec![
                         ("native", "Windows native"),
                         ("wsl", "Windows Subsystem for Linux"),
+                    ]
+                } else if !cfg!(windows) {
+                    vec![
+                        ("default", "Default login shell"),
+                        ("sh", "POSIX sh"),
+                        ("bash", "Bash"),
+                        ("zsh", "Zsh"),
+                        ("fish", "Fish"),
                     ]
                 } else {
                     vec![
@@ -1211,6 +1221,11 @@ pub(super) async fn apply_modal_action(
                             "cmd" => TerminalShell::Cmd,
                             "git_bash" => TerminalShell::GitBash,
                             "wsl" => TerminalShell::Wsl,
+                            "default" => TerminalShell::Default,
+                            "sh" => TerminalShell::Sh,
+                            "bash" => TerminalShell::Bash,
+                            "zsh" => TerminalShell::Zsh,
+                            "fish" => TerminalShell::Fish,
                             _ => TerminalShell::Powershell,
                         }),
                     )

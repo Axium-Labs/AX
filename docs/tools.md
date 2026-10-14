@@ -5,7 +5,7 @@ requirements, and how the runtime and UI enforce them.
 
 ## Computer Use
 
-The Windows `desktop` tool provides real accessibility reads and control
+The native `desktop` tool provides real accessibility reads and control
 actions. `ax computer-use` owns its global configuration; AXCrew edits the same
 state. It defaults on, preserves explicit disable settings, enforces node/image
 limits, redacts passwords and skips password-bearing window screenshots.
@@ -25,6 +25,11 @@ runs AX directly; `ax environment wsl` runs Linux AX in the default WSL
 distribution. WSL selection first checks `~/.local/bin/ax --version`; install
 the Linux AX binary there before selecting WSL. `/environment` opens the same
 settings in the TUI. Changes take effect on the next AX launch.
+
+On Linux/macOS, integrated terminal choices are `default`, `sh`, `bash`, `zsh`
+and `fish`; Windows retains its existing shell choices. These settings affect
+new Crew terminals, not the agent shell tool's POSIX contract. See
+[platforms.md](platforms.md) for shell resolution, installation and limits.
 
 The Windows launcher forwards stdio, exit status, the workspace and path flags
 to Linux AX. It maps the shared `AX_HOME` and ACP session `cwd` through

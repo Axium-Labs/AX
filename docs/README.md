@@ -6,7 +6,10 @@ design decisions that shaped the code are recorded as ADRs in
 
 ## Documentation map
 
-Native Windows desktop automation and its AXCrew settings contract are documented
+See [platforms.md](platforms.md) for cross-platform builds, shell settings and
+capability limits.
+
+Native desktop automation and its AXCrew settings contract are documented
 in [computer-use.md](computer-use.md).
 Independent application/site access, browser sessions and sandbox/approval boundaries
 are documented in [host-permissions.md](host-permissions.md).

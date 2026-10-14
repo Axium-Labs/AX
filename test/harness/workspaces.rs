@@ -152,6 +152,8 @@ impl ModelProvider for Provider {
 #[tokio::test]
 #[allow(clippy::too_many_lines)]
 async fn two_repositories_exact_revisions_partial_setup_failure_and_durable_patches() {
+    #[cfg(target_os = "linux")]
+    super::tests::initialize_test_sandbox();
     let root = std::env::temp_dir().join(format!("ax-workspaces-{}", uuid::Uuid::new_v4()));
     let source = root.join("controller");
     std::fs::create_dir_all(&source).unwrap();
@@ -330,6 +332,8 @@ impl ModelProvider for NoGitProvider {
 }
 #[tokio::test]
 async fn empty_and_non_git_inherited_shell_edits_survive_cleanup_without_fabricated_diff_counts() {
+    #[cfg(target_os = "linux")]
+    super::tests::initialize_test_sandbox();
     let root = std::env::temp_dir().join(format!("ax-nongit-{}", uuid::Uuid::new_v4()));
     let source = root.join("source");
     std::fs::create_dir_all(&source).unwrap();

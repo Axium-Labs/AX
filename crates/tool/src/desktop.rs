@@ -1,4 +1,4 @@
-//! Windows accessibility automation, enabled by default with independent app access.
+//! Native accessibility automation with independent application access.
 //! The host supplies immutable settings.
 use crate::{Capability, SafetyLevel, Tool, ToolError};
 use async_trait::async_trait;
@@ -99,7 +99,7 @@ impl DesktopTool {
         if action != "list_windows"
             && input["window_id"]
                 .as_str()
-                .is_none_or(|id| id.parse::<isize>().ok().is_none_or(|handle| handle == 0))
+                .is_none_or(|id| !valid_window_id(id))
         {
             return Err(ToolError::InvalidInput(
                 "Use a window_id returned by list_windows".into(),
@@ -128,24 +128,56 @@ impl Default for DesktopTool {
     }
 }
 
+fn valid_window_id(id: &str) -> bool {
+    if cfg!(windows) {
+        id.parse::<isize>().is_ok_and(|handle| handle != 0)
+    } else {
+        !id.is_empty()
+            && id.len() <= 2048
+            && id
+                .bytes()
+                .all(|value| value.is_ascii_alphanumeric() || b"._-:/|".contains(&value))
+    }
+}
+
 #[cfg(windows)]
 #[path = "desktop_windows.rs"]
 mod windows;
 
-#[cfg(windows)]
-async fn run_windows(request: &Value, home: &std::path::Path) -> Result<String, ToolError> {
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[path = "desktop_unix.rs"]
+mod unix;
+
+/// Backend availability without spawning a driver on the startup path.
+#[must_use]
+pub fn desktop_supported() -> bool {
+    cfg!(windows)
+        || cfg!(target_os = "macos")
+        || (cfg!(target_os = "linux")
+            && ["DISPLAY", "WAYLAND_DISPLAY"]
+                .iter()
+                .any(|name| std::env::var_os(name).is_some_and(|value| !value.is_empty())))
+}
+
+#[cfg(any(windows, target_os = "linux", target_os = "macos"))]
+async fn run_native(request: &Value, home: &std::path::Path) -> Result<String, ToolError> {
     use std::process::Stdio;
     use tokio::io::AsyncWriteExt;
     let mut command = tokio::process::Command::new(std::env::current_exe()?);
     command
         .env("AX_HOME", home)
         .arg("--ax-computer-use-worker")
-        .creation_flags(0x0800_0000)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
+    #[cfg(windows)]
+    command.creation_flags(0x0800_0000);
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    command.process_group(0);
     let mut child = command.spawn()?;
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    let mut worker_group = unix::WorkerGroup(child.id());
     let mut stdin = child
         .stdin
         .take()
@@ -165,6 +197,10 @@ async fn run_windows(request: &Value, home: &std::path::Path) -> Result<String, 
             "Desktop operation timed out; the target application may be unresponsive".into(),
         )
     })?;
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    if output.is_ok() {
+        worker_group.0 = None;
+    }
     written?;
     let output = output?;
     if !output.status.success() {
@@ -185,7 +221,7 @@ async fn run_windows(request: &Value, home: &std::path::Path) -> Result<String, 
 ///
 /// # Errors
 /// Returns an error when host access is disabled or request input is invalid.
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux", target_os = "macos"))]
 pub async fn desktop_worker(mut settings: DesktopSettings) -> Result<(), ToolError> {
     use tokio::io::AsyncReadExt;
     let mut bytes = Vec::new();
@@ -207,7 +243,12 @@ pub async fn desktop_worker(mut settings: DesktopSettings) -> Result<(), ToolErr
     request["resolve_only"] = payload["resolve_only"].clone();
     request["authorized_app"] = payload["authorized_app"].clone();
     // No native object crosses threads, no provider/session initialization.
+    #[cfg(windows)]
     let result = windows::run(&request).unwrap_or_else(|error| json!({"error":error.to_string()}));
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    let result = unix::run(&request)
+        .await
+        .unwrap_or_else(|error| json!({"error":error.to_string()}));
     println!(
         "{}",
         serde_json::to_string(&result).map_err(|e| ToolError::Execution(e.to_string()))?
@@ -224,16 +265,23 @@ impl Tool for DesktopTool {
         "desktop"
     }
     fn description(&self) -> &'static str {
-        "Read and operate Windows application windows using accessibility controls. Independent app access and action approval are required. Read a bounded UI tree, focus windows, invoke controls, enter text, send keys or use target-window coordinates. Optional window screenshots omit password-bearing windows."
+        "Read and operate native application windows using Windows UIA, macOS Accessibility or Linux AT-SPI. Independent app access and action approval are required. Read a bounded UI tree, focus windows, invoke controls, enter text, send keys or use target-window coordinates. Window screenshots omit password-bearing windows. Linux Wayland restricts coordinate input and capture."
     }
     fn input_schema(&self) -> Value {
+        let modifiers: &[&str] = if cfg!(target_os = "macos") {
+            &["ctrl", "shift", "alt", "cmd", "meta"]
+        } else if cfg!(target_os = "linux") {
+            &["ctrl", "shift", "alt", "meta"]
+        } else {
+            &["ctrl", "shift", "alt"]
+        };
         json!({"type":"object","required":["action"],"properties":{
             "action":{"type":"string","enum":["list_windows","read_window","screenshot_window","focus_window","click_element","type_text","press_key","move_mouse","mouse_click"]},
             "window_id":{"type":"string","description":"Window handle from list_windows; required except for list_windows"},
             "element_id":{"type":"string","description":"Element ID from read_window; required for click_element; type_text otherwise uses the focused element in the target window"},
             "include_hidden":{"type":"boolean"},"max_nodes":{"type":"integer","minimum":1,"maximum":self.settings.max_nodes},
             "text":{"type":"string"},"key":{"type":"string","description":"Return, Escape, Tab, Backspace, Delete, arrows, Home, End, PageUp, PageDown, F1-F12 or one letter/digit"},
-            "modifiers":{"type":"array","items":{"type":"string","enum":["ctrl","shift","alt"]}},
+            "modifiers":{"type":"array","items":{"type":"string","enum":modifiers}},
             "x":{"type":"integer","description":"Screen coordinate inside target window"},"y":{"type":"integer"},
             "button":{"type":"string","enum":["left","right","middle"]}
         }})
@@ -263,11 +311,11 @@ impl Tool for DesktopTool {
         if input["action"] == "list_windows" {
             return Ok(None);
         }
-        #[cfg(windows)]
+        #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
         {
             request["resolve_only"] = json!(true);
             let resolved: Value =
-                serde_json::from_str(&run_windows(&request, self.host.home()).await?)
+                serde_json::from_str(&run_native(&request, self.host.home()).await?)
                     .map_err(|e| ToolError::Execution(e.to_string()))?;
             let target = crate::HostTarget {
                 surface: crate::HostSurface::Computer,
@@ -285,11 +333,11 @@ impl Tool for DesktopTool {
                 target,
             }))
         }
-        #[cfg(not(windows))]
+        #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
         {
             let _ = request;
             Err(ToolError::Execution(
-                "Computer Use currently supports native Windows only".into(),
+                "No Computer Use backend is available for this platform".into(),
             ))
         }
     }
@@ -300,7 +348,7 @@ impl Tool for DesktopTool {
         authorization: Option<&crate::HostAuthorization>,
     ) -> Result<crate::ToolOutput, ToolError> {
         let mut request = self.request(&input)?;
-        #[cfg(windows)]
+        #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
         {
             if input["action"] != "list_windows" {
                 let access = self
@@ -322,16 +370,16 @@ impl Tool for DesktopTool {
                 }
                 request["authorized_app"] = json!(access.target.id);
             }
-            let result = run_windows(&request, self.host.home()).await?;
+            let result = run_native(&request, self.host.home()).await?;
             let value =
                 serde_json::from_str(&result).map_err(|e| ToolError::Execution(e.to_string()))?;
             crate::host_access::host_output(&value)
         }
-        #[cfg(not(windows))]
+        #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
         {
             let _ = (request, authorization);
             Err(ToolError::Execution(
-                "Computer Use currently supports native Windows only".into(),
+                "No Computer Use backend is available for this platform".into(),
             ))
         }
     }

@@ -133,10 +133,14 @@ git push origin v0.2.0
 
 The workflow:
 
-1. Builds the Windows x64 release binary.
-2. Packages `ax-x86_64-pc-windows-msvc.zip` with the executable, `skills/`
+1. Builds Windows x64, Linux x64/arm64 musl and macOS Intel/Apple Silicon binaries.
+2. Packages Windows ZIP and Unix `.tar.gz` archives with the executable, `skills/`
    and `mcp.example.toml`; generates `SHA256SUMS` and publishes the GitHub Release.
    The release workflow does not run tests.
+
+Native platform build/lint/tests run in `.github/workflows/platform-check.yml`
+for pull requests or manual dispatch. See [platforms.md](platforms.md) for targets,
+shell defaults and capability limitations.
 
 Installers (`scripts/install.sh`, `scripts/install.ps1`) fetch the latest
 release from GitHub and verify the archive against `SHA256SUMS`, then place the

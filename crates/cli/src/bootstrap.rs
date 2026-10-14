@@ -129,7 +129,7 @@ pub(crate) async fn run_internal_entry(
 ) -> Option<Result<()>> {
     let failure = |message: &str| Some(Err(anyhow!("{message}")));
     match internal? {
-        #[cfg(windows)]
+        #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
         "--ax-computer-use-worker" => match AxConfig::load() {
             Ok(config) => Some(
                 tool::desktop_worker(config.computer_use)

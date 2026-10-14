@@ -24,7 +24,7 @@ cli ───────────────┬──> runtime-core ──>
 | Crate | Responsibility |
 |---|---|
 | `model` | Provider-neutral `ModelProvider`, text/image message parts, capabilities, tool calls, response types. One streaming entry point (`complete_stream`) with a non-streaming fallback. |
-| `tool` | `Tool`, `ToolRegistry`, JSON Schema, `SafetyLevel`, plus built-ins: `shell`, `filesystem`, `find_files`/`glob`, `patch`, `search`, `web`, `view_image`, `browser`, and native Windows `desktop` (enabled by default, with independent app access). Owns the `PermissionStore`. |
+| `tool` | `Tool`, `ToolRegistry`, JSON Schema, `SafetyLevel`, plus built-ins: `shell`, `filesystem`, `find_files`/`glob`, `patch`, `search`, `web`, `view_image`, `browser`, and native `desktop` (Windows UIA, Linux AT-SPI, macOS Accessibility; enabled by default with independent app access and platform prerequisites). Owns the `PermissionStore`. |
 | `runtime-core` | The model → tool → model agent loop, `AgentEvent` stream, context selection, `ContextBudget`, compaction, and `AgentSupervisor` for bounded-concurrency tasks. |
 | `mcp` | MCP client for stdio / Streamable HTTP / WebSocket, lazy connection, capability catalog, `McpToolProxy` and `McpGateway`. |
 | `skill` | `SKILL.md` frontmatter indexing, precomputed Unicode routing features, and language-independent similarity routing; Markdown body is loaded only when a route hits. Legacy packages remain supported. |

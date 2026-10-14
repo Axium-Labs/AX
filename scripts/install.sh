@@ -62,7 +62,6 @@ case "${version}" in *[!A-Za-z0-9.+-]*) echo "AX: invalid release version" >&2; 
 case "${version}" in v[0-9]*.[0-9]*) ;; *) echo "AX: invalid release version" >&2; exit 1;; esac
 
 asset="ax-${arch}-${os}.tar.gz"
-asset_url="${download_base}/${asset}"
 
 # --- install location ---------------------------------------------------------
 install_dir="${AX_INSTALL_DIR:-${HOME}/.local/bin}"
@@ -70,7 +69,8 @@ mkdir -p "${install_dir}"
 
 # --- download and verify ------------------------------------------------------
 tmp_dir="$(mktemp -d)"
-trap 'rm -rf "${tmp_dir}"' EXIT
+staged=""
+trap 'rm -rf "${tmp_dir}"; if [ -n "${staged}" ]; then rm -f "${staged}"; fi' 0
 
 providers="github"
 if [ -n "${GITCODE_REPO}" ]; then providers="${providers} gitcode"; fi
@@ -102,7 +102,12 @@ if [ "${verified}" -ne 1 ]; then echo "AX: all release sources failed:${failures
 
 # --- extract and install -------------------------------------------------------
 tar -xzf "${tmp_dir}/ax.tar.gz" -C "${tmp_dir}"
-install -m 0755 "${tmp_dir}/ax" "${install_dir}/ax"
+# Stage beside the destination, then rename atomically. Overwriting a running
+# executable with install/cp can fail with ETXTBSY on Linux.
+staged="$(mktemp "${install_dir}/.ax-install.XXXXXX")"
+install -m 0755 "${tmp_dir}/ax" "${staged}"
+mv -f "${staged}" "${install_dir}/ax"
+staged=""
 echo "AX: installed to ${install_dir}/ax"
 
 # --- bundled skills and MCP template -------------------------------------------

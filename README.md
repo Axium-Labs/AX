@@ -2,6 +2,11 @@
 
 A fast, lightweight AI agent for the terminal, built in Rust.
 
+One source workspace builds for Windows, Linux and macOS. See
+[platform support](docs/platforms.md) for native build targets, shell settings,
+installation and capability limits; new platform archives require a release
+containing those assets before they can be downloaded.
+
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue)](Cargo.toml)
 [![Rust 1.92+](https://img.shields.io/badge/rust-1.92+-orange)](https://www.rust-lang.org)
 
@@ -17,7 +22,7 @@ on your laptop, servers, GPU boxes and cloud VMs. See
 [ACP and Crew integration](docs/acp-crew.md).
 
 - **Rust native** — one binary for the terminal agent; no Node or Docker needed for core use. Optional Browser Use needs Node and Playwright.
-- **Independent UI permissions** — app/site access and action approval are separate from the file/terminal sandbox. Windows Computer Use is enabled by default and respects explicit disable settings; see [host access](docs/host-permissions.md) for platform support and browser limits.
+- **Independent UI permissions** — app/site access and action approval are separate from the file/terminal sandbox. Computer Use defaults on and preserves explicit disable settings; Windows UIA, Linux AT-SPI and macOS Accessibility adapters have platform prerequisites and limits. See [Computer Use](docs/computer-use.md) and [host access](docs/host-permissions.md).
 - **Fast startup** — providers, skills, MCP servers and memory load on demand.
 - **Local system resources** — `/system` shows measured CPU/memory usage and
   supported NVIDIA GPU usage/VRAM; collection runs only when requested.

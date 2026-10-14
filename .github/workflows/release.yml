@@ -19,6 +19,18 @@ jobs:
           - target: x86_64-pc-windows-msvc
             os: windows-latest
             asset: ax-x86_64-pc-windows-msvc.zip
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-22.04
+            asset: ax-x86_64-unknown-linux-musl.tar.gz
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-24.04-arm
+            asset: ax-aarch64-unknown-linux-musl.tar.gz
+          - target: x86_64-apple-darwin
+            os: macos-15
+            asset: ax-x86_64-apple-darwin.tar.gz
+          - target: aarch64-apple-darwin
+            os: macos-15
+            asset: ax-aarch64-apple-darwin.tar.gz
 
     steps:
       - name: Checkout
@@ -29,10 +41,35 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
+      - name: Install Linux musl toolchain
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
       - name: Build
+        if: runner.os != 'Linux'
         env:
           GITCODE_AX_REPOSITORY: ${{ vars.GITCODE_AX_REPOSITORY }}
         run: cargo build --release --target "${{ matrix.target }}"
+
+      - name: Build Linux musl
+        if: runner.os == 'Linux'
+        env:
+          CC: musl-gcc
+          GITCODE_AX_REPOSITORY: ${{ vars.GITCODE_AX_REPOSITORY }}
+        run: cargo build --release --target "${{ matrix.target }}"
+
+      - name: Package asset (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          package="$RUNNER_TEMP/package"
+          mkdir -p "$package"
+          cp "target/${{ matrix.target }}/release/ax" "$package/ax"
+          chmod 755 "$package/ax"
+          cp -R skills "$package/skills"
+          cp mcp.example.toml "$package/"
+          tar -czf "$RUNNER_TEMP/${{ matrix.asset }}" -C "$package" ax skills mcp.example.toml
 
       - name: Package asset (Windows)
         if: runner.os == 'Windows'
