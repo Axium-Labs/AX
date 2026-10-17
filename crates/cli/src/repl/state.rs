@@ -56,6 +56,9 @@ pub(crate) struct ReplState {
     pub(crate) allowed_skills: Option<HashSet<String>>,
     pub(crate) current_session: Option<Session>,
     pub(crate) loaded_messages: Vec<Message>,
+    /// ACP saves an ordinary submission before preparing its runtime. The
+    /// kernel's first user checkpoint acknowledges that same durable message.
+    pub(crate) admitted_prompt: Option<String>,
     pub(crate) runtime: Option<AgentKernel>,
     pub(crate) mod_revision: Option<String>,
     pub(crate) turn_input: Option<runtime_core::TurnInput>,
@@ -213,6 +216,7 @@ impl ReplState {
             allowed_skills: None,
             current_session: None,
             loaded_messages: Vec::new(),
+            admitted_prompt: None,
             runtime: None,
             mod_revision: None,
             turn_input: None,
@@ -571,6 +575,13 @@ impl ReplState {
             .map(|call| call.id.as_str())
             .collect::<HashSet<_>>();
         for message in messages.iter().skip(*saved) {
+            if message.role == Role::User
+                && self.admitted_prompt.as_deref() == Some(message.content.as_str())
+            {
+                self.admitted_prompt = None;
+                *saved += 1;
+                continue;
+            }
             let role = memory_role(&message.role);
             let kind = match message.role {
                 Role::System => MessageKind::AgentState,

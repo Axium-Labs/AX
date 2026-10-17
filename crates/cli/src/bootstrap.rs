@@ -139,6 +139,7 @@ pub(crate) async fn run_internal_entry(
             Err(error) => Some(Err(error)),
         },
         "--ax-sandbox-snapshot" => Some(worktree_changes::worker_snapshot()),
+        "--ax-worktree-snapshot" => Some(worktree_changes::host_snapshot()),
         "--ax-sandbox-worker" => match raw_args.next() {
             Some(name) => Some(tool::sandbox_worker(&name).await.map_err(Into::into)),
             None => failure("worker tool missing"),

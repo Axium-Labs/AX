@@ -260,6 +260,11 @@ fn shell_description() -> &'static str {
 /// system.
 const SHELL_GUIDANCE: &str = "shell: the fallback for work no dedicated capability covers. Do not use a recursive \
     scan (Get-ChildItem -Recurse, find, rg --files) when find_files/glob or search can express the request. \
+    Each call starts a fresh shell in the session workspace (or the bound child workspace). Working-directory \
+    changes do not persist between calls. Execution metadata such as _ax_execution.scope declares intended \
+    resources; it never changes the working directory. For a subdirectory, explicitly use git -C <directory> \
+    or change location inside that command. The result reports the shell's starting working_directory. \
+    A Git discovery failure at the workspace root says nothing about repositories in its subdirectories. \
     On failure, inspect the smallest diagnostics, repair the local cause, and run the smallest relevant \
     verification before broader reruns. Shell commands are authorized by the permission system, not by prompt \
     wording.";
@@ -394,6 +399,8 @@ async fn execute_shell(
     let input: ShellInput = serde_json::from_value(input)
         .map_err(|error| ToolError::InvalidInput(error.to_string()))?;
     validate_command(&input.command, cfg!(windows))?;
+    let working_directory =
+        context.map_or_else(std::env::current_dir, |context| Ok(context.cwd.clone()))?;
 
     #[cfg(windows)]
     let mut command = {
@@ -446,8 +453,9 @@ async fn execute_shell(
     let stdout = decode(&output.stdout);
     let stderr = decode(&output.stderr);
     let text = format!(
-        "exit_code: {}\nstdout:\n{}\nstderr:\n{}",
+        "exit_code: {}\nworking_directory: {}\nstdout:\n{}\nstderr:\n{}",
         output.status.code().unwrap_or(-1),
+        working_directory.display(),
         stdout,
         stderr
     );

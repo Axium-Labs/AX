@@ -42,6 +42,16 @@ Existing processes and terminals keep their current environment.
 
 ## Tool model
 
+Each `shell` call starts a fresh process in the session workspace, or in its bound
+child workspace. Changing location in one call does not change subsequent calls.
+`_ax_execution.scope` declares the step's resource scope; it does not select the
+shell working directory. Commands targeting a nested project must explicitly
+change location within that command or use a program's directory option, such as
+`git -C ax status`. Shell results report their starting `working_directory` along
+with exit status, stdout and stderr, so errors can be attributed to the directory
+that was actually checked. A root-directory Git error does not establish whether
+its subdirectories are repositories.
+
 A **`Tool`** (`crates/tool`) is a named callable with a JSON input schema. The
 `ToolRegistry` collects the tools available to one agent. The agent loop is
 tool-agnostic: MCP remote tools are proxied into ordinary `Tool`s, so the loop

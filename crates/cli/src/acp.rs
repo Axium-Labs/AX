@@ -1047,10 +1047,30 @@ pub async fn run(cli: &Cli, data_dir: PathBuf, skills_dir: PathBuf) -> Result<()
                             permissions: state.permissions.clone(),
                             session_id: task_session.clone(),
                         });
-                        let before=crate::worktree_changes::snapshot(&task_cwd);
+                        // Preserve accepted ordinary messages even if Stop is
+                        // pressed while the workspace baseline is being prepared.
+                        if state.pending_question().is_none()
+                            && matches!(state.next_goal_turn, runtime_core::GoalTurn::New | runtime_core::GoalTurn::Start { .. } | runtime_core::GoalTurn::Pursue { .. })
+                            && prompt != "/goal" && !prompt.starts_with("/goal ")
+                        {
+                            state.persist_messages(&[model::Message::user(prompt.clone())])?;
+                            state.admitted_prompt = Some(prompt.clone());
+                        }
+                        let before=crate::worktree_changes::snapshot(&task_cwd).await;
+                        if let Err(reason) = &before {
+                            let body=stamp(json!({"sessionUpdate":"workspace_changes_unavailable","reason":reason}),now_seconds());
+                            task_out.send(json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":task_session,"update":body}})).ok();
+                        }
                         let outcome=run_session_prompt(&mut state, &selection, approval, &prompt, &task_out, &task_session)
                         .await;
-                        let files = match (before, crate::worktree_changes::snapshot(&task_cwd)) {
+                        // A missing baseline cannot yield an accurate diff. Do
+                        // not scan the same oversized workspace again at the end.
+                        let after = if before.is_ok() { crate::worktree_changes::snapshot(&task_cwd).await } else { Err("baseline unavailable".into()) };
+                        if before.is_ok() && let Err(reason) = &after {
+                            let body=stamp(json!({"sessionUpdate":"workspace_changes_unavailable","reason":reason}),now_seconds());
+                            task_out.send(json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":task_session,"update":body}})).ok();
+                        }
+                        let files = match (before, after) {
                             (Ok(before), Ok(after)) => Some(crate::worktree_changes::changed(&before, &after)),
                             (Err(error), _) | (_, Err(error)) => {
                                 // A failed snapshot is not an unchanged workspace.

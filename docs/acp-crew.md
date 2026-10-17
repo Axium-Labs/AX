@@ -36,6 +36,27 @@ The corresponding Crew backend and its API are in the sibling `axcrew` project. 
 
 ## Workspace identity and confinement
 
+### Prompt admission, Stop and file change previews
+
+Ordinary ACP submissions are durably saved as user messages after the session is
+opened and before the workspace baseline or provider request begins. The first
+kernel checkpoint acknowledges the admitted message without appending a duplicate;
+repeated identical submissions in separate turns remain separate messages. Goal
+control commands and answers to parked questions retain their existing lifecycle.
+Stopping during preparation preserves the submitted message for session replay.
+
+Turn change previews run in a separate cancellable AX child using the configured
+sandbox policy. Each baseline has a two-second process deadline; enumeration and
+reading also check a one-second work budget, 10,000-file limit, two-MiB per-file
+limit and 16-MiB total content limit. Growing files use a bounded read. Existing
+Git ignore and generated-directory exclusions still apply. Large, unreadable or
+slow workspaces report `workspace_changes_unavailable` with a diagnostic `reason`
+and continue the conversation. A missing baseline is never published as an empty
+`turn_changes` result, and is not scanned again after inference. Tool effects and
+tool-reported changes continue normally; a complete automatic turn diff is not
+available when either baseline fails. Cancellation drops and terminates the
+snapshot child instead of leaving a synchronous scan on the ACP executor.
+
 New device run requests carry workspace_id. AX resolves that ID through its local
 registered-project list and canonicalizes the result. For existing Crew versions,
 a legacy cwd is accepted only when it canonicalizes to an already registered
