@@ -34,15 +34,51 @@ prevent inspecting the actual checkout or recovering within that boundary.
 Completion is continuation-driven for controllers and children. Final text streams
 immediately; `TurnState::continuation()` permits completion only when there is no
 pending execution, result consumption, task, child, approval, retry, input or next
-action. Tool use, edits, shell commands and tests never trigger another model
-request by themselves. A plain answer costs one execution model request and zero
-reviewer requests. There is no task complexity classifier.
+action. Successful tool use, edits, shell commands and tests do not by themselves
+trigger another model request. A plain answer costs one execution model request
+and zero reviewer requests. There is no task complexity classifier.
 
-Extra verification is an optional `Goal`, default off. Deterministic checks
+Independent verification is an optional `Goal`, default off. Deterministic checks
 run before any explicitly enabled model verification. See [agent-loop.md](agent-loop.md)
 for configuration, events, extension points and recovery. Legacy completion-review
 markers are read for recovery compatibility only; new default turns do not write
 them. A child final with unresolved tool errors still produces a failed receipt.
+
+### Evidence review after tool errors
+
+After a typed recoverable tool error in the current host turn, the first valid
+`request_user_input` call receives `review_required` feedback instead of opening a
+question. The call receives a normal tool result, no question is parked, and the
+same execution model continues. It can try a documented alternative or submit the
+necessary question again. A missing command or one client's missing login is not
+proof that every supported interface is unavailable. Reuse existing authorization
+through intended interfaces without exposing or persisting secrets.
+
+The first ordinary final whose latest tool-call round still contains such errors
+also receives one `[ax-handoff-review]` continuation to reconcile claimed results
+with receipts, changed files and validation. A later successful recovery/check
+or recorded queue outcome keeps direct completion; old failures alone do not
+require another final review. It may use tools or finalize from sufficient
+existing evidence. This is bounded self-review, not an independent evaluator or
+a success guarantee. At most one question review and one final review run per host
+turn, even if recovery produces further errors. New host turns (including user
+answers/resumes) reset this allowance. Raw current-turn receipts survive model
+context compaction and provide up to eight sampled failed call IDs (current-turn
+history for a question, latest tool round for a final).
+
+Old-turn errors, unstructured error prose, actual typed permission denials and
+global blockers do not trigger this mechanism. Existing Goal verification owns
+the final check when enabled. A consumed finite model-step budget also suppresses
+the extra review. Permission, cancellation, queue and steering rules retain
+priority. Streamed final candidates remain visible while being reviewed;
+`TurnFinished` signals the accepted final. `[ax-handoff-pending]` before a
+candidate prevents recovering it as a completed child if interrupted.
+
+Editing guidance prefers atomic patches/project scripts/format-aware updates,
+checks the changed region before dependent steps, and compares post-edit errors
+with the pre-edit state before attributing them to the repository. Final reports
+distinguish attempted, changed, built, validated and externally delivered states.
+See [ADR 0029](adr/0029-evidence-driven-handoff.md) for sources and tradeoffs.
 
 ## Concrete work activation
 

@@ -344,9 +344,21 @@ impl ModHost {
             {
                 bail!("Permission denied for Mod host tool {name}");
             }
+            let access = tool.host_access(&arguments).await?;
+            if access
+                .as_ref()
+                .is_some_and(|request| request.decision == tool::PermissionDecision::Deny)
+            {
+                bail!("Permission denied for Mod host tool {name}");
+            }
+            let app_allowed = permission.capability == tool::Capability::ComputerUse
+                && access
+                    .as_ref()
+                    .is_some_and(|request| request.decision == tool::PermissionDecision::Allow);
             let allowed = match outcome {
                 tool::ProfileDecision::Allowed => true,
                 tool::ProfileDecision::Ask => self.approval.ask(name, &arguments, permission).await,
+                tool::ProfileDecision::Unspecified if app_allowed => true,
                 _ => self.approval.approve(name, &arguments, permission).await,
             };
             if !allowed {

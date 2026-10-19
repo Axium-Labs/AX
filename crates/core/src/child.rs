@@ -156,7 +156,9 @@ fn terminal_result_reviewed(messages: &[Message], reviewed: bool) -> Option<Chil
         .iter()
         .rposition(|m| m.role != model::Role::System)?;
     let preceding = final_index.checked_sub(1).and_then(|i| messages.get(i));
-    if preceding.is_some_and(|m| m.content == "[ax-model-continuation]") {
+    if preceding.is_some_and(|m| {
+        m.content == "[ax-model-continuation]" || m.content == crate::harness::HANDOFF_PENDING
+    }) {
         return None;
     }
     if preceding.is_some_and(|m| {

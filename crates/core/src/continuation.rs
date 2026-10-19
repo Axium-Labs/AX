@@ -181,6 +181,12 @@ impl crate::ApprovalPolicy for TrackedApproval {
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct TurnState {
+    /// One bounded self-review per handoff kind after recoverable tool errors.
+    /// Reset on a new host turn, including an explicit user answer/resume.
+    #[serde(skip)]
+    pub handoff_question_reviewed: bool,
+    #[serde(skip)]
+    pub handoff_final_reviewed: bool,
     #[serde(skip)]
     pub goal_validation: Vec<crate::goal::ValidationEvidence>,
     #[serde(skip)]

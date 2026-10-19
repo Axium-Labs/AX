@@ -289,8 +289,12 @@ impl Tool for DesktopTool {
     fn capability(&self, _: &Value) -> Capability {
         Capability::ComputerUse
     }
-    fn safety(&self, _: &Value) -> SafetyLevel {
-        SafetyLevel::RequiresApproval
+    fn safety(&self, input: &Value) -> SafetyLevel {
+        if input["action"] == "list_windows" {
+            SafetyLevel::Safe
+        } else {
+            SafetyLevel::RequiresApproval
+        }
     }
     fn resources(&self, _: &Value) -> Vec<crate::ResourceAccess> {
         vec![crate::ResourceAccess::write(crate::Resource::Named(

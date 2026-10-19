@@ -371,6 +371,7 @@ where
                 if !matches!(
                     event,
                     AgentEvent::ContentDelta { .. }
+                        | AgentEvent::ModelConnection { .. }
                         | AgentEvent::TurnStarted
                         | AgentEvent::TurnFinished
                 ) {

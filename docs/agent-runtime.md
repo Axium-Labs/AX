@@ -58,11 +58,20 @@ user request
 → inject [ax-agent-runtime] + [ax-capability-guidance] + [ax-environment] + [ax-coding-harness]
 → model → execute tools/tasks/children → append results → model
 → advisory loop-hygiene reminder on repeated identical calls
+→ bounded handoff self-review after current-turn recoverable tool errors
 → queue terminal and no continuation → turn ends
 ```
 
 There is one agent loop. No hardcoded simple/retrieval/coding/long-task loops,
 and no extra model call for intent classification.
+
+After typed recoverable tool errors, the first question and an ordinary final
+whose latest tool round still failed each receive at most one same-model evidence
+review. Successful recovery keeps direct completion. This allows documented recovery
+before user escalation and reconciles reports with actual changes. Successful
+ordinary turns retain direct completion; permissions, explicit user pause/cancel
+and optional Goal evaluation remain authoritative. See
+[coding-harness.md](coding-harness.md#evidence-review-after-tool-errors).
 
 ### Guidance while a turn is running
 

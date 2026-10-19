@@ -14,7 +14,79 @@ use model::Message;
 use serde_json::{Value, json};
 
 /// Coding execution policy, injected on every run.
-pub const POLICY: &str = "[ax-coding-harness]\nExecute requested deliverables until completed, failed with evidence, or waiting for a necessary user decision. Missing venv, pytest, packages, runner, uncloned repo or no search matches are recoverable setup/task-local observations: attempt installation, creation or fallback, then record a local failure and continue independent work. Honor user-requested ordering: sequential work runs one item at a time; choose parallel execution only when compatible with the user goal. Do setup and data reads before queueing. Queue items must be concrete user deliverables, never a preliminary discovery/reporting checklist. Use task_source projected columns and work mapping for tables; it automatically registers records as children. Otherwise register concrete executable items with task_queue once known. Data readers may return {\"ax_work_items\":[{\"title\":...,\"input\":...,\"workspace\":...,\"output_dir\":...}]} to register work automatically. Each child input must include all its necessary data and output requirements, never sibling results or reference answers. Select allowed dataset columns at the reader, before loading data; execution and evaluator inputs stay separate. Use repo/config/tools to answer discoverable questions. Only user-exclusive decisions use request_user_input, which suspends/resumes the goal. A final answer requires every known item terminal and all requested durable reports written. Freeze patches and save results before workspace cleanup. An unavailable official evaluator leaves official_resolved=null and does not prevent coding/local validation.";
+pub const POLICY: &str = "\
+[ax-coding-harness]
+Execute requested deliverables until completed, failed with evidence, or waiting for a necessary user decision. Complete necessary steps within authorized scope; retain prior user answers and authorization. Follow applicable project workflows, including recovery paths. Use repo/config/tools to answer discoverable questions. Only user-exclusive decisions or unavailable external prerequisites use request_user_input, which suspends/resumes the goal. Permission prompts and denials belong to the runtime. Respect user pause/cancel and actual permission denials.
+
+Missing venv, packages, runners, unavailable commands, no search matches and a single client's missing login are local observations, not proof that the task is impossible. Diagnose the failing layer and try documented, already-authorized alternatives before escalating. Reuse existing supported authentication through its intended interface without displaying, persisting or exposing secrets. Do not bypass an actual access denial, expand access, or claim an untried fallback failed. If user action is still necessary, state the observed failure, attempted recovery and exact missing prerequisite. Continue independent authorized work.
+
+For edits, prefer structured patches and existing project scripts or format-aware serializers. Inspect the actual diff or changed region and use the smallest relevant validation before building on the edit. If an error appears after your change, compare with the pre-edit state before calling it pre-existing. Correct your own mistakes without overwriting unrelated changes. Change strategy after repeated failures instead of repeating speculative rewrites.
+
+Honor user-requested ordering: sequential work runs one item at a time; choose parallel execution only when compatible with the user goal. Do setup and data reads before queueing. Queue items must be concrete user deliverables, never a preliminary discovery/reporting checklist. Use task_source projected columns and work mapping for tables; it automatically registers records as children. Otherwise register concrete executable items with task_queue once known. Data readers may return {\"ax_work_items\":[{\"title\":...,\"input\":...,\"workspace\":...,\"output_dir\":...}]} to register work automatically. Each child input must include all its necessary data and output requirements, never sibling results or reference answers. Select allowed dataset columns at the reader, before loading data; execution and evaluator inputs stay separate.
+
+A final answer requires every known item terminal and all requested durable reports written. Reconcile the report with current tool receipts, actual changed files and validation results. Distinguish attempted, changed, built, validated and externally delivered states; an unavailable measurement is unknown. Do not claim success, no change or a pre-existing fault without evidence. Use existing evidence when sufficient rather than rerunning unrelated checks. Freeze patches and save results before workspace cleanup. An unavailable official evaluator leaves official_resolved=null and does not prevent coding/local validation.";
+
+pub(crate) const HANDOFF_PENDING: &str = "[ax-handoff-pending]";
+
+#[derive(Clone, Copy)]
+pub(crate) enum Handoff {
+    Question,
+    Final,
+}
+
+impl AgentKernel {
+    /// A bounded execution-model checkpoint after actual recoverable errors.
+    /// No semantic classifier, independent reviewer or automatic recovery action.
+    pub(crate) fn handoff_review(&self, kind: Handoff, steps_used: usize) -> Option<Message> {
+        let (reviewed, boundary) = match kind {
+            Handoff::Question => (self.continuation.handoff_question_reviewed, "question"),
+            Handoff::Final => (self.continuation.handoff_final_reviewed, "final"),
+        };
+        if reviewed
+            || (matches!(kind, Handoff::Final) && self.goal_evaluator.is_some())
+            || (self.budget.max_steps != 0 && steps_used >= self.budget.max_steps)
+        {
+            return None;
+        }
+        // Questions must consider attempted recovery across the current turn.
+        // Ordinary finals only need another step when their latest tool round
+        // still failed. A later successful recovery/control receipt should not
+        // impose another review merely because an earlier operation failed.
+        let history = match kind {
+            Handoff::Question => self.raw_turn_messages.as_slice(),
+            Handoff::Final => {
+                let round = self
+                    .raw_turn_messages
+                    .iter()
+                    .rposition(|m| !m.tool_calls.is_empty())?;
+                &self.raw_turn_messages[round + 1..]
+            }
+        };
+        // Raw current-turn receipts survive model context compaction. Old turns
+        // and permission denials cannot trigger this feedback.
+        let failures = history
+            .iter()
+            .rev()
+            .filter(|message| message.role == model::Role::Tool)
+            .filter_map(|message| {
+                let value: Value = serde_json::from_str(&message.content).ok()?;
+                (value["status"] == "error"
+                    && value["permission_denied"] != true
+                    && value.get("global_blocker").is_none_or(Value::is_null))
+                .then(|| message.tool_call_id.clone())
+                .flatten()
+            })
+            .take(8)
+            .collect::<Vec<_>>();
+        if failures.is_empty() {
+            return None;
+        }
+        Some(Message::system(format!(
+            "[ax-handoff-review]\n{}\nBefore handing control to the user, review these actual failure receipts and the applicable workflow. A command/client/setup failure alone does not establish a missing permission or an unavailable resource. Check documented recovery and already-authorized interfaces; use tools if evidence is missing. Never expose secrets or bypass a real denial. Check whether your own edits caused the failure and reconcile any report with the actual changes and checks. If a user-only decision or prerequisite remains, ask the precise question with the observed evidence. Otherwise complete the authorized work. This checkpoint runs at most once per question/final boundary in this turn; it does not certify success, require extra tests, or override user pause/cancel. If current evidence is sufficient, return the supported final answer or call request_user_input again.",
+            json!({"boundary":boundary,"failed_call_ids":failures})
+        )))
+    }
+}
 
 impl AgentKernel {
     /// Inject the runtime prompt and runtime context every run receives: the

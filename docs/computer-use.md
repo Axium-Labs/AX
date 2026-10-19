@@ -81,8 +81,9 @@ on blur/Enter. Failed reads offer retry; failed writes retain confirmed values.
 
 Missing `computer_use` sections or `enabled` fields use the enabled default.
 An existing explicit `enabled=false` remains disabled; updating AX does not
-overwrite that choice. Application access and individual action approval remain
-required. Unsupported platforms/environments still do not expose the desktop tool.
+overwrite that choice. Application access remains required. Existing application allows cover ordinary
+computer actions without repeated generic approval; explicit task Ask/Deny and
+capability Deny still apply. Minimal window discovery does not prompt. Unsupported platforms/environments still do not expose the desktop tool.
 
 The runtime captures settings when building the turn registry. Off means the
 model receives no desktop tool. Enabling/increasing limits applies on the next

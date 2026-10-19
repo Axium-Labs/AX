@@ -85,3 +85,5 @@ What becomes easier, what becomes harder, and what we accepted.
 - [0027 — Optional Long Project and Session rotation](0027-long-project-session-rotation.md) — evidence projection and committed handoff in existing Goal/Session persistence.
 
 - [0028 - Native desktop adapters](0028-native-desktop-adapters.md) - shared app/action permissions with native Windows, Linux and macOS drivers.
+
+- [0029 - Evidence-driven handoff](0029-evidence-driven-handoff.md) - bounded error recovery and reporting self-review before questions and ordinary finals.

@@ -128,13 +128,21 @@ impl AgentKernel {
         }
         let requests = std::sync::atomic::AtomicUsize::new(0);
         let response = if goal_enabled {
-            self.request_with_retry_observed(request, on_delta, on_thinking, || {
-                requests.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            })
+            self.request_with_retry_observed(
+                request,
+                on_delta,
+                on_thinking,
+                || {
+                    requests.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                },
+                |event| (emit.lock().unwrap())(event),
+            )
             .await?
         } else {
-            self.request_with_retry(request, on_delta, on_thinking)
-                .await?
+            self.request_with_retry(request, on_delta, on_thinking, |event| {
+                (emit.lock().unwrap())(event);
+            })
+            .await?
         };
         let attempts = requests.load(std::sync::atomic::Ordering::Relaxed);
         drop(model_timer);
@@ -174,12 +182,18 @@ impl AgentKernel {
             )
         );
         if tool_calls.is_empty()
-            && (self.goal_evaluator.is_some() || self.continuation.model_requests_continuation)
+            && (self.goal_evaluator.is_some()
+                || self.continuation.model_requests_continuation
+                || self
+                    .handoff_review(crate::harness::Handoff::Final, steps_used)
+                    .is_some())
         {
             let marker = Message::system(if self.goal_evaluator.is_some() {
                 "[ax-goal-pending]"
-            } else {
+            } else if self.continuation.model_requests_continuation {
                 "[ax-model-continuation]"
+            } else {
+                crate::harness::HANDOFF_PENDING
             });
             self.messages.push(marker.clone());
             self.raw_turn_messages.push(marker);

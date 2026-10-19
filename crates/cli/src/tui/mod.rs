@@ -382,6 +382,28 @@ impl App {
             AgentEvent::ModelStarted { provider, model } => {
                 let _ = (provider, model);
             }
+            AgentEvent::ModelConnection {
+                status,
+                attempt,
+                max_attempts,
+                error,
+            } => {
+                use runtime_core::ModelConnectionStatus;
+                match status {
+                    ModelConnectionStatus::Retrying => self.push(
+                        TranscriptKind::Status,
+                        format!("Reconnecting to model ({attempt}/{max_attempts})..."),
+                    ),
+                    ModelConnectionStatus::Failed => self.push(
+                        TranscriptKind::Error,
+                        format!(
+                            "Model connection failed ({attempt}/{max_attempts}): {}",
+                            error.unwrap_or_default()
+                        ),
+                    ),
+                    ModelConnectionStatus::Connecting | ModelConnectionStatus::Connected => {}
+                }
+            }
             // Reasoning deltas are private model working text. Keep the compact
             // animated `Thinking` status instead of dumping chain-of-thought
             // into the transcript and consuming the whole viewport.

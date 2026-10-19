@@ -402,10 +402,21 @@ successful request resets its retry sequence; model steps/task counts do not
 increase for transport retries.
 
 ```json
-"retry": { "max_attempts":4, "time_budget_ms":30000,
+"retry": { "max_attempts":5, "time_budget_ms":30000,
            "base_delay_ms":200, "max_delay_ms":5000 }
 ```
 
-`max_attempts` includes the initial request; 0/1 disables retries. Missing
+`max_attempts` includes the initial request; 0/1 disables retries and values above
+5 are capped at 5. Missing
 configuration maps to these centralized defaults, replacing the old goal-only
 retry-once behavior. Ordinary turns and children use the same policy.
+
+The connection budget also bounds the first request while it has produced no
+text or thinking output. Once output starts, a healthy stream can run beyond
+that budget; a partially emitted response is never replayed automatically.
+Timeouts, terminal errors and Retry-After delays outside the remaining budget
+can stop the sequence before all five attempts. Every execution model step emits
+structured `ModelConnection` status (`connecting`, `retrying`, `connected`,
+`failed`) with the actual attempt, effective maximum and optional provider error.
+Connected is emitted at the first output or successful completion. CLI/TUI show
+reconnection counts; ACP forwards the status for AXCrew to render.

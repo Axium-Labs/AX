@@ -78,7 +78,7 @@ pub struct RetryPolicy {
 impl Default for RetryPolicy {
     fn default() -> Self {
         Self {
-            max_attempts: 4,
+            max_attempts: 5,
             time_budget_ms: 30_000,
             base_delay_ms: 200,
             max_delay_ms: 5_000,
@@ -86,6 +86,12 @@ impl Default for RetryPolicy {
     }
 }
 impl RetryPolicy {
+    /// Includes the first request; never send more than five attempts.
+    #[must_use]
+    pub fn attempt_limit(&self) -> usize {
+        self.max_attempts.clamp(1, 5)
+    }
+
     /// Retry-After is never capped below the server's requested wait. A wait
     /// outside the remaining time budget stops retrying instead.
     #[must_use]
@@ -96,7 +102,7 @@ impl RetryPolicy {
         elapsed: Duration,
         entropy: u64,
     ) -> Option<Duration> {
-        if error.error_class() != ErrorClass::Retryable || attempts >= self.max_attempts {
+        if error.error_class() != ErrorClass::Retryable || attempts >= self.attempt_limit() {
             return None;
         }
         let cap = self
@@ -147,7 +153,7 @@ mod tests {
         assert!(status_retryable(425));
         let policy = RetryPolicy::default();
         assert!(policy.delay(&status(400), 1, Duration::ZERO, 1).is_none());
-        assert!(policy.delay(&status(503), 4, Duration::ZERO, 1).is_none());
+        assert!(policy.delay(&status(503), 5, Duration::ZERO, 1).is_none());
         assert!(
             policy
                 .delay(&status(503), 1, Duration::from_secs(30), 1)

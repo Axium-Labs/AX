@@ -78,6 +78,15 @@ impl AgentKernel {
             return Ok(ToolStep::Continue);
         }
         if tool_calls.is_empty()
+            && let Some(review) = self.handoff_review(crate::harness::Handoff::Final, *steps_used)
+        {
+            self.continuation.handoff_final_reviewed = true;
+            self.messages.push(review.clone());
+            self.raw_turn_messages.push(review);
+            checkpoint(&self.raw_turn_messages)?;
+            return Ok(ToolStep::Continue);
+        }
+        if tool_calls.is_empty()
             && let Some(evaluator) = self.goal_evaluator.clone()
         {
             if evaluator.uses_model()
@@ -306,7 +315,7 @@ impl AgentKernel {
             .iter()
             .any(|call| call.function.name == user_input::TOOL_NAME)
         {
-            return self.user_input_step(emit, checkpoint, &tool_calls);
+            return self.user_input_step(emit, checkpoint, &tool_calls, *steps_used);
         }
         if tool_calls
             .iter()
@@ -544,6 +553,7 @@ impl AgentKernel {
         emit: &std::sync::Mutex<F>,
         checkpoint: &mut H,
         tool_calls: &[ToolCall],
+        steps_used: usize,
     ) -> Result<ToolStep, AgentError>
     where
         F: FnMut(AgentEvent) + Send,
@@ -562,6 +572,35 @@ impl AgentKernel {
         })();
         match parsed {
             Ok(question) => {
+                if let Some(review) =
+                    self.handoff_review(crate::harness::Handoff::Question, steps_used)
+                {
+                    self.continuation.handoff_question_reviewed = true;
+                    // This is feedback to the model, not a rejected operation
+                    // or a user-visible question. Keep the call/result pair intact.
+                    let envelope = tool::ToolResult::new(
+                        true,
+                        serde_json::json!({
+                            "status":"review_required", "question_suspended":false,
+                            "guidance":review.content,
+                        })
+                        .to_string(),
+                    );
+                    self.execution.lock().unwrap().record_control(
+                        &call.id,
+                        &call.function.name,
+                        &input,
+                        &envelope,
+                        false,
+                    );
+                    let message =
+                        Message::tool(&call.id, serde_json::to_string(&envelope).unwrap());
+                    self.messages.push(message.clone());
+                    self.raw_turn_messages.push(message);
+                    self.checkpoint_queue(checkpoint)?;
+                    checkpoint(&self.raw_turn_messages)?;
+                    return Ok(ToolStep::Continue);
+                }
                 let envelope = tool::ToolResult::new(
                     true,
                     "Suspended: the run resumes when the user answers.".to_owned(),

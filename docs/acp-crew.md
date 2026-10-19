@@ -36,6 +36,20 @@ The corresponding Crew backend and its API are in the sibling `axcrew` project. 
 
 ## Workspace identity and confinement
 
+### Model connection feedback
+
+`session/update` includes additive `sessionUpdate: "model_connection"` frames
+with `status` (`connecting`, `retrying`, `connected`, `failed`), `attempt`,
+`maxAttempts` and optional `error`. Counts come from the shared kernel's current
+model request, reset on the next model step, and include the initial attempt.
+The default and hard maximum are five requests; authentication/permission errors,
+partial output and the connection time budget may stop sooner. Connected is
+reported at the first text/thinking delta or successful response completion.
+These status frames are separate from assistant text and tool results. The
+existing JSON-RPC prompt error still terminates a failed request. AXCrew retains
+the final failed status in its task output so reopening the chat can show the
+model error and actual count. See [provider retry policy](providers.md).
+
 ### Prompt admission, Stop and file change previews
 
 Ordinary ACP submissions are durably saved as user messages after the session is

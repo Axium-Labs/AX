@@ -42,7 +42,9 @@ impl Tool for PatchTool {
             "patch: edit existing files with structured hunks rather than scripts that rewrite \
              files or unique-string replacements. Group independent hunks of one file into a single \
              atomic patch. Read enough surrounding context first so line coordinates and \
-             expected_lines are accurate.",
+             expected_lines are accurate. Inspect the resulting diff or changed region and validate \
+             the relevant structure before making dependent edits. A successful patch confirms text \
+             was written, not that the result parses, builds or satisfies the request.",
         )
     }
     fn input_schema(&self) -> Value {

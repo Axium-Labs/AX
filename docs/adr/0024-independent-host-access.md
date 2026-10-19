@@ -11,3 +11,12 @@ Store persistent rules in AX home, independently of config and workspace data. S
 Own the browser through an embedded, fixed Node/Playwright worker rather than a model-invocable external CLI. Block unapproved origins, every redirect hop and uncontrolled browser channels; do not import a personal profile. Return screenshots through existing image output rather than widening filesystem permissions.
 
 This does not add Windows/macOS OS sandbox backends or non-Windows desktop drivers. Current browser policy blocks cross-origin resources and WebSockets and therefore limits site compatibility. Native extensions and unrestricted same-user programs remain trusted. Detailed current behavior and limitations are in [host-permissions.md](../host-permissions.md).
+
+
+Amendment, 2026-10-19: an existing Computer Use application allow also satisfies
+ordinary action approval for that application. Resolve host access before the
+generic prompt so saved/session grants do not ask again on each click. Task-level
+Ask/Deny rules and capability Deny remain authoritative, and identity/revocation
+are rechecked at execution. Minimal window discovery is safe. Browser actions
+retain the original separate approval contract. This applies to the scheduler
+and Mod built-in bridge without changing persisted grant formats.

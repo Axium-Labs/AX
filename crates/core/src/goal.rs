@@ -377,6 +377,7 @@ impl GoalEvaluator for ModelGoal {
                         .goal_model_requests
                         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 },
+                |_| {},
             )
             .await
         {
@@ -537,7 +538,7 @@ impl AgentKernel {
         .unwrap_or(u64::MAX);
         if let Some(goal) = self.task_queue.as_mut().and_then(|q| q.goal.as_mut()) {
             let mut reservation = goal.clone();
-            let attempts = self.retry_policy.max_attempts.max(1);
+            let attempts = self.retry_policy.attempt_limit();
             reservation.record_usage(
                 None,
                 u64::try_from(input).unwrap_or(u64::MAX),

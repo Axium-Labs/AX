@@ -45,6 +45,27 @@ fn render_event(event: AgentEvent) {
         AgentEvent::ModelStarted { provider, model } => {
             eprintln!("[{provider}/{model}] thinking...");
         }
+        AgentEvent::ModelConnection {
+            status,
+            attempt,
+            max_attempts,
+            error,
+        } => {
+            use runtime_core::ModelConnectionStatus;
+            match status {
+                ModelConnectionStatus::Connecting => {
+                    eprintln!("Connecting to model ({attempt}/{max_attempts})...");
+                }
+                ModelConnectionStatus::Retrying => {
+                    eprintln!("Reconnecting to model ({attempt}/{max_attempts})...");
+                }
+                ModelConnectionStatus::Failed => eprintln!(
+                    "Model connection failed ({attempt}/{max_attempts}): {}",
+                    error.unwrap_or_default()
+                ),
+                ModelConnectionStatus::Connected => {}
+            }
+        }
         AgentEvent::ContentDelta { delta } => {
             print!("{delta}");
             let _ = std::io::stdout().flush();

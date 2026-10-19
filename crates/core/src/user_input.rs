@@ -159,7 +159,7 @@ pub(crate) fn spec() -> ToolSpec {
         kind: "function",
         function: FunctionSpec {
             name: TOOL_NAME.into(),
-            description: "Ask the user how to proceed when the answer materially changes the product or the final behaviour and the repository, configuration and documentation do not already answer it. Use options for discrete choices. This is not a permission request: dangerous operations are authorized by the permission system. Asking suspends this run and resumes it from the same place once the user answers. Call it alone in a round.".into(),
+            description: "Ask for a user-only choice, missing information or genuinely unavailable external prerequisite after checking relevant instructions, existing answers and documented recovery paths. A failed command or one client's missing login does not establish that user action is required. Reuse existing authorization; do not ask permission here or repeat answered questions. Runtime permissions remain authoritative. Use options for discrete choices. After tool errors, the runtime may first return review_required without asking the user; use the feedback to recover or ask the evidenced question again. A submitted question suspends this run until answered. Call it alone in a round.".into(),
             parameters: json!({"type":"object","properties":{
                 "question":{"type":"string","description":"One concrete question, in the user's language"},
                 "options":{"type":"array","items":{"type":"object","properties":{

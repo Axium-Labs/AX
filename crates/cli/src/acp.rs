@@ -225,6 +225,14 @@ fn update(out: &Outbox, session_id: &str, event: AgentEvent, calls: &mut HashMap
         AgentEvent::ContentDelta { delta } => {
             json!({"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":delta}})
         }
+        AgentEvent::ModelConnection {
+            status,
+            attempt,
+            max_attempts,
+            error,
+        } => {
+            json!({"sessionUpdate":"model_connection","status":status,"attempt":attempt,"maxAttempts":max_attempts,"error":error})
+        }
         AgentEvent::ThinkingDelta { delta } => {
             json!({"sessionUpdate":"agent_thought_chunk","content":{"type":"text","text":delta}})
         }

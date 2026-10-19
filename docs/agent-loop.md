@@ -1,10 +1,12 @@
 # Continuation-driven completion
 
 The shared kernel runs `model → execute tools/tasks/children → append results →
-model`. A final response with no continuation ends the turn immediately. It does
-not inspect prompt keywords, task complexity, whether files changed, or whether
-tools, tests, shell commands or subagents were used earlier. Ordinary answers and
-code explanations require one execution model request and zero reviewer requests.
+model`. A final response with no continuation ends the turn. It does not inspect
+prompt keywords or task complexity. Ordinary successful answers and code
+explanations require one execution model request and zero reviewer requests.
+Typed recoverable tool errors in the current turn activate bounded handoff
+self-review before a question, or before a final when the latest tool round
+still contains such errors; see below.
 
 Every turn executes under the coding harness: the user request defines the
 work, and the runtime drives it to a terminal state. The runtime prompt and
@@ -60,7 +62,7 @@ resets when the call changes and at the start of each turn. See
 
 ## Optional Goal
 
-By default, ordinary tasks finish directly without extra validation or provider
+Ordinary successful tasks finish directly without extra validation or provider
 requests. Enabling the scoped Goal template applies its policy to new ordinary
 tasks through the shared CLI/TUI/ACP admission path.
 Explicit `/goal <target>` adds target-scoped deterministic or independent model
@@ -83,7 +85,7 @@ Default completion is `direct`; verified completion is `goal`. AX_EVENT_LOG reco
 these events through the shared CLI/TUI/ACP prompt boundary. Verifier output never
 becomes a second final answer.
 
-Pending Goal and provider continuation markers prevent recovering premature
+Pending handoff-review, Goal and provider continuation markers prevent recovering premature
 child finals. Only a durable Goal allow marker permits recovering a verified final.
 Old completion_check and pending/allowed records are compatibility data only.
 Raw history remains intact.
@@ -98,9 +100,30 @@ is answered directly and its goal queue completes, context cannot hijack it,
 explicit investigation and fixes run to completion, a long-running request
 creates a resumable queue, and repeated identical calls are reminded at 3/5/8
 rather than blocked.
-Existing frontend/workspace fixtures reject any default completion-review prompt.
+Ordinary successful paths retain their request counts. After recoverable errors,
+bounded handoff feedback uses the same execution model, not a default reviewer.
 
 Design references: [OpenAI's Codex agent loop](https://openai.com/index/unrolling-the-codex-agent-loop/)
 and [Claude Code Stop hooks](https://code.claude.com/docs/en/hooks#stop). AX adopts
-tool/result-driven continuation and optional target-driven Goal, without copying a fixed
-semantic verifier into the core loop.
+tool/result-driven continuation, bounded error-driven handoff feedback and optional
+target-driven Goal, without copying a fixed semantic verifier into the core loop.
+
+## Error-driven handoff review
+
+`harness::handoff_review` reads typed current-turn failure receipts at question
+boundaries and the latest tool-call round at final boundaries. It returns sampled
+call IDs and recovery/reporting guidance. Successful follow-up operations and
+recorded queue outcomes do not incur another final check for older failures.
+The first valid question returns `review_required` without emitting UserQuestion
+or changing the queue to WaitingForUser; a subsequent necessary question can
+suspend normally. The first ordinary final is checkpointed as a candidate with
+`[ax-handoff-pending]`, followed by review feedback and another execution-model
+step. Only the accepted final emits TurnFinished.
+
+Each boundary has one allowance per host turn, so feedback cannot create an
+unbounded no-tool review loop. Already-consumed model budgets suppress it. Final
+Goal evaluation is not duplicated; typed permission denials/global blockers,
+old-turn failures and prose are not review triggers. Existing steering,
+cancellation and approval rules still apply. This mechanism encourages recovery
+and evidence-based reporting; it cannot prove semantic correctness or require an
+external credential to be available. See [coding-harness.md](coding-harness.md).

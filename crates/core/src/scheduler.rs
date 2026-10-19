@@ -437,11 +437,23 @@ async fn execute<F: FnMut(AgentEvent) + Send>(
     {
         return Err(ToolError::PermissionDenied(job.name.clone()));
     }
+    let host = tool.host_access(&input).await?;
+    if host
+        .as_ref()
+        .is_some_and(|request| request.decision == tool::PermissionDecision::Deny)
+    {
+        return Err(ToolError::PermissionDenied(job.name.clone()));
+    }
+    let app_allowed = permission.capability == tool::Capability::ComputerUse
+        && host
+            .as_ref()
+            .is_some_and(|request| request.decision == tool::PermissionDecision::Allow);
     let approved = {
         let _guard = approval_gate.lock().await;
         match outcome {
             tool::ProfileDecision::Ask => approval.ask(&job.name, &input, permission).await,
             tool::ProfileDecision::Allowed => true,
+            tool::ProfileDecision::Unspecified if app_allowed => true,
             tool::ProfileDecision::Deny | tool::ProfileDecision::Unspecified => {
                 approval.approve(&job.name, &input, permission).await
             }
@@ -450,7 +462,6 @@ async fn execute<F: FnMut(AgentEvent) + Send>(
     if !approved {
         return Err(ToolError::PermissionDenied(job.name.clone()));
     }
-    let host = tool.host_access(&input).await?;
     let authorization = if let Some(request) = host.as_ref() {
         let grant = match request.decision {
             tool::PermissionDecision::Deny => tool::HostGrant::Deny,

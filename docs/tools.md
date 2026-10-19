@@ -52,6 +52,17 @@ with exit status, stdout and stderr, so errors can be attributed to the director
 that was actually checked. A root-directory Git error does not establish whether
 its subdirectories are repositories.
 
+Shell completion follows the actual shell process exit, independently of pipe
+EOF. Stdin feeding and stdout/stderr collection run concurrently. Once the shell
+exits, AX allows one second for pending I/O to drain; then it closes retained
+handles and returns captured bytes with the shell's real exit status. If a
+background descendant keeps a pipe open, the result includes
+`output_capture_incomplete: true` and an explanation. Captured text can be partial.
+The drain deadline does not limit foreground command runtime or stop background
+processes. Normal EOF has no extra delay. Cancellation drops the owned pipe
+futures; it leaves no detached output-reader tasks behind. The existing command
+timeout/permission policy and nonzero-exit error handling still apply.
+
 A **`Tool`** (`crates/tool`) is a named callable with a JSON input schema. The
 `ToolRegistry` collects the tools available to one agent. The agent loop is
 tool-agnostic: MCP remote tools are proxied into ordinary `Tool`s, so the loop

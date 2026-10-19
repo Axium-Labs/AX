@@ -59,7 +59,7 @@ pub use child_result::{
 pub use compression::CompressionResult;
 pub use context::select_context;
 pub use error::AgentError;
-pub use event::{AgentEvent, tool_activity};
+pub use event::{AgentEvent, ModelConnectionStatus, tool_activity};
 pub use execution::{ExecutionState, NoProgressDetector};
 pub use instructions::{
     InstructionResolution, InstructionResolver, InstructionScope, InstructionSegment,

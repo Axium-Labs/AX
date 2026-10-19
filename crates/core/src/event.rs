@@ -7,6 +7,15 @@
 use serde_json::Value;
 use tool::{ToolError, ToolOutput};
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelConnectionStatus {
+    Connecting,
+    Retrying,
+    Connected,
+    Failed,
+}
+
 #[derive(Clone, Debug, serde::Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AgentEvent {
@@ -60,6 +69,12 @@ pub enum AgentEvent {
     ModelStarted {
         provider: String,
         model: String,
+    },
+    ModelConnection {
+        status: ModelConnectionStatus,
+        attempt: usize,
+        max_attempts: usize,
+        error: Option<String>,
     },
     ContentDelta {
         delta: String,

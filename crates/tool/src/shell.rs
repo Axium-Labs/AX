@@ -249,9 +249,9 @@ fn classify_command(
 
 fn shell_description() -> &'static str {
     if cfg!(windows) {
-        "Run commands using Windows PowerShell 5.1 (powershell.exe), platform=windows. Use shell for builds, tests, Git operations and command-line workflows. Prefer find_files/glob for routine filename discovery, search for text or symbols, and filesystem read/list for known paths. Shell scans are appropriate when explicitly requested, dedicated tools are unavailable, or native filters/pipelines are needed. Use PowerShell syntax: no bash heredocs (python - <<'PY'), && or ||. Use a PowerShell here-string piped to python, or python -c; run dependent commands separately. Shell execution requires approval."
+        "Run commands using Windows PowerShell 5.1 (powershell.exe), platform=windows. Use shell for builds, tests, Git operations and command-line workflows. Prefer find_files/glob for routine filename discovery, search for text or symbols, and filesystem read/list for known paths. Shell scans are appropriate when explicitly requested, dedicated tools are unavailable, or native filters/pipelines are needed. Use PowerShell syntax: no bash heredocs (python - <<'PY'), && or ||. Use a PowerShell here-string piped to python, or python -c; run dependent commands separately. The runtime applies the configured permission policy and requests approval when necessary."
     } else {
-        "Run commands using POSIX sh, platform=unix. Use shell for builds, tests, Git operations and command-line workflows. Prefer find_files/glob for routine filename discovery, search for text or symbols, and filesystem read/list for known paths. Shell scans are appropriate when explicitly requested, dedicated tools are unavailable, or native filters/pipelines are needed. Shell execution requires approval."
+        "Run commands using POSIX sh, platform=unix. Use shell for builds, tests, Git operations and command-line workflows. Prefer find_files/glob for routine filename discovery, search for text or symbols, and filesystem read/list for known paths. Shell scans are appropriate when explicitly requested, dedicated tools are unavailable, or native filters/pipelines are needed. The runtime applies the configured permission policy and requests approval when necessary."
     }
 }
 
@@ -266,8 +266,14 @@ const SHELL_GUIDANCE: &str = "shell: the fallback for work no dedicated capabili
     or change location inside that command. The result reports the shell's starting working_directory. \
     A Git discovery failure at the workspace root says nothing about repositories in its subdirectories. \
     On failure, inspect the smallest diagnostics, repair the local cause, and run the smallest relevant \
-    verification before broader reruns. Shell commands are authorized by the permission system, not by prompt \
-    wording.";
+    verification before broader reruns. A command failure or missing client login does not prove that all \
+    supported access methods are unavailable; follow documented alternatives within existing authorization. \
+    Never print secrets or persist temporary authentication. Prefer patch for ordinary edits and existing \
+    scripts or format-aware serializers for structured updates. In PowerShell regex replacement strings, \
+    delimit capture references such as ${1} before literal digits, or use a MatchEvaluator; inspect the diff \
+    and validate the changed structure before continuing. Check native command exit codes at each dependent \
+    step; the last successful command does not prove earlier commands succeeded. Shell commands are \
+    authorized by the permission system, not by prompt wording.";
 
 fn validate_command(command: &str, windows: bool) -> Result<(), ToolError> {
     if command.trim().is_empty() {
@@ -422,7 +428,7 @@ async fn execute_shell(
             .env("AX_SESSION_ID", &context.session_id)
             .env("AX_MEMORY_SCOPE", &context.memory_scope);
     }
-    let mut child = command
+    let child = command
         .kill_on_drop(true)
         .stdin(if input.stdin.is_some() {
             Stdio::piped()
@@ -433,37 +439,105 @@ async fn execute_shell(
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|error| ToolError::Execution(error.to_string()))?;
-    // Drain output concurrently with feeding input: neither pipe can deadlock the other.
-    let stdin = child.stdin.take();
-    let output = if let Some(text) = input.stdin {
-        let feed = async move {
-            use tokio::io::AsyncWriteExt;
-            let mut stdin =
-                stdin.ok_or_else(|| ToolError::Execution("shell stdin unavailable".into()))?;
-            stdin.write_all(text.as_bytes()).await?;
-            stdin.shutdown().await?;
-            Ok::<_, ToolError>(())
-        };
-        let (input_result, output) = tokio::join!(feed, child.wait_with_output());
-        input_result?;
-        output?
-    } else {
-        child.wait_with_output().await?
-    };
+    let (output, output_complete) = collect_shell_output(child, input.stdin).await?;
     let stdout = decode(&output.stdout);
     let stderr = decode(&output.stderr);
-    let text = format!(
+    let mut text = format!(
         "exit_code: {}\nworking_directory: {}\nstdout:\n{}\nstderr:\n{}",
         output.status.code().unwrap_or(-1),
         working_directory.display(),
         stdout,
         stderr
     );
+    if !output_complete {
+        text.push_str("\noutput_capture_incomplete: true\nThe shell exited, but its I/O pipes remained open after the drain deadline; a background descendant may retain inherited handles. Captured output may be incomplete. Background processes were not stopped.");
+    }
     if output.status.success() {
         Ok(text)
     } else {
         Err(ToolError::Execution(text))
     }
+}
+
+async fn collect_shell_output(
+    mut child: tokio::process::Child,
+    input: Option<String>,
+) -> Result<(std::process::Output, bool), ToolError> {
+    // Observe the shell's exit independently of pipe EOF. A background
+    // descendant may retain inherited handles after the shell has exited.
+    let stdin = child.stdin.take();
+    let stdout_pipe = child.stdout.take();
+    let stderr_pipe = child.stderr.take();
+    let mut stdout_bytes = Vec::new();
+    let mut stderr_bytes = Vec::new();
+    let (status, output_complete) = {
+        let io = async {
+            // join! keeps draining both outputs even if feeding stdin fails.
+            let (out, err, feed) = tokio::join!(
+                drain_pipe(stdout_pipe, &mut stdout_bytes),
+                drain_pipe(stderr_pipe, &mut stderr_bytes),
+                async move {
+                    use tokio::io::AsyncWriteExt;
+                    if let Some(text) = input {
+                        let mut stdin = stdin.ok_or_else(|| {
+                            ToolError::Execution("shell stdin unavailable".into())
+                        })?;
+                        stdin.write_all(text.as_bytes()).await?;
+                        stdin.shutdown().await?;
+                    }
+                    Ok::<_, ToolError>(())
+                }
+            );
+            out?;
+            err?;
+            feed
+        };
+        tokio::pin!(io);
+        tokio::select! {
+            status = child.wait() => {
+                let status = status?;
+                // This deadline starts only after the actual shell exits. It
+                // is not a command timeout and never kills background services.
+                match tokio::time::timeout(std::time::Duration::from_secs(1), &mut io).await {
+                    Ok(result) => { result?; (status, true) }
+                    Err(_) => (status, false),
+                }
+            }
+            result = &mut io => {
+                let status = child.wait().await?;
+                result?;
+                (status, true)
+            }
+        }
+    };
+    Ok((
+        std::process::Output {
+            status,
+            stdout: stdout_bytes,
+            stderr: stderr_bytes,
+        },
+        output_complete,
+    ))
+}
+
+/// Keep partial bytes in the caller's buffer when a drain is cancelled. No
+/// detached tasks survive cancellation or retain the pipe handles themselves.
+async fn drain_pipe<R: tokio::io::AsyncRead + Unpin>(
+    pipe: Option<R>,
+    bytes: &mut Vec<u8>,
+) -> Result<(), std::io::Error> {
+    use tokio::io::AsyncReadExt;
+    if let Some(mut pipe) = pipe {
+        let mut chunk = [0; 8192];
+        loop {
+            let count = pipe.read(&mut chunk).await?;
+            if count == 0 {
+                break;
+            }
+            bytes.extend_from_slice(&chunk[..count]);
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

@@ -53,7 +53,12 @@
 - 测试: test/harness/{core,task_source,workspaces,frontend,child_deadline}.rs 和既有回归。
 - 对应功能 docs 与独立工作日志已同步；AXCrew 未修改。
 
-## 3. 当前实际 Harness Policy
+## 3. 历史验收时的 Harness Policy
+
+本文件保留早期黑盒验收的策略、数据和结论，不是当前运行契约。
+当前的流程遵循、错误恢复、提问/结束复核及限制见
+[coding-harness.md](coding-harness.md) 和 [agent-loop.md](agent-loop.md)。
+下面的旧策略和全量 completion guard 描述仅对应当时的验收版本。
 
 ```text
 [ax-coding-harness]
@@ -86,7 +91,7 @@ flowchart TD
 普通 numbered/bullet 说明不触发自动拆分。用户要求顺序执行时用 shared write
 resource 串行，不用 success dependency，前一题失败不会跳过后一题。
 
-## 5. Completion guard
+## 5. 历史验收时的 Completion guard
 
 Known pending/running queue 状态阻止 controller 普通 text-only 成功结束。
 未知 inventory 由语义审查检查原任务与真实工具历史，要求具体 queue/下一动作。
@@ -216,7 +221,7 @@ blackbox-13 原始 23 项全部终态（17 completed / 6 failed / 0 timeout）�
 
 ## 13. 验证与剩余限制
 
-当前：cargo fmt --all PASS；cargo clippy --workspace --all-targets exit 0
+当时：cargo fmt --all PASS；cargo clippy --workspace --all-targets exit 0
 （既有未相关 warnings）；cargo test --workspace 535 passed / 0 failed / 3 ignored。
 Final 黑盒后再次运行 fmt/clippy/workspace tests 均通过：535 passed / 0 failed / 3 ignored。
 一次完整测试曾遇到既有 WorkBuddy timestamp temp credential race；isolated retry
