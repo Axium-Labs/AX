@@ -992,6 +992,28 @@ pub(super) async fn apply_modal_action(
     login_tx: &mpsc::UnboundedSender<LoginUpdate>,
 ) -> Result<()> {
     match action {
+        ModalAction::EvolutionReviewed {
+            name,
+            digest,
+            accept,
+        } => {
+            let handle = state
+                .evolution
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("Evolution is unavailable"))?;
+            handle.review(name.clone(), digest, accept)?;
+            app.push(
+                TranscriptKind::Status,
+                format!(
+                    "Skill {name}: {}",
+                    if accept {
+                        "trial approval queued"
+                    } else {
+                        "archival requested"
+                    }
+                ),
+            );
+        }
         ModalAction::MemoryEdited {
             scope,
             key,

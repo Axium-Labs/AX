@@ -10,9 +10,10 @@ serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
+sha2 = "0.10"
 
 [target.'cfg(target_os = "linux")'.dependencies]
-rustix = { version = "1", features = ["fs"] }
+rustix = { version = "1", features = ["fs", "process"] }
 tempfile = "3"
 
 [lints]

@@ -73,7 +73,9 @@ impl Default for ResourceLimits {
         Self {
             memory_bytes: 8 * 1024 * 1024 * 1024,
             cpu_seconds: 3600,
-            processes: 256,
+            processes: 256_u64.saturating_mul(
+                std::thread::available_parallelism().map_or(1, |cores| cores.get() as u64),
+            ),
             open_files: 4096,
         }
     }
@@ -102,7 +104,11 @@ impl SandboxPolicy {
             workspace_root: root,
             mode,
             filesystem_mode: FilesystemMode::ReadWrite,
-            network_mode: NetworkMode::Allow,
+            network_mode: if mode == SandboxMode::Strict {
+                NetworkMode::Deny
+            } else {
+                NetworkMode::Allow
+            },
             protected_paths: Vec::new(),
             resource_limits: ResourceLimits::default(),
             runtime_mounts: Vec::new(),
@@ -159,7 +165,7 @@ pub trait SandboxBackend: Send + Sync {
 pub struct Sandbox {
     policy: SandboxPolicy,
     #[cfg(target_os = "linux")]
-    linux: Option<linux::LinuxBackend>,
+    linux: Mutex<Option<linux::LinuxBackend>>,
 }
 impl Sandbox {
     /// The policy this backend was prepared from.
@@ -171,6 +177,10 @@ impl Sandbox {
 impl SandboxBackend for Sandbox {
     fn prepare(policy: &SandboxPolicy) -> Result<Self> {
         let mut policy = policy.clone();
+        if policy.mode == SandboxMode::Strict {
+            // Mode is authoritative even for restored/manually assembled policies.
+            policy.network_mode = NetworkMode::Deny;
+        }
         policy.workspace_root = policy.workspace_root.canonicalize()?;
         if !policy.workspace_root.is_dir() {
             return Err(SandboxViolation("workspace must be a directory".into()));
@@ -183,21 +193,7 @@ impl SandboxBackend for Sandbox {
                         "workspace may not encompass the user credential home".into(),
                     ));
                 }
-                for name in [
-                    ".ssh",
-                    ".aws",
-                    ".azure",
-                    ".config",
-                    ".docker",
-                    ".gnupg",
-                    ".kube",
-                    ".npmrc",
-                    ".netrc",
-                    ".pypirc",
-                    ".git-credentials",
-                ] {
-                    policy.protected_paths.push(home.join(name));
-                }
+                // HOME is never mounted; absent credential paths need no masks.
             }
             for name in [".ssh", ".ax"] {
                 policy
@@ -220,13 +216,28 @@ impl SandboxBackend for Sandbox {
         Ok(Self {
             policy,
             #[cfg(target_os = "linux")]
-            linux,
+            linux: Mutex::new(linux),
         })
     }
     fn spawn(&self, spec: CommandSpec) -> Result<Child> {
         #[cfg(target_os = "linux")]
-        if let Some(backend) = &self.linux {
-            return backend.spawn(&self.policy, spec);
+        if self.policy.mode != SandboxMode::Off {
+            let mut backend = self
+                .linux
+                .lock()
+                .map_err(|_| SandboxViolation("sandbox backend lock poisoned".into()))?;
+            if backend.as_ref().is_some_and(|linux| !linux.is_alive()) {
+                // Discard the dead namespace. Only one complete preparation is
+                // attempted for this call; failure never executes on the host.
+                *backend = None;
+            }
+            if backend.is_none() {
+                *backend = Some(linux::LinuxBackend::prepare(&self.policy)?);
+            }
+            return backend
+                .as_ref()
+                .expect("prepared backend")
+                .spawn(&self.policy, spec);
         }
         // Only an explicitly selected `off` policy may reach the host. A confined
         // policy without a prepared backend is a programming error, and degrading
@@ -301,9 +312,24 @@ pub fn verify_worker() -> Result<()> {
 static MODE: OnceLock<SandboxMode> = OnceLock::new();
 static PROTECTED: OnceLock<Vec<PathBuf>> = OnceLock::new();
 static WORKSPACES: OnceLock<Vec<PathBuf>> = OnceLock::new();
+static CACHE_ROOT: OnceLock<PathBuf> = OnceLock::new();
 type Cache = BTreeMap<PathBuf, Weak<Sandbox>>;
 static CACHE: OnceLock<Mutex<Cache>> = OnceLock::new();
 impl SandboxManager {
+    /// Reads an already prepared binding without I/O or waiting for preparation.
+    #[must_use]
+    pub fn prepared_for_workspace(root: &std::path::Path) -> Option<Self> {
+        CACHE.get()?.try_lock().ok()?.get(root)?.upgrade().map(Self)
+    }
+    /// Sets the AX-owned persistent cache territory before preparing workspaces.
+    ///
+    /// # Errors
+    /// Returns a violation if the cache root was already configured.
+    pub fn configure_cache_root(root: PathBuf) -> Result<()> {
+        CACHE_ROOT
+            .set(root)
+            .map_err(|_| SandboxViolation("sandbox cache root already sealed".into()))
+    }
     /// The process-wide mode, once the CLI has sealed it.
     #[must_use]
     pub fn configured_mode() -> Option<SandboxMode> {

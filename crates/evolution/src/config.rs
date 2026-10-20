@@ -1,9 +1,9 @@
-//! Scheduling, scoring and growth limits have one configurable home.
+//! Scheduling and growth limits, plus legacy deserialization fields.
 
 use anyhow::{Result, ensure};
 use serde::{Deserialize, Serialize};
 
-/// Scheduling, scoring and growth limits have one configurable home.
+/// Scheduling and growth limits have one configurable home.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
@@ -19,6 +19,7 @@ pub struct Config {
     pub max_tombstones: usize,
     pub max_skill_bytes: usize,
     pub max_actions: usize,
+    // Legacy scoring fields remain deserializable; none participates in decisions.
     pub similarity: f64,
     pub create_score: f64,
     pub trial_score: f64,
@@ -35,7 +36,7 @@ impl Default for Config {
             independent_sessions: 2,
             batch_size: 12,
             cooldown_secs: 1800,
-            analysis_timeout_secs: 30,
+            analysis_timeout_secs: 120,
             max_experiences: 64,
             max_skills: 24,
             max_retained_skills: 48,

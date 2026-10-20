@@ -78,6 +78,8 @@ pub(crate) struct ReplState {
     pub(crate) child_timeout_secs: u64,
     pub(crate) evolution: Option<::evolution::Handle>,
     pub(crate) evolution_revision: u64,
+    /// Retains successful background preparation for session-bound tools.
+    _sandbox: Arc<std::sync::OnceLock<sandbox::SandboxManager>>,
 }
 impl ReplState {
     /// Reuse the same OS file-lease primitive as local children and workers.
@@ -194,6 +196,19 @@ impl ReplState {
             )?;
         }
         let project_local_store = storage_location::is_project_store(&data_dir, project_root);
+        let prepared_sandbox = Arc::new(std::sync::OnceLock::new());
+        if sandbox::SandboxManager::configured_mode()
+            .is_some_and(|mode| mode != sandbox::SandboxMode::Off)
+            && let Ok(runtime) = tokio::runtime::Handle::try_current()
+        {
+            let slot = prepared_sandbox.clone();
+            let root = project_root.to_path_buf();
+            runtime.spawn_blocking(move || {
+                if let Ok(manager) = sandbox::SandboxManager::for_workspace(root) {
+                    let _ = slot.set(manager);
+                }
+            });
+        }
         Ok(Self {
             project_root: project_root.to_path_buf(),
             data_dir,
@@ -231,6 +246,7 @@ impl ReplState {
             child_timeout_secs: 0,
             evolution: None,
             evolution_revision: 0,
+            _sandbox: prepared_sandbox,
         })
     }
 

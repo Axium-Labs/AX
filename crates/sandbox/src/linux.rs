@@ -12,6 +12,7 @@ use std::{
     sync::Mutex,
 };
 use tokio::process::Child;
+static NEXT_COMMAND: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 pub(super) struct LinuxBackend {
     root: File,
@@ -24,6 +25,9 @@ pub(super) struct LinuxBackend {
     node: Option<File>,
     npm: Option<File>,
     runtime_mounts: Vec<(File, PathBuf, bool)>,
+    cache: File,
+    passwd: File,
+    group: File,
 }
 impl Drop for LinuxBackend {
     fn drop(&mut self) {
@@ -44,6 +48,7 @@ impl LinuxBackend {
         reason = "Keep fail-closed backend preparation in one ordered sequence"
     )]
     pub(super) fn prepare(policy: &SandboxPolicy) -> Result<Self> {
+        check_bwrap()?;
         for runtime in [
             "/",
             "/usr",
@@ -59,6 +64,7 @@ impl LinuxBackend {
             "/ax-node",
             "/ax-rust",
             "/ax-worker",
+            "/ax-cache",
         ] {
             if policy.workspace_root == Path::new(runtime)
                 || (runtime != "/" && policy.workspace_root.starts_with(runtime))
@@ -95,6 +101,10 @@ impl LinuxBackend {
         if !matches!(
             filesystem.f_type.cast_unsigned(),
             0xef53 | 0x9123_683e | 0x5846_5342 | 0x0102_1994 | 0x794c_7630
+                | 0x2fc1_2fc1 // ZFS (OpenZFS ZFS_SUPER_MAGIC)
+                | 0xf2f5_2010 // F2FS_SUPER_MAGIC
+                | 0xca45_1a4e // BCACHEFS_SUPER_MAGIC
+                | 0xf15f // ECRYPTFS_SUPER_MAGIC
         ) {
             return Err(SandboxViolation("workspace filesystem has no verified object confinement semantics (including WSL drvfs/reparse paths)".into()));
         }
@@ -152,6 +162,20 @@ impl LinuxBackend {
         // procfs identifies the object running this trusted AX process.
         let binary = File::open("/proc/self/exe")?;
         inherited(&binary)?;
+        let cache = prepare_cache(policy)?;
+        let mut passwd = tempfile::tempfile()?;
+        writeln!(
+            passwd,
+            "ax:x:{}:{}:AX sandbox:/ax-home:/bin/sh",
+            rustix::process::getuid().as_raw(),
+            rustix::process::getgid().as_raw()
+        )?;
+        passwd.rewind()?;
+        inherited(&passwd)?;
+        let mut group = tempfile::tempfile()?;
+        writeln!(group, "ax:x:{}:", rustix::process::getgid().as_raw())?;
+        group.rewind()?;
+        inherited(&group)?;
         let backend = Self {
             root,
             filter,
@@ -163,6 +187,9 @@ impl LinuxBackend {
             node,
             npm,
             runtime_mounts,
+            cache,
+            passwd,
+            group,
         };
         // Probe the actual policy, including namespaces, seccomp and rlimits.
         // No command supplied by the caller runs until this succeeds.
@@ -232,6 +259,7 @@ impl LinuxBackend {
         policy: &SandboxPolicy,
         spec: CommandSpec,
     ) -> Result<tokio::process::Command> {
+        validate_env(&spec.env)?;
         // Revalidate topology. A privileged host mount change must not become
         // a new recursive bind inside the sandbox.
         reject_mounts(&policy.workspace_root)?;
@@ -302,17 +330,27 @@ impl LinuxBackend {
             "LANG",
             "C.UTF-8",
         ]);
-        cmd.args(["--setenv", "CARGO_HOME"])
-            .arg(policy.workspace_root.join(".cargo"));
+        cmd.arg("--bind-fd")
+            .arg(self.cache.as_raw_fd().to_string())
+            .arg("/ax-cache");
+        for (key, directory) in CACHE_DIRS {
+            cmd.args(["--setenv", key])
+                .arg(format!("/ax-cache/{directory}"));
+        }
         cmd.args(["--tmpfs", "/ax-tmp", "--setenv", "TMPDIR", "/ax-tmp"]);
-        cmd.args([
-            "--setenv",
-            "NPM_CONFIG_USERCONFIG",
-            "/ax-home/.npmrc",
-            "--setenv",
-            "NPM_CONFIG_CACHE",
-        ])
-        .arg(policy.workspace_root.join(".npm-cache"));
+        cmd.args(["--setenv", "NPM_CONFIG_USERCONFIG", "/ax-home/.npmrc"]);
+        for (file, destination) in [(&self.passwd, "/etc/passwd"), (&self.group, "/etc/group")] {
+            // --ro-bind-data copies the content; unlike host passwd/group this
+            // reveals only the uid/gid mapped into the current namespace.
+            let mut file = file;
+            file.rewind()?;
+            cmd.arg("--ro-bind-data")
+                .arg(file.as_raw_fd().to_string())
+                .arg(destination);
+        }
+        if Path::new("/etc/pki").is_dir() {
+            cmd.args(["--ro-bind", "/etc/pki", "/etc/pki"]);
+        }
         if policy.network_mode == NetworkMode::Allow {
             for resolver in ["/etc/resolv.conf", "/etc/hosts", "/etc/ssl/certs"] {
                 if Path::new(resolver).exists() {
@@ -347,6 +385,7 @@ impl LinuxBackend {
                         "/lib64",
                         "/etc/alternatives",
                         "/etc/ssl/certs",
+                        "/etc/pki",
                     ]
                     .iter()
                     .any(|runtime| path.starts_with(runtime))
@@ -388,19 +427,11 @@ impl LinuxBackend {
             .arg("--seccomp")
             .arg(self.filter.as_raw_fd().to_string());
         for (key, value) in spec.env {
-            if matches!(
-                key.as_str(),
-                "HOME" | "PATH" | "LD_PRELOAD" | "LD_LIBRARY_PATH" | "SSH_AUTH_SOCK"
-            ) {
-                return Err(SandboxViolation(format!(
-                    "protected child environment key: {key}"
-                )));
-            }
             cmd.arg("--setenv").arg(key).arg(value);
         }
         let limits = &policy.resource_limits;
         cmd.args(["--", "/usr/bin/prlimit"])
-            .arg(format!("--as={0}:{0}", limits.memory_bytes))
+            .arg(format!("--data={0}:{0}", limits.memory_bytes))
             .arg(format!("--cpu={0}:{0}", limits.cpu_seconds))
             .arg(format!("--nproc={0}:{0}", limits.processes))
             .arg(format!("--nofile={0}:{0}", limits.open_files))
@@ -436,16 +467,7 @@ impl LinuxBackend {
         let cwd = spec.cwd.unwrap_or_else(|| policy.workspace_root.clone());
         // Final resolution happens inside the namespace, which has only the
         // policy's real objects mounted. No host filesystem operation follows.
-        for key in spec.env.keys() {
-            if matches!(
-                key.as_str(),
-                "HOME" | "PATH" | "LD_PRELOAD" | "LD_LIBRARY_PATH" | "SSH_AUTH_SOCK"
-            ) {
-                return Err(SandboxViolation(format!(
-                    "protected child environment key: {key}"
-                )));
-            }
-        }
+        validate_env(&spec.env)?;
         let program = if spec.program == self.executable {
             PathBuf::from("/ax-worker")
         } else {
@@ -457,20 +479,133 @@ impl LinuxBackend {
             env: spec.env,
             cwd,
         };
-        let encoded = serde_json::to_string(&wire).map_err(|e| SandboxViolation(e.to_string()))?;
+        let encoded = serde_json::to_vec(&wire).map_err(|e| SandboxViolation(e.to_string()))?;
+        // Payloads travel over a private socket, independently of the command's
+        // stdin. No environment values or large serialized arguments enter argv.
+        let path = self.ipc.path().join(format!(
+            "command-{}",
+            NEXT_COMMAND.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        let listener = std::os::unix::net::UnixListener::bind(&path)?;
+        listener.set_nonblocking(true)?;
+        let listener = tokio::net::UnixListener::from_std(listener)?;
         // This trusted host-side adapter performs IPC only. The requested
         // program is exclusively spawned by the namespace broker.
-        tokio::process::Command::new(format!("/proc/self/fd/{}", self.binary.as_raw_fd()))
-            .arg("--ax-sandbox-proxy")
-            .arg(self.ipc.path().join("control.sock"))
-            .arg(encoded)
-            .stdin(spec.stdin)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true)
-            .spawn()
-            .map_err(Into::into)
+        let child =
+            tokio::process::Command::new(format!("/proc/self/fd/{}", self.binary.as_raw_fd()))
+                .arg("--ax-sandbox-proxy")
+                .arg(self.ipc.path().join("control.sock"))
+                .arg(&path)
+                .stdin(spec.stdin)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .kill_on_drop(true)
+                .spawn();
+        let child = match child {
+            Ok(child) => child,
+            Err(error) => {
+                let _ = std::fs::remove_file(path);
+                return Err(error.into());
+            }
+        };
+        tokio::spawn(async move {
+            let connection =
+                tokio::time::timeout(std::time::Duration::from_secs(10), listener.accept()).await;
+            let _ = std::fs::remove_file(path);
+            if let Ok(Ok((mut stream, _))) = connection {
+                let _ = super::broker::send_command(&mut stream, &encoded).await;
+            }
+        });
+        Ok(child)
     }
+    pub(super) fn is_alive(&self) -> bool {
+        self.broker.lock().is_ok_and(|mut broker| {
+            broker
+                .as_mut()
+                .is_some_and(|child| matches!(child.try_wait(), Ok(None)))
+        })
+    }
+}
+const CACHE_DIRS: &[(&str, &str)] = &[
+    ("CARGO_HOME", "cargo"),
+    ("NPM_CONFIG_CACHE", "npm"),
+    ("GOMODCACHE", "go-mod"),
+    ("GOCACHE", "go-build"),
+    ("PIP_CACHE_DIR", "pip"),
+    ("UV_CACHE_DIR", "uv"),
+    ("XDG_CACHE_HOME", "xdg"),
+];
+fn prepare_cache(policy: &SandboxPolicy) -> Result<File> {
+    use sha2::{Digest, Sha256};
+    let base = super::CACHE_ROOT
+        .get()
+        .cloned()
+        .or_else(|| {
+            std::env::var_os("AX_HOME")
+                .map(PathBuf::from)
+                .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".ax")))
+                .map(|home| home.join("sandbox-cache"))
+        })
+        .ok_or_else(|| {
+            SandboxViolation("AX data directory unavailable for sandbox cache".into())
+        })?;
+    std::fs::create_dir_all(&base)?;
+    let base = base.canonicalize()?;
+    if base.starts_with(&policy.workspace_root) || policy.workspace_root.starts_with(&base) {
+        return Err(SandboxViolation(
+            "sandbox cache must be outside the workspace".into(),
+        ));
+    }
+    let key = format!(
+        "{:x}",
+        Sha256::digest(policy.workspace_root.as_os_str().as_encoded_bytes())
+    );
+    let path = base.join(key);
+    if path
+        .symlink_metadata()
+        .is_ok_and(|meta| meta.file_type().is_symlink())
+    {
+        return Err(SandboxViolation(
+            "sandbox cache root may not be a symlink".into(),
+        ));
+    }
+    std::fs::create_dir_all(&path)?;
+    for (_, directory) in CACHE_DIRS {
+        std::fs::create_dir_all(path.join(directory))?;
+    }
+    reject_mounts(&path)?;
+    let file = File::open(path)?;
+    inherited(&file)?;
+    Ok(file)
+}
+fn check_bwrap() -> Result<()> {
+    const GUIDANCE: &str = "Install/upgrade bubblewrap with --disable-userns support (for example apt install bubblewrap), or explicitly select ax --sandbox off for unrestricted execution";
+    let help = std::process::Command::new("/usr/bin/bwrap")
+        .arg("--help")
+        .output()
+        .map_err(|error| {
+            SandboxViolation(format!("/usr/bin/bwrap unavailable: {error}. {GUIDANCE}"))
+        })?;
+    if !help.status.success() || !String::from_utf8_lossy(&help.stdout).contains("--disable-userns")
+    {
+        return Err(SandboxViolation(format!(
+            "/usr/bin/bwrap lacks required --disable-userns support. {GUIDANCE}"
+        )));
+    }
+    Ok(())
+}
+fn validate_env(env: &std::collections::BTreeMap<String, String>) -> Result<()> {
+    for key in env.keys() {
+        if matches!(
+            key.as_str(),
+            "HOME" | "PATH" | "LD_PRELOAD" | "LD_LIBRARY_PATH" | "SSH_AUTH_SOCK"
+        ) {
+            return Err(SandboxViolation(format!(
+                "protected child environment key: {key}"
+            )));
+        }
+    }
+    Ok(())
 }
 pub(super) fn authorize_path(root: &Path, path: &Path, create: bool) -> Result<()> {
     let directory = File::open(root)?;
@@ -543,12 +678,44 @@ fn reject_mounts(root: &Path) -> Result<()> {
     Ok(())
 }
 fn reject_hardlinks(root: &Path) -> Result<()> {
+    // Mirrors tool::discovery::DEFAULT_SKIP_DIRS. sandbox cannot depend on tool
+    // (tool already depends on sandbox). Generated trees may contain hardlinks;
+    // they remain mounted with the workspace and are trusted build inputs.
+    const SKIP_DIRS: &[&str] = &[
+        ".git",
+        "target",
+        "node_modules",
+        ".venv",
+        "venv",
+        "dist",
+        "build",
+        "__pycache__",
+        ".cache",
+        "cache",
+        ".mypy_cache",
+        ".pytest_cache",
+        ".ruff_cache",
+        ".next",
+        ".turbo",
+        ".gradle",
+        "coverage",
+        "vendor",
+        ".ax",
+        "child-runs",
+    ];
     let mut dirs = vec![root.to_path_buf()];
     while let Some(dir) = dirs.pop() {
         for entry in std::fs::read_dir(dir)? {
             let entry = entry?;
             let meta = entry.path().symlink_metadata()?;
             if meta.is_dir() {
+                if entry
+                    .file_name()
+                    .to_str()
+                    .is_some_and(|name| SKIP_DIRS.contains(&name))
+                {
+                    continue;
+                }
                 dirs.push(entry.path());
             }
             if meta.is_file() && meta.nlink() > 1 {
@@ -581,8 +748,37 @@ fn seccomp() -> Result<Vec<u8>> {
     let (arch, denied): (u32, &[u32]) = (
         0xc000_00b7,
         &[
-            39, 40, 41, 97, 104, 105, 106, 117, 142, 217, 218, 219, 241, 264, 265, 268, 280, 282,
-            425, 426, 427, 428, 429, 430, 431, 432, 442,
+            // Linux UAPI asm-generic/unistd.h, used by aarch64.
+            39,  // umount2
+            40,  // mount
+            41,  // pivot_root
+            97,  // unshare
+            104, // kexec_load
+            105, // init_module
+            106, // delete_module
+            117, // ptrace
+            142, // reboot
+            217, // add_key
+            218, // request_key
+            219, // keyctl
+            241, // perf_event_open
+            264, // name_to_handle_at
+            265, // open_by_handle_at
+            268, // setns
+            270, // process_vm_readv
+            271, // process_vm_writev
+            273, // finit_module
+            280, // bpf
+            282, // userfaultfd
+            425, // io_uring_setup
+            426, // io_uring_enter
+            427, // io_uring_register
+            428, // open_tree
+            429, // move_mount
+            430, // fsopen
+            431, // fsconfig
+            432, // fsmount
+            442, // mount_setattr
         ],
     );
     #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]

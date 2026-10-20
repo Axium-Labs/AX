@@ -1,4 +1,5 @@
 //! All built-in local execution enters one worker boundary, including reads.
+#![forbid(unsafe_code)]
 use crate::{Capability, ResourceAccess, RunContext, SafetyLevel, Tool, ToolError, ToolOutput};
 use async_trait::async_trait;
 use sandbox::{CommandSpec, SandboxManager, SandboxMode};
@@ -14,7 +15,7 @@ pub struct SandboxedTool {
     root: PathBuf,
     cwd: PathBuf,
     child_state: Option<PathBuf>,
-    manager: OnceLock<Result<SandboxManager, String>>,
+    manager: OnceLock<SandboxManager>,
 }
 impl SandboxedTool {
     pub fn new(inner: Arc<dyn Tool>, root: PathBuf) -> Self {
@@ -27,16 +28,16 @@ impl SandboxedTool {
         }
     }
     fn manager(&self) -> Result<&SandboxManager, ToolError> {
-        self.manager
-            .get_or_init(|| {
-                match &self.child_state {
-                    Some(state) => SandboxManager::for_child_workspace(self.root.clone(), state),
-                    None => SandboxManager::for_workspace(self.root.clone()),
-                }
-                .map_err(|e| e.to_string())
-            })
-            .as_ref()
-            .map_err(|e| sandbox::SandboxViolation(e.clone()).into())
+        if let Some(manager) = self.manager.get() {
+            return Ok(manager);
+        }
+        let manager = match &self.child_state {
+            Some(state) => SandboxManager::for_child_workspace(self.root.clone(), state),
+            None => SandboxManager::for_workspace(self.root.clone()),
+        }?;
+        // Only success is cached; preparation errors can be retried next call.
+        let _ = self.manager.set(manager);
+        Ok(self.manager.get().expect("prepared manager"))
     }
 }
 #[async_trait]
@@ -81,8 +82,11 @@ impl Tool for SandboxedTool {
         // run the call. An unprepared or unconfined binding keeps the tool's own
         // safety level, so a missing backend can never lower approval.
         let confined = self
-            .manager()
-            .is_ok_and(|manager| manager.policy().mode != SandboxMode::Off);
+            .manager
+            .get()
+            .cloned()
+            .or_else(|| SandboxManager::prepared_for_workspace(&self.root))
+            .is_some_and(|manager| manager.policy().mode != SandboxMode::Off);
         if confined {
             SafetyLevel::Safe
         } else {
@@ -113,6 +117,19 @@ impl Tool for SandboxedTool {
         }
     }
     async fn execute_output(&self, input: Value) -> Result<ToolOutput, ToolError> {
+        if self.manager.get().is_none() {
+            let root = self.root.clone();
+            let state = self.child_state.clone();
+            let manager = tokio::task::spawn_blocking(move || match state {
+                Some(state) => SandboxManager::for_child_workspace(root, &state),
+                None => SandboxManager::for_workspace(root),
+            })
+            .await
+            .map_err(|error| {
+                sandbox::SandboxViolation(format!("worker preparation failed: {error}"))
+            })??;
+            let _ = self.manager.set(manager);
+        }
         let manager = self.manager()?;
         if manager.policy().mode == SandboxMode::Off {
             return self.inner.execute_output(input).await;
@@ -125,7 +142,7 @@ impl Tool for SandboxedTool {
         let mut stdin = child
             .stdin
             .take()
-            .ok_or_else(|| ToolError::Execution("worker stdin unavailable".into()))?;
+            .ok_or_else(|| sandbox::SandboxViolation("worker stdin unavailable".into()))?;
         let payload =
             serde_json::to_vec(&input).map_err(|e| ToolError::InvalidInput(e.to_string()))?;
         // Read output concurrently, preventing pipe-capacity deadlocks.
@@ -134,28 +151,31 @@ impl Tool for SandboxedTool {
             stdin.shutdown().await
         };
         let (written, output) = tokio::join!(writer, child.wait_with_output());
-        written?;
-        let output = output?;
+        written.map_err(sandbox::SandboxViolation::from)?;
+        let output = output.map_err(sandbox::SandboxViolation::from)?;
         if !output.status.success() {
             return Err(sandbox::SandboxViolation(
                 String::from_utf8_lossy(&output.stderr).into_owned(),
             )
             .into());
         }
-        let result: Result<ToolOutput, String> = serde_json::from_slice(&output.stdout)
-            .map_err(|e| ToolError::Execution(format!("invalid sandbox worker result: {e}")))?;
-        result.map_err(|e| {
-            if e.contains("Read-only file system")
-                || e.contains("Permission denied")
-                || e.contains("Operation not permitted")
-                || e.contains("No such file or directory")
-            {
-                sandbox::SandboxViolation(e).into()
-            } else {
-                ToolError::Execution(e)
-            }
-        })
+        let result: WorkerResult = serde_json::from_slice(&output.stdout).map_err(|e| {
+            sandbox::SandboxViolation(format!("invalid sandbox worker result: {e}"))
+        })?;
+        match result {
+            WorkerResult::Output(output) => Ok(output),
+            WorkerResult::ToolError(error) => Err(ToolError::Execution(error)),
+            WorkerResult::ConfinementError(error) => Err(sandbox::SandboxViolation(error).into()),
+        }
     }
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", content = "value", rename_all = "snake_case")]
+enum WorkerResult {
+    Output(ToolOutput),
+    ToolError(String),
+    ConfinementError(String),
 }
 
 pub(crate) struct UnboundTool(pub Arc<dyn Tool>);
@@ -194,6 +214,20 @@ impl Tool for UnboundTool {
 /// itself fails.
 pub async fn sandbox_worker(name: &str) -> Result<(), ToolError> {
     sandbox::verify_worker()?;
+    let result = match worker_request(name).await {
+        Ok(output) => WorkerResult::Output(output),
+        Err(ToolError::SandboxViolation(error)) => {
+            WorkerResult::ConfinementError(error.to_string())
+        }
+        Err(error) => WorkerResult::ToolError(error.to_string()),
+    };
+    println!(
+        "{}",
+        serde_json::to_string(&result).map_err(|e| ToolError::Execution(e.to_string()))?
+    );
+    Ok(())
+}
+async fn worker_request(name: &str) -> Result<ToolOutput, ToolError> {
     let mut bytes = Vec::new();
     tokio::io::stdin()
         .take(16 * 1024 * 1024)
@@ -221,10 +255,5 @@ pub async fn sandbox_worker(name: &str) -> Result<(), ToolError> {
         "view_image" => Box::new(crate::ViewImageTool::new(workspace)),
         _ => return Err(ToolError::Unknown(name.into())),
     };
-    let result = tool.execute_output(input).await.map_err(|e| e.to_string());
-    println!(
-        "{}",
-        serde_json::to_string(&result).map_err(|e| ToolError::Execution(e.to_string()))?
-    );
-    Ok(())
+    tool.execute_output(input).await
 }

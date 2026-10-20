@@ -583,7 +583,12 @@ confinement and ordinary action approval. Neither access grant nor action approv
 changes the sandbox. Host services remain outside child registries unless explicitly
 bound. See [host-permissions.md](host-permissions.md) and [ADR 0024](adr/0024-independent-host-access.md).
 Bound tools retain a manager and reuse a persistent Linux namespace broker; child
-registries bind their own workspace. Permission remains independent. See
+registries bind their own workspace. Each stdio MCP transport prepares its own
+manager/PID namespace. Session construction schedules tool sandbox preparation on
+`spawn_blocking` without foreground waiting; safety queries do not prepare and
+failed preparation can retry. Commands use private socket frames and typed worker
+outcomes. Strict enforces denied networking; workspace allows networking.
+Permission remains independent. See
 [security.md](security.md) and [ADR 0013](adr/0013-workspace-runtime-sandbox.md)
 for backend requirements, lifecycle capabilities and platform limitations.
 

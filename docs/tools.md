@@ -139,7 +139,10 @@ Both tools declare their resolved scope as a **read-only** resource, so
 independent discovery calls in one round run concurrently instead of queueing
 behind the global write lock. One round also never walks the same scope twice:
 an identical read-only discovery call is ordered after the first and reuses its
-result (the duplicate still receives its own tool response). This is state
+result (the duplicate still receives its own tool response). Its short
+`reused_from` receipt says it is identical to the first call, retains `status`
+and `truncated`, and omits the duplicate body/diagnostics. Same-round typed result
+references follow the original receipt ID. This is state
 reuse only — the runtime never chooses which tool to call, and never hardcodes a
 search order.
 
@@ -169,10 +172,18 @@ can be batched when useful. Failure recovery uses relevant diagnostics, a local
 repair and appropriate checks. Platform syntax checks and tool permissions apply.
 
 `patch` addresses original 1-based coordinates with `start_line`, `delete_count`,
-`new_text` and optional `expected_lines`. Read enough relevant context before
+`new_text` and `expected_lines` (required when `delete_count > 0`). Read enough relevant context before
 editing, including surrounding functions and callers when needed. All hunks
-validate before writing, preserve CRLF, and report conflict locations with local
-context. Repeated text is supported; unique `old_text` matching is no longer the
+validate before writing and report conflict locations with local
+context. Each replacement follows the last replaced line's own LF/CRLF ending;
+an insertion follows its preceding line (the first line when inserting at the
+start, LF for an empty file). A nonempty replacement before surviving lines gains
+a terminator when missing. Unedited bytes keep their original endings, including
+in mixed-ending files. Input and final file sizes use `MAX_FILE_BYTES`. Successful
+receipts include `regions`: verbatim numbered text for each changed region plus
+up to two lines on each side, using the final file's coordinates. Pure deletions
+show the two lines on either side of their new boundary. Read these regions before
+further edits; success does not establish that the file parses or builds. Repeated text is supported; unique `old_text` matching is no longer the
 edit API. Missing paths return nearby candidates without a recursive search.
 Prefer `patch` for localized edits. `filesystem.write` creates or replaces the
 entire file, which suits requested full-file rewrites and generated artifacts;
@@ -187,7 +198,7 @@ formatting and final newline.
 Text results are stored as lossless `ToolResult` envelopes: `status`
 (`success`/`error`), `summary`, `diagnostics`, `raw_output`, `truncated`. Model
 projections derive from `ContextBudget`. Tools declare source text through
-`ToolOutput::Verbatim { text, total_lines, start_line }` returned by
+`ToolOutput::Verbatim { text, total_lines, start_line, truncated, line_truncated }` returned by
 `Tool::execute_output`; its default implementation keeps existing text behavior.
 The scheduler preserves this declaration in the envelope's additive `verbatim`,
 `total_lines` and `start_line` fields. Missing fields in old snapshots default to
@@ -203,23 +214,37 @@ only complete leading lines and reports `total_lines`, `shown_through_line`,
 that `start_line`. A single line larger than the allowance keeps only its
 beginning, truncated on a UTF-8 character boundary: the view adds
 `line_truncated: true` plus a short note, and `next_start_line` is the following
-line, so reading always advances. Use `search` to locate content further inside
+line when one exists; at EOF it is null. A complete requested range also
+returns null even if later file lines exist: continuation is supplied only for
+a budget/byte-truncated receipt. Use `search` to locate content further inside
 such a line. The verbatim view carries only source fields — `verbatim`, `output`,
 `total_lines`, `start_line`, `shown_through_line`, `next_start_line`,
 `truncated`, `line_truncated`, `raw_output_available` — because `status`,
 `summary` and `diagnostics` carry no information for declared source text.
-Ordinary text results retain their existing diagnostic extraction, JSON
-formatting and compiler-warning cleanup. Raw checkpoints remain authoritative.
+Ordinary text results extract inferred diagnostics only on failure; explicit
+JSON `diagnostics` arrays are preserved on success too. JSON formatting and
+compiler-warning cleanup remain unchanged. Raw checkpoints remain authoritative.
 See [ADR 0031](adr/0031-tool-declared-verbatim-output.md).
 
 `filesystem.read` checks the file size before loading it and reuses the 4 MiB
 `MAX_FILE_BYTES` limit that `search` already applies. Above it, a whole-file read
 returns `invalid tool input` with the actual size, the limit and a hint to use a
 line range or `search`. A ranged read is still allowed: it streams the file, keeps
-only the requested lines in memory and counts them to keep `total_lines` exact.
+at most `MAX_FILE_BYTES` of numbered requested text, including prefixes. If the
+limit cuts a source line, the tail is shortened at a UTF-8 character boundary and
+marked `truncated` and `line_truncated`; no marker text is inserted into source.
+The first read counts the rest without retaining it. Exact counts are cached in
+a lazy process-local LRU keyed by canonical path, modification time and length,
+with cache storage bounded by `MAX_FILE_BYTES`. Cache hits stop at the range end
+or retention limit. A metadata change invalidates the count; unchanged metadata
+cannot detect an external writer restoring the same timestamp and length.
 
 `tool_output(call_id, start_line, end_line)` reads retained raw ranges on demand,
-including after restore. New verbatim cache entries keep the result envelope and
+including after restore while the receipt is retained. Cache entries (IDs and
+serialized output metadata included) share a `MAX_FILE_BYTES` byte cap; insertion
+evicts the oldest entries, and an individually oversized receipt is not cached.
+Unknown or evicted IDs return an explicit reread-file/rerun-tool hint, without
+unbounded eviction tombstones. New verbatim cache entries keep the result envelope and
 its source metadata; old plain-string entries remain readable. For file receipts,
 ranges use original file coordinates within the retained read, preserving the
 existing prefixes and line terminators without adding another number prefix.

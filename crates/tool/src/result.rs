@@ -2,10 +2,85 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::sync::{Arc, RwLock};
-use std::{borrow::Cow, collections::HashMap};
+use std::{
+    borrow::Cow,
+    collections::{HashMap, VecDeque},
+};
 
 #[derive(Clone, Default)]
-pub struct ResultReader(pub Arc<RwLock<HashMap<String, RetainedOutput>>>);
+pub struct ResultReader(pub Arc<RwLock<ResultCache>>);
+
+/// FIFO retained receipts, bounded by the shared file-byte limit (including IDs
+/// and serialized metadata). All live, restore and legacy insertions use this gate.
+#[derive(Default)]
+pub struct ResultCache {
+    entries: HashMap<String, RetainedOutput>,
+    order: VecDeque<String>,
+    bytes: usize,
+}
+
+impl ResultCache {
+    fn entry_bytes(id: &str, value: &RetainedOutput) -> usize {
+        id.len()
+            .saturating_add(serde_json::to_vec(value).map_or(usize::MAX, |v| v.len()))
+    }
+
+    pub fn get(&self, id: &str) -> Option<&RetainedOutput> {
+        self.entries.get(id)
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = (&String, &RetainedOutput)> {
+        self.entries.iter()
+    }
+
+    pub fn insert(&mut self, id: String, value: RetainedOutput) {
+        if let Some(old) = self.entries.remove(&id) {
+            self.bytes = self.bytes.saturating_sub(Self::entry_bytes(&id, &old));
+            self.order.retain(|key| key != &id);
+        }
+        let size = Self::entry_bytes(&id, &value);
+        let limit = usize::try_from(crate::discovery::MAX_FILE_BYTES).unwrap_or(usize::MAX);
+        // An individually oversized receipt cannot fit; do not evict useful
+        // smaller receipts for an entry that would itself immediately disappear.
+        if size > limit {
+            return;
+        }
+        while self.bytes.saturating_add(size) > limit {
+            let Some(oldest) = self.order.pop_front() else {
+                break;
+            };
+            if let Some(old) = self.entries.remove(&oldest) {
+                self.bytes = self.bytes.saturating_sub(Self::entry_bytes(&oldest, &old));
+            }
+        }
+        self.bytes += size;
+        self.order.push_back(id.clone());
+        self.entries.insert(id, value);
+    }
+
+    pub fn extend(&mut self, entries: impl IntoIterator<Item = (String, RetainedOutput)>) {
+        for (id, value) in entries {
+            self.insert(id, value);
+        }
+    }
+
+    pub fn retain(&mut self, mut keep: impl FnMut(&String, &RetainedOutput) -> bool) {
+        self.entries.retain(|id, value| keep(id, value));
+        self.order.retain(|id| self.entries.contains_key(id));
+        self.bytes = self
+            .entries
+            .iter()
+            .map(|(id, value)| Self::entry_bytes(id, value))
+            .sum();
+    }
+}
+
+impl std::ops::Index<&str> for ResultCache {
+    type Output = RetainedOutput;
+    fn index(&self, id: &str) -> &Self::Output {
+        &self.entries[id]
+    }
+}
 
 impl ResultReader {
     /// Rebuild one cache entry from saved history.
@@ -20,15 +95,11 @@ impl ResultReader {
             return;
         };
         let entry = RetainedOutput::from(result);
-        match store.entry(id.to_owned()) {
-            std::collections::hash_map::Entry::Occupied(mut existing) => {
-                if existing.get().is_partial() && !entry.is_partial() {
-                    existing.insert(entry);
-                }
-            }
-            std::collections::hash_map::Entry::Vacant(slot) => {
-                slot.insert(entry);
-            }
+        if store
+            .get(id)
+            .is_none_or(|old| old.is_partial() && !entry.is_partial())
+        {
+            store.insert(id.to_owned(), entry);
         }
     }
 }
@@ -111,7 +182,7 @@ impl crate::Tool for ResultReader {
             .map_err(|_| crate::ToolError::Execution("raw result store unavailable".into()))?;
         let stored = store.get(id).ok_or_else(|| {
             crate::ToolError::InvalidInput(format!(
-                "unknown call_id {id}; use an earlier tool call ID"
+                "unknown or evicted call_id {id}; retained output is byte-bounded; read the file again with filesystem.read or rerun the original tool"
             ))
         })?;
         match stored {
@@ -157,6 +228,8 @@ impl crate::Tool for ResultReader {
                     text,
                     total_lines: result.total_lines.unwrap_or_default(),
                     start_line: start,
+                    truncated: false,
+                    line_truncated: false,
                 })
             }
             RetainedOutput::Raw(raw) => {
@@ -182,6 +255,10 @@ impl crate::Tool for ResultReader {
 // Independent persisted flags, each with its own meaning and serde default.
 #[allow(clippy::struct_excessive_bools)]
 pub struct ToolResult {
+    /// Duplicate discovery responses reference the original receipt, without a
+    /// second copy of its body. Typed same-round dependencies follow this ID.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reused_from: Option<String>,
     /// Source content must never be interpreted as JSON or compiler diagnostics.
     #[serde(default, skip_serializing_if = "is_false")]
     pub verbatim: bool,
@@ -233,18 +310,21 @@ impl ToolResult {
                 text,
                 total_lines,
                 start_line,
+                truncated,
+                line_truncated,
             } => Self {
+                reused_from: None,
                 verbatim: true,
                 total_lines: Some(*total_lines),
                 start_line: Some(*start_line),
-                line_truncated: false,
+                line_truncated: *line_truncated,
                 permission_denied: false,
                 global_blocker: None,
                 status: "success".into(),
                 summary: "Operation succeeded".into(),
                 diagnostics: Vec::new(),
                 raw_output: text.clone(),
-                truncated: false,
+                truncated: *truncated,
             },
             crate::ToolOutput::Text(text)
             | crate::ToolOutput::Image {
@@ -253,14 +333,15 @@ impl ToolResult {
         }
     }
 
-    /// Keep a complete source-line prefix within the supplied context allowance.
+    /// Normal read projection: prefer a complete source-line prefix within the allowance.
     /// A first line longer than the allowance keeps only its beginning and sets
     /// `line_truncated`, so the next read advances past it instead of repeating
     /// the same empty line. Stored source coordinates survive repeated
-    /// compaction and session restore.
+    /// projection and session restore. Compression uses `compact_verbatim_lines` instead.
     #[must_use]
     pub fn compact_verbatim(&self, max_chars: usize) -> Self {
         let mut result = self.clone();
+        result.line_truncated = false;
         let mut remaining = max_chars;
         let mut end = 0;
         for line in self.raw_output.split_inclusive('\n') {
@@ -282,6 +363,34 @@ impl ToolResult {
             }
             break;
         }
+        result.truncated |= end < self.raw_output.len();
+        result.line_truncated |= self.line_truncated && end == self.raw_output.len();
+        result.raw_output.truncate(end);
+        result
+    }
+
+    /// Compression keeps only complete source lines. Unlike the normal read
+    /// projection, it never invents a partial first line or advances past one.
+    #[must_use]
+    pub fn compact_verbatim_lines(&self, max_chars: usize) -> Self {
+        let mut result = self.clone();
+        let mut remaining = max_chars;
+        let mut end = 0;
+        for line in self.raw_output.split_inclusive('\n') {
+            if self.line_truncated
+                && end + line.len() == self.raw_output.len()
+                && !line.ends_with('\n')
+            {
+                break;
+            }
+            let length = line.chars().count();
+            if length > remaining {
+                break;
+            }
+            remaining -= length;
+            end += line.len();
+        }
+        result.line_truncated = false;
         result.truncated |= end < self.raw_output.len();
         result.raw_output.truncate(end);
         result
@@ -318,6 +427,9 @@ impl ToolResult {
                 raw_output
                     .lines()
                     .filter(|line| {
+                        if success {
+                            return false;
+                        }
                         let lower = line.to_lowercase();
                         lower.contains("error")
                             || lower.contains("failed")
@@ -327,7 +439,7 @@ impl ToolResult {
                     .map(|line| json!({"message":line}))
                     .collect()
             });
-        Self { verbatim: false, total_lines: None, start_line: None, line_truncated: false, permission_denied: false, global_blocker: None, status: if success { "success" } else { "error" }.into(),
+        Self { reused_from: None, verbatim: false, total_lines: None, start_line: None, line_truncated: false, permission_denied: false, global_blocker: None, status: if success { "success" } else { "error" }.into(),
             summary: if success { "Operation succeeded" } else { "Operation failed; repair the reported diagnostic locally and run the smallest relevant check before broader tests" }.into(),
             diagnostics, raw_output, truncated: parsed.as_ref().and_then(|v| v["truncated"].as_bool()).unwrap_or(false) }
     }
@@ -345,10 +457,14 @@ impl ToolResult {
                 .min(result.total_lines.unwrap_or(usize::MAX));
             // A clipped single line still has to advance, or the next read would
             // repeat the same line forever.
+            let partial_line = shown.max(start);
             let next = if result.line_truncated {
-                Some(start.saturating_add(1))
+                result
+                    .total_lines
+                    .is_none_or(|total| partial_line < total)
+                    .then(|| partial_line.saturating_add(1))
             } else {
-                (result.truncated || result.total_lines.is_some_and(|total| shown < total))
+                (result.truncated && result.total_lines.is_none_or(|total| shown < total))
                     .then(|| shown.saturating_add(1))
             };
             let mut view = json!({
@@ -362,7 +478,7 @@ impl ToolResult {
             });
             if result.line_truncated {
                 view["note"] = json!(format!(
-                    "line {start} is longer than the allowance; only its beginning is shown. \
+                    "line {partial_line} exceeds the read or display limit; only its beginning is shown. \
                      Use search to locate content inside this line."
                 ));
             }
@@ -388,6 +504,9 @@ impl ToolResult {
             "raw_output_available":true});
         if self.permission_denied {
             view["permission_denied"] = json!(true);
+        }
+        if let Some(first) = &self.reused_from {
+            view["reused_from"] = json!(first);
         }
         view.to_string()
     }
@@ -427,6 +546,8 @@ mod tests {
             text: format!("1: {}\n2: short\n", "é".repeat(200)),
             total_lines: 2,
             start_line: 1,
+            truncated: false,
+            line_truncated: false,
         });
         let compacted = result.compact_verbatim(10);
         assert_eq!(compacted.raw_output, "1: ééééééé");
@@ -447,6 +568,8 @@ mod tests {
                 text: "2: short\n".into(),
                 total_lines: 2,
                 start_line: 2,
+                truncated: false,
+                line_truncated: false,
             })
             .model_view(10),
         )
@@ -463,6 +586,8 @@ mod tests {
             text: format!("1: ab\n2: {}\n", "x".repeat(100)),
             total_lines: 2,
             start_line: 1,
+            truncated: false,
+            line_truncated: false,
         });
         let view: Value = serde_json::from_str(&result.model_view(10)).unwrap();
         assert_eq!(view["output"], "1: ab\n");
@@ -480,6 +605,8 @@ mod tests {
             text: "1: content\n".into(),
             total_lines: 1,
             start_line: 1,
+            truncated: false,
+            line_truncated: false,
         });
         let view: Value = serde_json::from_str(&result.model_view(4096)).unwrap();
         let mut keys: Vec<_> = view.as_object().unwrap().keys().cloned().collect();
@@ -500,18 +627,20 @@ mod tests {
         );
     }
 
-    /// Even a zero allowance must not leave the model stuck on one line.
+    /// A zero allowance marks a partial line, but EOF has no continuation.
     #[test]
     fn zero_allowance_still_advances_past_a_long_first_line() {
         let result = ToolResult::from_output(&crate::ToolOutput::Verbatim {
             text: format!("1: {}\n", "x".repeat(50)),
             total_lines: 1,
             start_line: 1,
+            truncated: false,
+            line_truncated: false,
         });
         let view: Value = serde_json::from_str(&result.model_view(0)).unwrap();
         assert_eq!(view["output"], "");
         assert_eq!(view["line_truncated"], true);
-        assert_eq!(view["next_start_line"], 2);
+        assert!(view["next_start_line"].is_null());
     }
 
     /// Compact JSON must reach the model byte for byte, differing only by the
@@ -523,6 +652,8 @@ mod tests {
             text: format!("1: {body}"),
             total_lines: 1,
             start_line: 1,
+            truncated: false,
+            line_truncated: false,
         });
         let view: Value = serde_json::from_str(&result.model_view(4096)).unwrap();
         assert_eq!(view["output"], format!("1: {body}"));
@@ -537,6 +668,8 @@ mod tests {
             text: "1: warning: file content\n".into(),
             total_lines: 1,
             start_line: 1,
+            truncated: false,
+            line_truncated: false,
         });
         assert!(source.model_view(4096).contains("warning: file content"));
 
@@ -571,6 +704,8 @@ mod tests {
             text: "7: first\n8: 9: literal\n".into(),
             total_lines: 8,
             start_line: 7,
+            truncated: false,
+            line_truncated: false,
         });
         assert_eq!(declared.source_text(), "first\n9: literal\n");
 
@@ -578,6 +713,8 @@ mod tests {
             text: "7: first\n9: second\n".into(),
             total_lines: 9,
             start_line: 7,
+            truncated: false,
+            line_truncated: false,
         });
         assert_eq!(broken.source_text(), "7: first\n9: second\n");
     }
@@ -603,6 +740,8 @@ mod tests {
             text: format!("1: {}\n2: second\n", "x".repeat(400)),
             total_lines: 2,
             start_line: 1,
+            truncated: false,
+            line_truncated: false,
         });
         let compacted = original.compact_verbatim(20);
         assert!(compacted.line_truncated);
@@ -626,6 +765,8 @@ mod tests {
             text: format!("1: ab\n2: {}\n", "y".repeat(400)),
             total_lines: 2,
             start_line: 1,
+            truncated: false,
+            line_truncated: false,
         })
         .compact_verbatim(20);
         assert!(!mixed.line_truncated);
@@ -649,6 +790,8 @@ mod tests {
             }),
             total_lines: 40,
             start_line: 1,
+            truncated: false,
+            line_truncated: false,
         });
         let reader = ResultReader::default();
         reader.restore("read", &original);

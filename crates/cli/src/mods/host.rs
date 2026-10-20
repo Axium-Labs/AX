@@ -379,29 +379,10 @@ impl ModHost {
         } else {
             None
         };
-        Ok(
-            match tool
-                .execute_output_authorized(arguments, profiles, authorization.as_ref())
-                .await
-            {
-                Ok(ToolOutput::Text(result)) => json!({"result":result,"isError":false}),
-                Ok(ToolOutput::Verbatim {
-                    text,
-                    total_lines,
-                    start_line,
-                }) => {
-                    json!({"result":text,"isError":false,"verbatim":{"total_lines":total_lines,"start_line":start_line}})
-                }
-                Ok(ToolOutput::Image {
-                    description,
-                    media_type,
-                    data,
-                }) => {
-                    json!({"result":description,"isError":false,"image":{"description":description,"media_type":media_type,"data":data}})
-                }
-                Err(error) => json!({"result":error.to_string(),"isError":true}),
-            },
-        )
+        let result = tool
+            .execute_output_authorized(arguments, profiles, authorization.as_ref())
+            .await;
+        Ok(encode_tool_output(result))
     }
 
     pub(super) async fn tool_call(
@@ -454,6 +435,10 @@ impl ModHost {
                 text: text.into(),
                 total_lines,
                 start_line,
+                truncated: result["verbatim"]["truncated"].as_bool().unwrap_or(false),
+                line_truncated: result["verbatim"]["line_truncated"]
+                    .as_bool()
+                    .unwrap_or(false),
             });
         }
         Ok(ToolOutput::Text(
@@ -521,5 +506,28 @@ impl RuntimeExtension for ModHost {
                 inner: tool,
             })
         }
+    }
+}
+
+fn encode_tool_output(result: Result<ToolOutput, ToolError>) -> Value {
+    match result {
+        Ok(ToolOutput::Text(result)) => json!({"result":result,"isError":false}),
+        Ok(ToolOutput::Verbatim {
+            text,
+            total_lines,
+            start_line,
+            truncated,
+            line_truncated,
+        }) => {
+            json!({"result":text,"isError":false,"verbatim":{"total_lines":total_lines,"start_line":start_line,"truncated":truncated,"line_truncated":line_truncated}})
+        }
+        Ok(ToolOutput::Image {
+            description,
+            media_type,
+            data,
+        }) => {
+            json!({"result":description,"isError":false,"image":{"description":description,"media_type":media_type,"data":data}})
+        }
+        Err(error) => json!({"result":error.to_string(),"isError":true}),
     }
 }

@@ -100,6 +100,12 @@ pub enum ToolOutput {
         text: String,
         total_lines: usize,
         start_line: usize,
+        /// The retained range hit a byte limit before all requested content fit.
+        #[serde(default)]
+        truncated: bool,
+        /// The retained tail contains only a UTF-8 prefix of a source line.
+        #[serde(default)]
+        line_truncated: bool,
     },
     Image {
         description: String,

@@ -259,6 +259,12 @@ impl Engine {
             - self
                 .records
                 .partition_point(|(_, _, end)| *end <= next.processed_cursor);
+        if next.observed_cursor == self.ledger.observed_cursor
+            && next.pending == self.ledger.pending
+            && self.root.join("ledger.json").is_file()
+        {
+            return Ok(());
+        }
         atomic(
             &self.root.join("ledger.json"),
             &serde_json::to_vec_pretty(&next)?,
@@ -380,9 +386,8 @@ impl Engine {
     pub fn record(&mut self, experience: Experience) -> Result<()> {
         ensure!(experience.project == self.project, "wrong project");
         self.load_records()?;
-        self.observe()?;
         if self.ids.contains_key(&experience.id) {
-            return Ok(());
+            return self.observe();
         }
         // Do not propagate recognized credential material into learning artifacts.
         screen(&experience.task)?;
@@ -401,7 +406,37 @@ impl Engine {
         self.config.enabled
             && self.ledger.pending > 0
             && (ended || self.ledger.pending >= self.config.batch_size)
-            && time.saturating_sub(self.ledger.last_analysis) >= self.config.cooldown_secs
+            && time.saturating_sub(self.ledger.last_analysis) >= self.analysis_cooldown()
+    }
+    fn analysis_cooldown(&self) -> u64 {
+        const MAX_BACKOFF_SECS: u64 = 24 * 60 * 60;
+        if self.ledger.consecutive_failures == 0 {
+            return self.config.cooldown_secs;
+        }
+        self.config
+            .cooldown_secs
+            .saturating_mul(2_u64.saturating_pow(self.ledger.consecutive_failures))
+            .min(MAX_BACKOFF_SECS)
+    }
+    pub(crate) fn analysis_failed(&mut self, cursor: u64, reason: &str) -> Result<()> {
+        const MAX_BATCH_FAILURES: u32 = 3;
+        self.ledger.consecutive_failures = self.ledger.consecutive_failures.saturating_add(1);
+        if self.ledger.failed_batch_cursor != cursor {
+            self.ledger.failed_batch_cursor = cursor;
+            self.ledger.failed_batch_attempts = 0;
+        }
+        self.ledger.failed_batch_attempts += 1;
+        self.audit("ANALYSIS_FAILURE", reason)?;
+        if self.ledger.failed_batch_attempts >= MAX_BATCH_FAILURES {
+            self.audit(
+                "ANALYSIS_SKIP",
+                "3 consecutive failures for batch; advancing cursor",
+            )?;
+            self.complete_analysis(cursor)?;
+        } else {
+            self.save()?;
+        }
+        Ok(())
     }
     pub(crate) fn path(&self, name: &str, state: State) -> Result<PathBuf> {
         ensure!(
@@ -453,7 +488,7 @@ impl Engine {
             })
             .collect()
     }
-    pub(crate) fn evidence_gate(&self, ids: &[String], confidence: f64, _time: u64) -> Result<f64> {
+    pub(crate) fn evidence_gate(&self, ids: &[String], confidence: f64) -> Result<f64> {
         ensure!(
             confidence.is_finite() && (0.0..=1.0).contains(&confidence),
             "invalid confidence"
@@ -545,8 +580,87 @@ impl Engine {
             meta.trial_success_baseline = meta.success_count;
         }
         meta.epoch = self.ledger.epoch;
+        self.ledger.trial_requests.remove(name);
         self.audit(&format!("{name}: {previous:?} -> {next:?}"), "applied")?;
         self.save()
+    }
+    /// Resolves a queued candidate review against the exact proposed package.
+    pub fn review_candidate(&mut self, name: &str, expected: &str, accept: bool) -> Result<()> {
+        self.owned(name)?;
+        ensure!(
+            self.ledger.skills[name].state == State::Candidate
+                && self.ledger.skills[name].digest == expected
+                && self
+                    .ledger
+                    .trial_requests
+                    .get(name)
+                    .is_some_and(|digest| digest == expected),
+            "candidate review is stale"
+        );
+        self.transition(
+            name,
+            if accept {
+                State::Trial
+            } else {
+                State::Archived
+            },
+        )
+    }
+    fn can_archive(&self, name: &str) -> Result<()> {
+        self.owned(name)?;
+        ensure!(
+            policy::transition_allowed(self.ledger.skills[name].state, State::Archived),
+            "merge source unavailable"
+        );
+        let target = self.path(name, State::Archived)?;
+        ensure!(!target.exists(), "archive destination exists");
+        if let Some(parent) = target.parent() {
+            // Validate/create the common destination before publishing a merged package.
+            fs::create_dir_all(parent)?;
+        }
+        Ok(())
+    }
+    fn save_new_package(&mut self, name: &str) -> Result<()> {
+        if let Err(error) = self.save() {
+            let path = self.path(name, State::Candidate)?;
+            fs::remove_file(path.join("SKILL.md"))?;
+            fs::remove_dir(path)?;
+            self.ledger.skills.remove(name);
+            return Err(error);
+        }
+        Ok(())
+    }
+    fn archive_merge(&mut self, name: &str, sources: &[String], previous: Ledger) -> Result<()> {
+        let mut moved = Vec::new();
+        let result = (|| {
+            for source in sources {
+                let old = self.path(source, self.ledger.skills[source].state)?;
+                let archived = self.path(source, State::Archived)?;
+                fs::rename(&old, &archived)?;
+                moved.push((old, archived));
+                let meta = self.ledger.skills.get_mut(source).expect("owned source");
+                meta.state = State::Archived;
+                meta.epoch = self.ledger.epoch;
+                meta.low_value_reviews += 1;
+                self.ledger.trial_requests.remove(source);
+            }
+            self.save()
+        })();
+        if let Err(error) = result {
+            // Restore source packages before removing the unpublished target.
+            for (old, archived) in moved.into_iter().rev() {
+                fs::rename(archived, old)?;
+            }
+            let package = self.path(name, State::Candidate)?;
+            fs::remove_file(package.join("SKILL.md"))?;
+            fs::remove_dir(package)?;
+            self.ledger = previous;
+            return Err(error);
+        }
+        for source in sources {
+            self.audit(&format!("{source}: merged -> Archived"), "applied")?;
+        }
+        Ok(())
     }
     pub fn maintain(&mut self, _time: u64) -> Result<()> {
         // No semantic lifecycle decisions in maintenance.
@@ -601,7 +715,7 @@ impl Engine {
                         < self.config.max_skills,
                     "growth cap: merge/retire first"
                 );
-                let score = self.evidence_gate(&evidence, confidence, time)?;
+                let score = self.evidence_gate(&evidence, confidence)?;
                 let digest = self.write_package(
                     &name,
                     &description,
@@ -610,7 +724,7 @@ impl Engine {
                     false,
                 )?;
                 self.ledger.skills.insert(
-                    name,
+                    name.clone(),
                     Metadata {
                         source: "evolved".into(),
                         created_at: time,
@@ -630,6 +744,8 @@ impl Engine {
                         trial_success_baseline: 0,
                     },
                 );
+                self.save_new_package(&name)?;
+                return Ok(());
             }
             Action::Refine {
                 name,
@@ -640,11 +756,11 @@ impl Engine {
                 corrections,
             } => {
                 self.owned(&name)?;
-                let score = self.evidence_gate(&evidence, confidence, time)?;
+                let score = self.evidence_gate(&evidence, confidence)?;
                 let records = self.evidence(&evidence)?;
                 for quote in &corrections {
                     ensure!(
-                        !quote.is_empty() && records.iter().any(|e| e.task.contains(quote)),
+                        valid_quote(quote) && records.iter().any(|e| e.task.contains(quote)),
                         "unsubstantiated correction"
                     );
                 }
@@ -666,6 +782,7 @@ impl Engine {
                     meta.trial_success_baseline = meta.success_count;
                 }
                 meta.epoch = self.ledger.epoch;
+                self.ledger.trial_requests.remove(&name);
                 // Attribute semantic corrections only during low-frequency analysis.
                 for quote in corrections {
                     for experience in &mut self.recent {
@@ -705,15 +822,9 @@ impl Engine {
                         < texts.iter().map(String::len).sum::<usize>(),
                     "merge must compress"
                 );
-                let score = self.evidence_gate(&evidence, confidence, time)?;
+                let score = self.evidence_gate(&evidence, confidence)?;
                 for n in &names {
-                    ensure!(
-                        matches!(
-                            self.ledger.skills[n].state,
-                            State::Candidate | State::Trial | State::Active
-                        ),
-                        "merge source unavailable"
-                    );
+                    self.can_archive(n)?;
                 }
                 let hash = self.write_package(
                     &name,
@@ -722,8 +833,9 @@ impl Engine {
                     State::Candidate,
                     false,
                 )?;
+                let previous = self.ledger.clone();
                 self.ledger.skills.insert(
-                    name,
+                    name.clone(),
                     Metadata {
                         source: "evolved".into(),
                         created_at: time,
@@ -743,22 +855,31 @@ impl Engine {
                         trial_success_baseline: 0,
                     },
                 );
-                self.save()?;
-                for source in names {
-                    self.transition(&source, State::Archived)?;
-                }
+                self.archive_merge(&name, &names, previous)?;
+                return Ok(());
             }
             Action::Promote { name, evidence } => {
                 self.owned(&name)?;
-                self.evidence_gate(&evidence, 1.0, time)?;
+                self.evidence_gate(&evidence, 1.0)?;
                 let meta = &self.ledger.skills[&name];
                 let next = policy::promoted_state(meta)?;
-                self.transition(&name, next)?;
+                if meta.state == State::Candidate {
+                    ensure!(
+                        meta.epoch < self.ledger.epoch,
+                        "candidate requires a later analysis"
+                    );
+                    ensure!(
+                        evidence.iter().any(|id| !meta.evidence.contains(id)),
+                        "candidate requires fresh evidence"
+                    );
+                    self.ledger.trial_requests.insert(name, meta.digest.clone());
+                } else {
+                    self.transition(&name, next)?;
+                }
             }
             Action::Retire { name } => {
                 self.owned(&name)?;
                 let meta = &self.ledger.skills[&name];
-                self.evidence_gate(&meta.evidence, meta.confidence, time)?;
                 let next = policy::retired_state(meta, self.ledger.epoch);
                 self.transition(&name, next)?;
             }
@@ -769,9 +890,9 @@ impl Engine {
                 quote,
                 confidence,
             } => {
-                self.evidence_gate(&evidence, confidence, time)?;
+                self.evidence_gate(&evidence, confidence)?;
                 ensure!(
-                    !quote.is_empty()
+                    valid_quote(&quote)
                         && self
                             .evidence(&evidence)?
                             .iter()
@@ -815,13 +936,15 @@ impl Engine {
     }
     pub fn analysis_input(&self) -> Result<String> {
         let mut packages = BTreeMap::new();
-        for name in self.ledger.skills.keys() {
-            if let Ok(text) = self.owned(name) {
+        for (name, meta) in &self.ledger.skills {
+            if matches!(meta.state, State::Candidate | State::Trial | State::Active)
+                && let Ok(text) = self.owned(name)
+            {
                 packages.insert(name, text);
             }
         }
         Ok(serde_json::to_string(
-            &serde_json::json!({"experiences": self.recent, "metadata": self.ledger.skills, "packages": packages, "config": self.config}),
+            &serde_json::json!({"experiences": self.recent, "metadata": self.ledger.skills, "packages": packages}),
         )?)
     }
 
@@ -860,4 +983,17 @@ impl Engine {
             ensure!(false, "analysis metadata exceeds provider context capacity");
         }
     }
+}
+
+fn valid_quote(quote: &str) -> bool {
+    let meaningful = quote.chars().any(char::is_alphanumeric);
+    let cjk = quote
+        .chars()
+        .filter(|c| {
+            matches!(*c as u32,
+        0x3400..=0x4dbf | 0x4e00..=0x9fff | 0xf900..=0xfaff | 0x20000..=0x323af
+        | 0x3040..=0x30ff | 0xac00..=0xd7af)
+        })
+        .count();
+    meaningful && (quote.trim().chars().count() >= 8 || cjk >= 4)
 }

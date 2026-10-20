@@ -9,6 +9,7 @@
 
 pub mod approval_dialog;
 pub mod composer;
+pub mod evolution_review;
 pub mod file_popup;
 pub mod memory_editor;
 pub mod model_picker;

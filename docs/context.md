@@ -71,7 +71,7 @@ when the runtime assembles each request.
 Before each request, `ToolResult::model_view` uses
 `ContextBudget::tool_result_chars()` to bound the visible body. Tools declare
 verbatim source output through `ToolOutput::Verbatim`; the scheduler stores
-`verbatim`, `total_lines` and `start_line` in the lossless result envelope.
+`verbatim`, `total_lines`, `start_line`, `truncated` and `line_truncated` in the lossless result envelope.
 Old envelopes without these additive fields deserialize with ordinary text
 semantics. No tool-name matching determines whether an output is source text.
 
@@ -83,9 +83,11 @@ allowance. The projection supplies `total_lines`, `shown_through_line` and,
 when clipped, `next_start_line`, so the next read can resume at an exact file
 line. A line larger than the allowance keeps only its beginning on a UTF-8
 character boundary, sets `line_truncated`, and points `next_start_line` at the
-following line: the projection advances instead of repeating an empty line, and
-`search` locates content deeper inside that line. Non-verbatim results retain
-their existing JSON formatting, diagnostic extraction and warning cleanup.
+following line if one exists, otherwise null. A complete requested range returns
+null even when the file has later lines; `next_start_line` denotes budget/byte
+truncation only. `search` locates content deeper inside an oversized line.
+Non-verbatim results infer diagnostics only for failures (explicit JSON diagnostic
+arrays survive success), and keep JSON formatting and warning cleanup.
 
 ## Compression
 
@@ -102,15 +104,32 @@ the watermark advances.
 Tool-output cleanup recognizes the stored verbatim declaration and retains a
 complete leading-line prefix with its original coordinates and truncation state.
 It does not collect diagnostic-looking source lines or run ordinary text cleanup
-over the body. Same-round result reuse changes the envelope summary only.
+over the body. Compression and retained-round shrinking use
+`compact_verbatim_lines`, never the partial-first-line read projection: if the
+first complete line cannot fit, output is empty, `truncated` is true,
+`line_truncated` is false and continuation remains on that first line.
+Non-verbatim JSON model views remain valid JSON: cleanup compresses only their
+`output` field, retaining leading/diagnostic-looking lines and unchanged
+`diagnostics`. Only unparseable text uses the text fallback.
+Same-round discovery reuse emits a short `reused_from` reference instead of a
+second body, preserving status/truncated. Typed result dependencies resolve to
+the original receipt, and raw history is not rewritten.
 Request preparation and Session rotation keep the typed envelope rather than
 reconstructing it from raw text, so subsequent requests retain the same source
 semantics. Semantic compression may still replace older conversation with a
 summary; the authoritative raw result remains available. See
-[ADR 0031](adr/0031-tool-declared-verbatim-output.md).
+[ADR 0031](adr/0031-tool-declared-verbatim-output.md) and
+[ADR 0032](adr/0032-verified-patches-and-bounded-receipts.md).
 
 The retained-output cache preserves verbatim envelopes and their source
 coordinates across restore; legacy plain-string entries are still supported.
+All live/restore/legacy insertions share a FIFO cap derived from `MAX_FILE_BYTES`
+(IDs and serialized metadata included). Oldest receipts are evicted; one oversized
+receipt is not retained. Missing/evicted IDs explicitly ask for a file reread or
+original-tool rerun. The cache is a bounded convenience, not authoritative history.
+Large-file reads retain at most the same byte limit and cache exact line counts
+in a separate process-local bounded LRU keyed by canonical path, mtime and length;
+a hit avoids scanning past the requested range. The first miss still scans to EOF.
 Restore rebuilds the cache from saved messages, which may already hold a
 compacted projection, so a truncated envelope never replaces a complete receipt
 for the same call. `tool_output` refuses a range that a truncated receipt no

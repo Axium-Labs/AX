@@ -2,6 +2,7 @@
 //! The host proxy only copies pipe bytes; it never executes a requested program.
 use super::{Result, SandboxViolation, verify_worker};
 use serde::{Deserialize, Serialize};
+use std::os::unix::process::ExitStatusExt;
 use std::{collections::BTreeMap, io::Write, path::PathBuf, process::Stdio};
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
@@ -16,7 +17,32 @@ pub(super) struct WireCommand {
     pub cwd: PathBuf,
 }
 const MAX_FRAME: usize = 16 * 1024 * 1024;
+struct ProcessGroup(rustix::process::Pid);
+impl ProcessGroup {
+    fn for_child(child: &tokio::process::Child) -> Result<Self> {
+        child
+            .id()
+            .and_then(|pid| i32::try_from(pid).ok())
+            .and_then(rustix::process::Pid::from_raw)
+            .map(Self)
+            .ok_or_else(|| SandboxViolation("broker child process group missing".into()))
+    }
+    fn kill(&self) {
+        let _ = rustix::process::kill_process_group(self.0, rustix::process::Signal::KILL);
+    }
+}
+impl Drop for ProcessGroup {
+    fn drop(&mut self) {
+        self.kill();
+    }
+}
+pub(super) async fn send_command(stream: &mut UnixStream, bytes: &[u8]) -> Result<()> {
+    send(stream, 3, bytes).await
+}
 async fn send<W: AsyncWrite + Unpin>(writer: &mut W, kind: u8, bytes: &[u8]) -> Result<()> {
+    if bytes.len() > MAX_FRAME {
+        return Err(SandboxViolation("IPC frame too large".into()));
+    }
     let len =
         u32::try_from(bytes.len()).map_err(|_| SandboxViolation("IPC frame too large".into()))?;
     writer.write_u8(kind).await?;
@@ -70,6 +96,7 @@ async fn execute(mut stream: UnixStream) -> Result<()> {
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
+        .process_group(0)
         .kill_on_drop(true)
         .spawn()
     {
@@ -85,6 +112,8 @@ async fn execute(mut stream: UnixStream) -> Result<()> {
             return Ok(());
         }
     };
+    // RAII also kills the group on cancellation, I/O errors and task unwinding.
+    let group = ProcessGroup::for_child(&child)?;
     let mut stdin = child.stdin.take();
     let stdout = child
         .stdout
@@ -128,8 +157,12 @@ async fn execute(mut stream: UnixStream) -> Result<()> {
     });
     let status = tokio::select! {
         result = child.wait() => result?,
-        _ = cancelled => { let _ = child.start_kill(); child.wait().await? }
+        _ = cancelled => {
+            group.kill();
+            child.wait().await?
+        }
     };
+    drop(group);
     input.abort();
     // Descendants may hold stdout indefinitely. Broker retains confinement;
     // bound draining avoids hanging the task after its immediate child exits.
@@ -144,7 +177,63 @@ async fn execute(mut stream: UnixStream) -> Result<()> {
     let mut writer = output
         .await
         .map_err(|e| SandboxViolation(e.to_string()))??;
-    send(&mut writer, 2, &status.code().unwrap_or(128).to_be_bytes()).await
+    finish_status(&mut writer, status).await
+}
+async fn finish_status(
+    writer: &mut tokio::net::unix::OwnedWriteHalf,
+    status: std::process::ExitStatus,
+) -> Result<()> {
+    let code = if let Some(signal) = status.signal() {
+        // Linux ABI signal names on both supported architectures.
+        const NAMES: &[&str] = &[
+            "",
+            "SIGHUP",
+            "SIGINT",
+            "SIGQUIT",
+            "SIGILL",
+            "SIGTRAP",
+            "SIGABRT",
+            "SIGBUS",
+            "SIGFPE",
+            "SIGKILL",
+            "SIGUSR1",
+            "SIGSEGV",
+            "SIGUSR2",
+            "SIGPIPE",
+            "SIGALRM",
+            "SIGTERM",
+            "SIGSTKFLT",
+            "SIGCHLD",
+            "SIGCONT",
+            "SIGSTOP",
+            "SIGTSTP",
+            "SIGTTIN",
+            "SIGTTOU",
+            "SIGURG",
+            "SIGXCPU",
+            "SIGXFSZ",
+            "SIGVTALRM",
+            "SIGPROF",
+            "SIGWINCH",
+            "SIGIO",
+            "SIGPWR",
+            "SIGSYS",
+        ];
+        let name = usize::try_from(signal)
+            .ok()
+            .and_then(|index| NAMES.get(index))
+            .map_or_else(|| format!("SIGRT({signal})"), |name| (*name).to_owned());
+        send(
+            writer,
+            1,
+            format!("\nProcess terminated by {name} ({signal})\n").as_bytes(),
+        )
+        .await?;
+        128 + signal
+    } else {
+        status.code().unwrap_or(128)
+    };
+    send(writer, 2, &code.to_be_bytes()).await
 }
 async fn pump<R: AsyncRead + Unpin>(
     mut reader: R,
@@ -162,9 +251,15 @@ async fn pump<R: AsyncRead + Unpin>(
 ///
 /// # Errors
 /// Returns a violation if connection, framing or pipe I/O fails.
-pub async fn run_proxy(socket: PathBuf, command: &str) -> Result<i32> {
+pub async fn run_proxy(socket: PathBuf, command_socket: &str) -> Result<i32> {
+    let mut command_stream = UnixStream::connect(command_socket).await?;
+    let (kind, command) = receive(&mut command_stream).await?;
+    if kind != 3 {
+        return Err(SandboxViolation("invalid proxy command frame".into()));
+    }
+    drop(command_stream);
     let mut stream = UnixStream::connect(socket).await?;
-    send(&mut stream, 3, command.as_bytes()).await?;
+    send(&mut stream, 3, &command).await?;
     let (mut reader, mut writer) = stream.into_split();
     let input = tokio::spawn(async move {
         let mut stdin = tokio::io::stdin();

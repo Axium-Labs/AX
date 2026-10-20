@@ -16,7 +16,7 @@ Session → Experience → low-frequency analysis → candidate → trial → ac
 
 ## Observation and scheduling
 
-The CLI wraps the existing `AgentEvent` callback. It records task/intent,
+The CLI wraps the existing `AgentEvent` callback. It records task text,
 tool names, routed Skill names and observed Skill-file reads, ordered tool
 steps, call outcomes, failures, possible retries, project identity and session
 identity. Call IDs associate results with steps even when tools finish out of
@@ -86,8 +86,15 @@ first; deletion requires a later explicit proposal and removes only the
 original single-file package. Manual edits and added resources protect user
 content. User-authored Skills and Memory are never automatically overwritten.
 
-Candidates are stored outside discovery. A later analysis can move a credible,
-still relevant candidate to trial. Trial and active Skills share a discoverable
+Candidates are stored outside discovery. Candidate-to-trial proposals require a
+later analysis epoch and at least one evidence ID not in the creation/refinement
+evidence. A valid proposal queues a content-digest-bound user review; it does not
+promote automatically. The idle TUI displays the candidate instructions: `y`
+accepts trial, `n` archives, and Esc leaves the candidate pending for a later TUI
+session. Up/down scroll the instructions. Changed packages invalidate stale
+reviews. ACP and `ax run` keep candidate state and never accept these reviews.
+Trial-to-active still requires the existing successful trial usage gates.
+Trial and active Skills share a discoverable
 directory and use model-directed skill selection, elastic context budgets, enable/disable
 settings and tool permission checks. Archival immediately removes the package
 from discovery. Evolved instructions are refreshed after analysis and stripped
@@ -113,13 +120,26 @@ live/<name>/SKILL.md   # trial and active only
 archived/<name>/SKILL.md
 ```
 
+RETIRE does not require creation evidence to remain in the recent window.
+Archival checks package ownership/digest; deletion still requires another explicit
+RETIRE in a later epoch. Analyzer packages include only Candidate, Trial and Active
+bodies; archived metadata remains available for retirement proposals.
+MEMORY and REFINE provenance quotes require at least eight trimmed Unicode
+characters, or four CJK characters, and some letter/digit content; whitespace or
+punctuation alone cannot establish user provenance.
+
 `experiences.jsonl` is the source of truth. Recording validates scope and secret
 screening, appends the complete unchanged `Experience`, and syncs it before
 checkpointing control state. The version-2 ledger contains `version`, `epoch`,
 `skills`, `pending`, `last_analysis`, `observed_cursor`, and `processed_cursor`;
 it contains no Experience bodies or recent-evidence copies. `observed_cursor`
 checkpoints usage telemetry with its counters; `processed_cursor` checkpoints
-successful analysis consumption. Both are JSONL byte boundaries.
+successful analysis consumption. Both are JSONL byte boundaries. Additive fields
+`trial_requests`, `failed_batch_cursor`, `failed_batch_attempts` and
+`consecutive_failures` persist reviews and recovery scheduling. Recording observes
+new JSONL bytes and checkpoints the ledger once per new Experience; duplicates
+without uncheckpointed bytes do not rewrite it. Legacy `Experience.intent` is
+accepted when reading old data but is not serialized or sent to analysis.
 
 The worker retains an Engine across commands. On its first use after restart,
 it streams JSONL once to rebuild an in-memory ID/offset index and bounded recent
@@ -131,17 +151,28 @@ pending observation and advance past it; excluded new observations remain
 pending. A backlog larger than `max_experiences` is consumed across eligible
 batches under the existing cooldown, rather than silently dropping old work.
 
-The analysis cursor advances only after response validation, action application
-or audited policy rejection, and maintenance succeed. Timeouts, malformed
-responses, failed audit/file/Memory writes or failed cursor checkpointing retain
-pending work. Attempt time still persists before the provider request, preserving
-the cooldown on failure. Replaying a JSONL-only append recovers telemetry once;
+Analysis extracts the first JSON array, tolerates code fences and trailing prose,
+audits/skips individual invalid actions, and truncates excess proposals to
+`max_actions` with an audit. The analysis cursor normally advances after action
+application or audited policy rejection and maintenance. Timeouts/provider errors
+and malformed arrays persist a failure count for the exact selected batch. After
+three consecutive failed attempts on that batch, an explicit skip audit precedes
+advancing its cursor; raw Experiences are retained. Audit/file/Memory/checkpoint
+failures retain pending work and cannot authorize an unaudited skip. Attempt time
+persists before requesting the provider. Consecutive failed analysis attempts
+double the cooldown, capped at 24 hours, across restarts; a successful analysis
+resets the backoff. The default request timeout is 120 seconds.
+Replaying a JSONL-only append recovers telemetry once;
 duplicate IDs are suppressed even outside the recent buffer and across restart.
 As before, separate Skill files, Memory, audit and ledger writes do not form a
 single transaction: a crash after an action but before cursor checkpointing may
 retry analysis. Lifecycle ownership/digest gates and Memory optimistic writes
 still protect their destinations; this is at-least-once analysis, not an
 exactly-once cross-store transaction.
+CREATE removes a just-written package if its ledger checkpoint fails. MERGE
+preflights all source archive destinations, moves them as a batch and checkpoints
+once; an ordinary move/checkpoint error restores sources and removes the new
+package. These rollbacks do not claim crash-atomic multi-file transactions.
 
 Legacy ledgers are migrated while the worker holds `writer.lock`. Existing JSONL
 IDs are preserved without another append; legacy-only observations are appended.
@@ -192,7 +223,7 @@ Thresholds live centrally in `evolution::Config`. For example:
   "enabled": true,
   "batch_size": 12,
   "cooldown_secs": 1800,
-  "analysis_timeout_secs": 30,
+  "analysis_timeout_secs": 120,
   "max_experiences": 64,
   "max_skills": 24,
   "max_retained_skills": 48,
@@ -211,8 +242,9 @@ Thresholds live centrally in `evolution::Config`. For example:
 }
 ```
 
-Weights correspond to recurrence, success, recent usage, correction stability,
-project relevance and confidence. Project relevance is conservative ownership
+Legacy weights corresponded to recurrence, success, recent usage, correction
+stability, project relevance and confidence; they no longer participate in
+decisions. Project relevance is conservative ownership
 scoping: this first implementation does not generalize across projects. Batch
 size and cooldown are scheduling controls, not lifecycle rules. The live cap
 counts candidates, trial and active Skills. A separate retained-package cap
@@ -229,13 +261,15 @@ The unit/integration suite covers ownership guards, standard format, routing
 states, trial promotion, correction/retrial counters, merge compression,
 archive/delete ordering, memory provenance, cooldown, disabled operation,
 credential screening, context fitting, model-call frequency and failed analysis.
-Persistence regressions in `test/evolution/` additionally cover legacy migration,
-JSONL-only append recovery, incremental byte reads, bounded backlog batches,
-window-independent deduplication, failed cursor/audit checkpoints, restart
-consumption, and torn/truncated streams.
+Persistence coverage also includes legacy migration, JSONL-only append recovery,
+incremental byte reads, bounded backlog batches, window-independent deduplication,
+failed cursor/audit checkpoints, restart consumption and torn/truncated streams.
 
 Legacy `similarity`, `create_score`, `trial_score`, `active_score`,
 `retire_score`, `half_life_secs`, and `weights` remain accepted for existing
 config files. They do not decide semantic creation, promotion or retirement.
 Existing ownership ledgers and usage counters are retained; no database
 migration or vector database is required.
+The analyzer input omits Config entirely. Legacy scoring config fields are
+deserialization compatibility only, not model input or lifecycle policy. See
+[ADR 0034](adr/0034-reviewed-evolution-and-analysis-recovery.md).

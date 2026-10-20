@@ -304,10 +304,23 @@ fn compact_tool_output(output: &str, allowance_chars: usize) -> Option<String> {
     if let Ok(result) = serde_json::from_str::<tool::ToolResult>(output)
         && result.verbatim
     {
-        let compacted = result.compact_verbatim(allowance_chars);
+        let compacted = result.compact_verbatim_lines(allowance_chars);
         let short = serde_json::to_string(&compacted).ok()?;
         return (estimate_text_tokens(&short) < estimate_text_tokens(output)).then_some(short);
     }
+    if let Ok(mut view) = serde_json::from_str::<serde_json::Value>(output)
+        && let Some(body) = view.get("output").and_then(serde_json::Value::as_str)
+    {
+        let short_body = compact_text_output(body, allowance_chars)?;
+        view["output"] = serde_json::Value::String(short_body);
+        view["truncated"] = serde_json::Value::Bool(true);
+        let short = view.to_string();
+        return (estimate_text_tokens(&short) < estimate_text_tokens(output)).then_some(short);
+    }
+    compact_text_output(output, allowance_chars)
+}
+
+fn compact_text_output(output: &str, allowance_chars: usize) -> Option<String> {
     let per_line = (allowance_chars / 8).max(1);
     let retained_total = (allowance_chars * 3 / 4).max(per_line);
     if output.len() <= retained_total {

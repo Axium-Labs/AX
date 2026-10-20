@@ -195,6 +195,7 @@ pub(crate) fn prepare(cli: &Cli) -> Result<Locations> {
             .collect(),
     )?;
     sandbox::SandboxManager::configure(mode, protected)?;
+    sandbox::SandboxManager::configure_cache_root(config::ax_home().join("sandbox-cache"))?;
     let (data_dir, skills_dir) =
         storage_location::initialize(&cwd, cli.data_dir.clone(), cli.skills_dir.clone())?;
     Ok(Locations {

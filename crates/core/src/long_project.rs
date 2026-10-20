@@ -22,8 +22,8 @@ fn shrink_round(round: &mut [Message], allowance: usize) -> usize {
                 && result.verbatim
             {
                 if !result.raw_output.is_empty() {
-                    let compacted =
-                        result.compact_verbatim(result.raw_output.chars().count().div_ceil(2));
+                    let compacted = result
+                        .compact_verbatim_lines(result.raw_output.chars().count().div_ceil(2));
                     if compacted.raw_output != result.raw_output {
                         message.content = serde_json::to_string(&compacted).unwrap_or_default();
                         changed = true;
@@ -443,8 +443,10 @@ impl AgentKernel {
             for message in round.iter_mut().filter(|m| m.role == model::Role::Tool) {
                 if let Ok(result) = serde_json::from_str::<tool::ToolResult>(&message.content) {
                     message.content = if result.verbatim {
-                        serde_json::to_string(&result.compact_verbatim(budget.tool_result_chars()))
-                            .unwrap_or_default()
+                        serde_json::to_string(
+                            &result.compact_verbatim_lines(budget.tool_result_chars()),
+                        )
+                        .unwrap_or_default()
                     } else {
                         result.model_view(budget.tool_result_chars())
                     };
@@ -534,6 +536,8 @@ mod tests {
                 text,
                 total_lines: lines,
                 start_line: 1,
+                truncated: false,
+                line_truncated: false,
             },
         ))
         .unwrap()

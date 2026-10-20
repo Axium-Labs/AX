@@ -14,6 +14,8 @@ pub struct Step {
 pub struct Experience {
     pub id: String,
     pub task: String,
+    /// Legacy duplicate of task; accepted when reading old observations only.
+    #[serde(default, skip_serializing)]
     pub intent: String,
     pub tools_used: Vec<String>,
     pub skills_used: Vec<String>,
@@ -79,6 +81,13 @@ pub struct Ledger {
     pub pending: usize,
     pub last_analysis: u64,
     pub epoch: u64,
+    /// Candidate name -> reviewed content digest, awaiting an explicit TUI choice.
+    pub trial_requests: BTreeMap<String, String>,
+    /// Failed attempts for this exact pending byte range.
+    pub failed_batch_cursor: u64,
+    pub failed_batch_attempts: u32,
+    /// Persists exponential scheduling backoff independently of batch skipping.
+    pub consecutive_failures: u32,
 }
 
 /// The analyzer proposes data only. Paths, code, tools and permissions are absent.

@@ -91,3 +91,9 @@ What becomes easier, what becomes harder, and what we accepted.
 - [0030 - Unified model-selected delegation](0030-unified-model-selected-delegation.md) - task-neutral model decisions with shared local concurrency, depth and permission ceilings.
 
 - [0031 - Tool-declared verbatim output](0031-tool-declared-verbatim-output.md) - lossless source semantics and line-aware context projection declared by each tool execution.
+
+- [0032 - Verified patches and bounded receipts](0032-verified-patches-and-bounded-receipts.md) - mandatory patch expectations, final-coordinate regions, short duplicate references and FIFO byte-bounded retained output.
+
+- [0033 - Sandbox process, protocol and cache boundaries](0033-sandbox-process-and-protocol-boundaries.md) - typed failures, separate MCP namespaces, group cleanup and external persistent caches.
+
+- [0034 - Reviewed Evolution promotion and bounded analysis recovery](0034-reviewed-evolution-and-analysis-recovery.md) - explicit candidate review, persisted failure backoff and package rollback.

@@ -15,16 +15,17 @@ pub(crate) struct Recorder {
     sink: Option<::evolution::RecordSink>,
     completed: bool,
     instruction_paths: Vec<(String, String)>,
+    root: std::path::PathBuf,
 }
 impl Recorder {
-    pub fn new(state: &ReplState, prompt: &str, skills_used: Vec<String>) -> Self {
+    pub fn new(state: &ReplState, prompt: &str) -> Self {
         Self {
             experience: Experience {
                 id: uuid::Uuid::new_v4().to_string(),
                 task: bounded(prompt),
-                intent: bounded(prompt),
+                intent: String::new(), // Legacy deserialization only; never persisted.
                 tools_used: vec![],
-                skills_used,
+                skills_used: vec![],
                 steps: vec![],
                 errors: vec![],
                 retries: 0,
@@ -54,13 +55,14 @@ impl Recorder {
                         .statuses(std::iter::empty::<&str>())
                         .into_iter()
                         .filter_map(|s| {
-                            catalog
-                                .instruction_path(&s.metadata.name)
-                                .map(|p| (s.metadata.name, p.to_string_lossy().replace('\\', "/")))
+                            catalog.instruction_path(&s.metadata.name).map(|p| {
+                                (s.metadata.name, normalized_path(&p, &state.project_root))
+                            })
                         })
                         .collect()
                 })
                 .unwrap_or_default(),
+            root: state.project_root.clone(),
         }
     }
     pub fn observe(&mut self, event: &AgentEvent) {
@@ -76,6 +78,19 @@ impl Recorder {
                     && let Some(skill) = input["name"].as_str()
                 {
                     self.skill_calls.insert(id.clone(), skill.to_owned());
+                }
+                if name == "filesystem"
+                    && input["operation"] == "read"
+                    && let Some(path) = input["path"].as_str()
+                {
+                    let path = normalized_path(std::path::Path::new(path), &self.root);
+                    if let Some((skill, _)) = self
+                        .instruction_paths
+                        .iter()
+                        .find(|(_, instruction)| instruction == &path)
+                    {
+                        self.skill_calls.insert(id.clone(), skill.clone());
+                    }
                 }
                 if !self.experience.tools_used.contains(name) {
                     self.experience.tools_used.push(name.clone());
@@ -111,16 +126,6 @@ impl Recorder {
                 }
                 if let Some(index) = self.calls.remove(id) {
                     self.experience.steps[index].success = Some(*success);
-                    let detail = &self.experience.steps[index].detail;
-                    if *success && name == "filesystem" && detail.starts_with("read ") {
-                        let path = detail.trim_start_matches("read ").replace('\\', "/");
-                        for (skill, instruction) in &self.instruction_paths {
-                            if &path == instruction && !self.experience.skills_used.contains(skill)
-                            {
-                                self.experience.skills_used.push(skill.clone());
-                            }
-                        }
-                    }
                 }
                 if !success && self.experience.errors.len() < 64 {
                     self.experience.errors.push(format!("{name}: failed"));
@@ -140,6 +145,21 @@ impl Recorder {
     pub fn complete(&mut self) {
         self.completed = true;
     }
+}
+fn normalized_path(path: &std::path::Path, root: &std::path::Path) -> String {
+    let absolute = root.join(path);
+    let absolute = absolute.canonicalize().unwrap_or(absolute);
+    let mut normalized = std::path::PathBuf::new();
+    for part in absolute.components() {
+        match part {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                normalized.pop();
+            }
+            part => normalized.push(part.as_os_str()),
+        }
+    }
+    normalized.to_string_lossy().replace('\\', "/")
 }
 impl Drop for Recorder {
     fn drop(&mut self) {
@@ -212,7 +232,6 @@ where
     if std::mem::take(&mut state.next_rotation) {
         runtime.request_session_rotation();
     }
-    let skills_used = Vec::new();
     let _goal_lease = if runtime.has_session_rotation()
         || runtime.goal().is_some()
         || matches!(state.next_goal_turn, runtime_core::GoalTurn::Pursue { .. })
@@ -230,7 +249,7 @@ where
     } else {
         None
     };
-    let mut recorder = Recorder::new(state, prompt, skills_used);
+    let mut recorder = Recorder::new(state, prompt);
     let emit = std::sync::Mutex::new(emit);
     let mut saved = 0;
     let intent = std::mem::take(&mut state.next_goal_turn);
@@ -425,7 +444,7 @@ mod tests {
     #[test]
     fn recorder_preserves_completion_order_failures_and_retry_identity() {
         let f = Fixture::new();
-        let mut recorder = Recorder::new(f.state.as_ref().unwrap(), "build", vec![]);
+        let mut recorder = Recorder::new(f.state.as_ref().unwrap(), "build");
         for (id, detail) in [("a", "cargo build"), ("b", "cargo test")] {
             recorder.observe(&AgentEvent::ToolStarted {
                 id: id.into(),
@@ -615,7 +634,7 @@ mod tests {
             std::sync::Arc::new(NoAnalysis),
             vec![],
         ));
-        let recorder = Recorder::new(state, "build release", vec![]);
+        let recorder = Recorder::new(state, "build release");
         drop(recorder); // Models/tasks can be cancelled by dropping their future.
         state.evolution_finish().await;
         let engine =

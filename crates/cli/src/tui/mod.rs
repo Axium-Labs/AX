@@ -572,6 +572,7 @@ pub(super) async fn run_tui(
     let mut force_redraw = true;
     let mut pending_stream_frame = false;
     let mut last_draw = Instant::now();
+    let mut shown_evolution_reviews = std::collections::HashSet::new();
 
     drop(startup_timer);
     'outer: loop {
@@ -991,6 +992,35 @@ pub(super) async fn run_tui(
                     app.push(TranscriptKind::Error, "agent task terminated unexpectedly");
                     app.working = false;
                     app.transcript.streaming = false;
+                }
+            }
+        }
+
+        if active_turn.is_none()
+            && !pane.has_view()
+            && let Some(state) = state.as_ref()
+            && let Some(handle) = &state.evolution
+        {
+            let reviews = handle.reviews();
+            // Bound dismissal state by the engine's existing retained-skill cap.
+            shown_evolution_reviews.retain(|review| reviews.contains(review));
+            if let Some((name, digest)) = reviews
+                .into_iter()
+                .find(|review| !shown_evolution_reviews.contains(review))
+            {
+                let path = state
+                    .evolution_root()
+                    .join("candidate")
+                    .join(&name)
+                    .join("SKILL.md");
+                if let Ok(instructions) = std::fs::read_to_string(path) {
+                    shown_evolution_reviews.insert((name.clone(), digest.clone()));
+                    pane.push_view(bottom_pane::evolution_review::EvolutionReview::open(
+                        name,
+                        digest,
+                        instructions,
+                    ));
+                    updated = true;
                 }
             }
         }

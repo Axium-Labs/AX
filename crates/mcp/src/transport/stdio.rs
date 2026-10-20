@@ -29,10 +29,14 @@ impl StdioTransport {
                 "stdio command must not be empty".to_owned(),
             ));
         }
-        let sandbox = sandbox::SandboxManager::for_workspace(
+        // Each server owns a separate broker and PID namespace. Its environment
+        // (including credentials) must be invisible to ordinary tool commands.
+        let policy = sandbox::SandboxManager::policy_for_workspace(
             std::env::current_dir().map_err(|e| McpError::Transport(e.to_string()))?,
         )
         .map_err(|e| McpError::Transport(e.to_string()))?;
+        let sandbox = sandbox::SandboxManager::prepare(&policy)
+            .map_err(|e| McpError::Transport(e.to_string()))?;
         let mut spec = sandbox::CommandSpec::new(command);
         spec.args = args.to_vec();
         spec.env = env.clone();

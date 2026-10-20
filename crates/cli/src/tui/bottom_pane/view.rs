@@ -17,6 +17,11 @@ pub enum ViewOutcome {
 /// Result payload a view produces when accepted.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ModalAction {
+    EvolutionReviewed {
+        name: String,
+        digest: String,
+        accept: bool,
+    },
     MemoryEdited {
         scope: String,
         key: String,

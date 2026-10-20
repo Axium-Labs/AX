@@ -246,11 +246,28 @@ fn resolve(input: &Value, jobs: &[Job], outputs: &[Option<Message>]) -> Result<V
     match input {
         Value::Object(object) if object.contains_key("$tool_result") => {
             let id = object["$tool_result"].as_str().unwrap_or_default();
-            let output = jobs
+            let mut output = jobs
                 .iter()
                 .position(|job| job.id == id)
                 .and_then(|index| outputs[index].as_ref())
                 .ok_or_else(|| ToolError::InvalidInput(format!("unresolved tool result: {id}")))?;
+            // The model gets one body plus references; typed dependencies still
+            // resolve to the original receipt, including JSON pointers.
+            for _ in 0..jobs.len() {
+                let Some(first) = serde_json::from_str::<tool::ToolResult>(&output.content)
+                    .ok()
+                    .and_then(|result| result.reused_from)
+                else {
+                    break;
+                };
+                output = jobs
+                    .iter()
+                    .position(|job| job.id == first)
+                    .and_then(|index| outputs[index].as_ref())
+                    .ok_or_else(|| {
+                        ToolError::InvalidInput(format!("unresolved reused tool result: {first}"))
+                    })?;
+            }
             let raw = serde_json::from_str::<tool::ToolResult>(&output.content).map_or_else(
                 |_| output.content.clone(),
                 |result| result.source_text().into_owned(),
@@ -522,9 +539,14 @@ fn emit_reuse<F: FnMut(AgentEvent) + Send>(
 fn reused_message(id: &str, first: &str, output: &Message) -> (Message, tool::ToolResult) {
     let mut result = serde_json::from_str::<tool::ToolResult>(&output.content)
         .unwrap_or_else(|_| tool::ToolResult::new(true, output.content.clone()));
-    result.summary = format!(
-        "Identical to tool call {first}; its result was reused instead of re-scanning the same scope"
-    );
+    result.summary = format!("Identical to call {first}; result reused");
+    result.reused_from = Some(first.to_owned());
+    result.raw_output.clear();
+    result.diagnostics.clear();
+    result.verbatim = false;
+    result.total_lines = None;
+    result.start_line = None;
+    result.line_truncated = false;
     let message = Message::tool(id, serde_json::to_string(&result).unwrap_or_default());
     (message, result)
 }
@@ -1035,7 +1057,8 @@ mod tests {
         let first = serde_json::from_str::<tool::ToolResult>(&results[0].content).unwrap();
         let reused = serde_json::from_str::<tool::ToolResult>(&results[1].content).unwrap();
         assert_eq!(reused.status, "success");
-        assert_eq!(reused.raw_output, first.raw_output);
+        assert!(reused.raw_output.len() < first.raw_output.len());
+        assert_eq!(reused.reused_from.as_deref(), Some("first"));
         assert!(reused.summary.contains("reused"));
         std::fs::remove_dir_all(root).unwrap();
     }

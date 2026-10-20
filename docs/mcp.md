@@ -11,6 +11,10 @@ tools are actually needed. It implements three transports — stdio, Streamable
 HTTP and WebSocket — with `initialize` negotiation, the modern stateless
 protocol, paginated `tools/list`, `tools/call`, request timeouts and process
 cleanup.
+Each confined stdio transport owns an independent SandboxManager and broker/PID
+namespace. It shares workspace/cache files with tools, but tool shell processes
+cannot read server credentials from procfs. Network behavior follows its policy:
+workspace allows networking; strict enforces denial. See [security.md](security.md).
 
 ## Configuration
 

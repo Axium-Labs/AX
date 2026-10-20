@@ -28,8 +28,10 @@ denials remain effective. Outside it, the runtime
 exposes only read-only OS/toolchain files needed for development. Home directories,
 AX storage, credential directories and other registered workspaces are absent or
 masked. Private HOME and temporary storage belong to the sandbox. Network defaults
-to allowed; `SandboxPolicy.network_mode = Deny` creates an isolated network
-namespace without sharing the host network.
+to allowed in workspace mode. **workspace 模式下 shell 自动批准且可联网**：工作区内的
+内容、构建脚本和依赖可以向外发送工作区数据，该模式不提供防数据外传保证。
+Strict policies enforce `NetworkMode::Deny`, creating an isolated network
+namespace without sharing the host network. Workspace retains networking.
 
 ## Runtime architecture
 
@@ -62,13 +64,26 @@ generic Process/Network rule. Explicit task ceilings still apply. See
 [host-permissions.md](host-permissions.md) and [ADR 0024](adr/0024-independent-host-access.md)
 for trusted identities, session scope, browser restrictions and platform limits.
 
-A manager is retained by bound tools and MCP transports and shared by workspace.
+A manager is retained by bound tools and shared by workspace. Each confined local stdio
+MCP server prepares its own manager, broker and PID namespace: tool commands
+cannot inspect server credentials through `/proc/<pid>/environ`.
 It prepares one persistent broker with one namespace set, then sends commands over
 an inherited private listener. Calls reuse this broker, filesystem and temporary
 storage. Dropping the last manager kills the namespace and its descendants.
 The host proxy only copies protocol bytes; it never executes the requested program.
 AX pins the executable file object used for workers and proxies so replacing an
 installation pathname inside a writable workspace cannot change host proxy code.
+Session construction schedules tool sandbox preparation with `spawn_blocking`.
+Safety queries only inspect successfully prepared bindings and never prepare a
+namespace. Failures are not cached. A dead broker is discarded and prepared once
+for the next spawn; another failure returns a violation, without host fallback
+or replay of an executed command.
+
+Worker responses tag output, `tool_error`, and `confinement_error`. Ordinary shell
+exit failures, including missing files and permission messages, remain Execution
+errors with `permission_denied=false`; they do not block a Goal as authorization
+failures. Object authorization and worker/broker startup failures remain
+SandboxViolation. Error text never decides confinement status.
 
 ## Linux enforcement
 
@@ -76,6 +91,8 @@ Linux requires bubblewrap, prlimit, usable user/PID/mount/network namespaces,
 openat2 and seccomp. No Docker service is used. Preparation probes the complete
 policy before accepting commands. Namespace setup, seccomp, object validation or
 resource-limit errors abort preparation.
+Preparation checks `/usr/bin/bwrap` and its `--disable-userns` support first, with
+install/upgrade guidance and an explicit `ax --sandbox off` alternative.
 
 The backend pins the canonical workspace directory, binds that object, mounts OS
 and compiler assets read-only, drops all capabilities, sets no-new-privileges and
@@ -88,17 +105,44 @@ Filesystem worker requests are resolved with kernel openat2 BENEATH, NO_XDEV and
 NO_MAGICLINKS flags. Namespace mount boundaries enforce shell and indirect access.
 Traversal, external symlinks and pre-existing nested bind mounts cannot grant host
 access. Hardlinked input files are conservatively rejected because they could alias
-host credentials. Linux filesystems with unverified object semantics, including
+host credentials. The scan follows the discovery generated-directory skip set
+(including `.git`, `node_modules`, `target`, virtual environments and caches).
+These skipped trees remain mounted and are trusted workspace/build inputs.
+The filesystem allowlist includes ext, Btrfs, XFS, tmpfs, overlayfs, ZFS, f2fs,
+bcachefs and ecryptfs. Other filesystems, including
 WSL Windows-mounted filesystems, are rejected; junction/reparse objects are not
 treated as ordinary Linux directories. Move a confined WSL workspace to its native
 Linux filesystem. Windows reparse enforcement belongs in its future native backend.
 
-The policy installs inherited address-space, CPU, process and open-file rlimits and
+The policy installs inherited RLIMIT_DATA, CPU, process and open-file rlimits and
 disables core dumps. These are per-process/per-user kernel limits, not an aggregate
-cgroup memory quota. PID namespace teardown supplies lifecycle isolation. A hostile
+cgroup memory quota. RLIMIT_DATA permits large PROT_NONE address reservations;
+it is neither RLIMIT_AS nor an RSS quota. The default per-user process budget is
+256 times detected CPU parallelism (one when unavailable); no cgroup controller
+is required. Each command starts a new process group, killed with SIGKILL on
+cancellation, timeout/disconnect, normal exit and error cleanup. Descendants that
+deliberately create another session/group are outside group cleanup; namespace
+teardown still kills them. Signal exits use 128+signal and append the signal name
+to stderr. PID namespace teardown supplies lifecycle isolation. A hostile
 administrator or compromised kernel is outside this threat model. Concurrent host
 mutation of workspace contents must be trusted; AX controls all agent execution
 that can mutate them.
+
+WireCommand travels in a private socket frame, never in proxy argv; child stdin
+remains independent. The existing 16 MiB frame limit applies. Commands serialized
+above Linux's per-argument 128 KiB limit work. `/etc/pki` is read-only when present.
+Generated single-entry passwd/group files expose only the mapped current uid/gid.
+Host account lists and HOME credential directories are not mounted.
+
+Each canonical workspace has a SHA-256-keyed persistent cache below
+`<AX_HOME>/sandbox-cache/`, outside the workspace. Only that exact directory is
+mounted read-write at `/ax-cache`. CARGO_HOME, NPM_CONFIG_CACHE, GOMODCACHE,
+GOCACHE, PIP_CACHE_DIR, UV_CACHE_DIR and XDG_CACHE_HOME use separate subdirectories.
+AX no longer creates workspace `.cargo` or `.npm-cache` for sandbox caching.
+Caches survive namespace/process restarts and are shared by that workspace's tool
+and MCP namespaces; private MCP environments are not stored in them. A cache root
+inside the workspace fails closed. See
+[ADR 0033](adr/0033-sandbox-process-and-protocol-boundaries.md).
 
 ## Children and Crew
 

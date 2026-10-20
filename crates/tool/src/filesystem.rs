@@ -186,30 +186,95 @@ async fn read_file(
         text: numbered,
         total_lines,
         start_line: start,
+        truncated: false,
+        line_truncated: false,
     })
 }
 
-/// Ranged read for files above the size limit: only lines inside the request are
-/// kept, while the whole file is still counted so `total_lines` stays exact.
-/// Out-of-range lines are skipped through the buffer without being retained, so a
-/// single huge line cannot defeat the limit.
+#[derive(Clone, PartialEq, Eq)]
+struct LineCountKey {
+    path: std::path::PathBuf,
+    modified: std::time::SystemTime,
+    len: u64,
+}
+
+impl LineCountKey {
+    async fn read(path: &str) -> Option<Self> {
+        let path = tokio::fs::canonicalize(path).await.ok()?;
+        let metadata = tokio::fs::metadata(&path).await.ok()?;
+        Some(Self {
+            path,
+            modified: metadata.modified().ok()?,
+            len: metadata.len(),
+        })
+    }
+
+    fn bytes(&self) -> usize {
+        std::mem::size_of::<(Self, usize)>().saturating_add(self.path.as_os_str().len())
+    }
+}
+
+/// Exact counts are cached lazily, within the existing shared file-byte limit.
+/// The deque is LRU (hits move to its back); there is no startup scan.
+#[derive(Default)]
+struct LineCounts(std::collections::VecDeque<(LineCountKey, usize)>);
+
+impl LineCounts {
+    fn get(&mut self, key: &LineCountKey) -> Option<usize> {
+        let index = self.0.iter().position(|(cached, _)| cached == key)?;
+        let entry = self.0.remove(index)?;
+        let count = entry.1;
+        self.0.push_back(entry);
+        Some(count)
+    }
+
+    fn insert(&mut self, key: LineCountKey, count: usize) {
+        // A new version supersedes old metadata for this path.
+        self.0.retain(|(old, _)| old.path != key.path);
+        let limit = usize::try_from(crate::discovery::MAX_FILE_BYTES).unwrap_or(usize::MAX);
+        let mut bytes: usize = self.0.iter().map(|(key, _)| key.bytes()).sum();
+        if key.bytes() > limit {
+            return;
+        }
+        while bytes.saturating_add(key.bytes()) > limit {
+            let Some((old, _)) = self.0.pop_front() else {
+                break;
+            };
+            bytes = bytes.saturating_sub(old.bytes());
+        }
+        self.0.push_back((key, count));
+    }
+}
+
+fn line_counts() -> &'static std::sync::Mutex<LineCounts> {
+    static COUNTS: std::sync::OnceLock<std::sync::Mutex<LineCounts>> = std::sync::OnceLock::new();
+    COUNTS.get_or_init(Default::default)
+}
+
+/// Range retention (including number prefixes) is bounded by `MAX_FILE_BYTES`.
+/// Even a requested single huge line keeps only a UTF-8 prefix and marks it
+/// partial. On a count-cache miss the rest is scanned without retaining it;
+/// on a hit reading stops at the range end or the retention limit.
 async fn read_ranged_stream(path: &str, start: usize, end: usize) -> Result<ToolOutput, ToolError> {
     use tokio::io::AsyncBufReadExt;
+    let key = LineCountKey::read(path).await;
+    let cached = key
+        .as_ref()
+        .and_then(|key| line_counts().lock().ok()?.get(key));
     let file = tokio::fs::File::open(path)
         .await
         .map_err(|error| crate::path_error(std::path::Path::new(path), &error))?;
     let mut reader = tokio::io::BufReader::new(file);
     let mut number = 0usize;
-    let mut numbered = String::new();
-    let mut line = Vec::new();
+    let mut numbered = Vec::new();
+    let limit = usize::try_from(crate::discovery::MAX_FILE_BYTES).unwrap_or(usize::MAX);
     let mut started = false;
     let mut wanted = false;
+    let mut truncated = false;
+    let mut line_truncated = false;
     loop {
         let (consumed, complete) = {
-            let available = reader
-                .fill_buf()
-                .await
-                .map_err(|error| ToolError::Execution(error.to_string()))?;
+            let available = reader.fill_buf().await?;
             if available.is_empty() {
                 break;
             }
@@ -221,33 +286,59 @@ async fn read_ranged_stream(path: &str, start: usize, end: usize) -> Result<Tool
                 number = number.saturating_add(1);
                 wanted = number >= start && number <= end;
                 started = true;
+                if wanted && !truncated {
+                    let prefix = format!("{number}: ");
+                    if prefix.len() >= limit.saturating_sub(numbered.len()) {
+                        truncated = true;
+                    } else {
+                        numbered.extend_from_slice(prefix.as_bytes());
+                    }
+                }
             }
-            if wanted {
-                line.extend_from_slice(&available[..length]);
+            if wanted && !truncated {
+                let take = length.min(limit.saturating_sub(numbered.len()));
+                numbered.extend_from_slice(&available[..take]);
+                if take < length {
+                    truncated = true;
+                    line_truncated = true;
+                }
             }
             (length, available[length - 1] == b'\n')
         };
         reader.consume(consumed);
         if complete {
-            if wanted {
-                let text = std::str::from_utf8(&line)
-                    .map_err(|_| ToolError::Execution(format!("{path} is not valid UTF-8 text")))?;
-                let _ = write!(numbered, "{number}: {text}");
-            }
-            line.clear();
             started = false;
         }
+        if cached.is_some() && ((complete && number >= end) || truncated) {
+            break;
+        }
     }
-    // A final line without a terminator still counts as a line.
-    if started && wanted && !line.is_empty() {
-        let text = std::str::from_utf8(&line)
-            .map_err(|_| ToolError::Execution(format!("{path} is not valid UTF-8 text")))?;
-        let _ = write!(numbered, "{number}: {text}");
+    if cached.is_none()
+        && let Some(key) = key
+        && LineCountKey::read(path).await.as_ref() == Some(&key)
+        && let Ok(mut counts) = line_counts().lock()
+    {
+        counts.insert(key, number);
     }
+    // Cutting a byte slice may split one UTF-8 character. Only an incomplete
+    // tail caused by our limit is recoverable; invalid source bytes still fail.
+    if let Err(error) = std::str::from_utf8(&numbered) {
+        if line_truncated && error.error_len().is_none() {
+            numbered.truncate(error.valid_up_to());
+        } else {
+            return Err(ToolError::Execution(format!(
+                "{path} is not valid UTF-8 text"
+            )));
+        }
+    }
+    let text = String::from_utf8(numbered)
+        .map_err(|_| ToolError::Execution(format!("{path} is not valid UTF-8 text")))?;
     Ok(ToolOutput::Verbatim {
-        text: numbered,
-        total_lines: number,
+        text,
+        total_lines: cached.unwrap_or(number),
         start_line: start,
+        truncated,
+        line_truncated,
     })
 }
 
@@ -312,6 +403,7 @@ mod tests {
             text,
             total_lines,
             start_line,
+            ..
         } = output
         else {
             panic!("file reads declare verbatim text");
@@ -340,6 +432,7 @@ mod tests {
             text,
             total_lines,
             start_line,
+            ..
         } = output
         else {
             panic!("file reads declare verbatim text");
