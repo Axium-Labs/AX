@@ -32,6 +32,7 @@ to allowed in workspace mode. **workspace 模式下 shell 自动批准且可联�
 内容、构建脚本和依赖可以向外发送工作区数据，该模式不提供防数据外传保证。
 Strict policies enforce `NetworkMode::Deny`, creating an isolated network
 namespace without sharing the host network. Workspace retains networking.
+Strict mode also denies network access to stdio MCP servers.
 
 ## Runtime architecture
 
@@ -82,7 +83,10 @@ or replay of an executed command.
 Worker responses tag output, `tool_error`, and `confinement_error`. Ordinary shell
 exit failures, including missing files and permission messages, remain Execution
 errors with `permission_denied=false`; they do not block a Goal as authorization
-failures. Object authorization and worker/broker startup failures remain
+failures. Missing filesystem objects and non-directory path components, including
+missing write parents, are ordinary tool errors rather than authorization failures.
+Workspace-internal file access errors are likewise left to the tool.
+Workspace escapes and worker/broker startup failures remain
 SandboxViolation. Error text never decides confinement status.
 
 ## Linux enforcement
@@ -120,8 +124,9 @@ cgroup memory quota. RLIMIT_DATA permits large PROT_NONE address reservations;
 it is neither RLIMIT_AS nor an RSS quota. The default per-user process budget is
 256 times detected CPU parallelism (one when unavailable); no cgroup controller
 is required. Each command starts a new process group, killed with SIGKILL on
-cancellation, timeout/disconnect, normal exit and error cleanup. Descendants that
-deliberately create another session/group are outside group cleanup; namespace
+cancellation, timeout/disconnect and early error cleanup. A normally completed
+command disarms group cleanup so background descendants can serve later commands.
+Descendants that deliberately create another session/group are outside group cleanup; namespace
 teardown still kills them. Signal exits use 128+signal and append the signal name
 to stderr. PID namespace teardown supplies lifecycle isolation. A hostile
 administrator or compromised kernel is outside this threat model. Concurrent host

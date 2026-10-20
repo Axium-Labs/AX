@@ -151,13 +151,17 @@ pending observation and advance past it; excluded new observations remain
 pending. A backlog larger than `max_experiences` is consumed across eligible
 batches under the existing cooldown, rather than silently dropping old work.
 
-Analysis extracts the first JSON array, tolerates code fences and trailing prose,
-audits/skips individual invalid actions, and truncates excess proposals to
+Analysis tries each opening bracket, extracts the first parseable JSON array,
+and tolerates bracketed prose, code fences and trailing prose. It audits/skips
+individual invalid actions and truncates excess proposals to
 `max_actions` with an audit. The analysis cursor normally advances after action
-application or audited policy rejection and maintenance. Timeouts/provider errors
-and malformed arrays persist a failure count for the exact selected batch. After
-three consecutive failed attempts on that batch, an explicit skip audit precedes
-advancing its cursor; raw Experiences are retained. Audit/file/Memory/checkpoint
+application or audited policy rejection and maintenance. Invalid model replies
+persist a failure count identified by the pending batch's starting processed
+cursor, so newly appended observations cannot reset its attempts. After three
+invalid replies at that starting cursor, an explicit skip audit precedes advancing
+the selected batch's end cursor; raw Experiences are retained. Timeouts and
+provider/network errors only increase the persisted backoff count; they do not
+count toward skipping or advance pending work. Audit/file/Memory/checkpoint
 failures retain pending work and cannot authorize an unaudited skip. Attempt time
 persists before requesting the provider. Consecutive failed analysis attempts
 double the cooldown, capped at 24 hours, across restarts; a successful analysis

@@ -7,11 +7,13 @@ use std::{
     collections::{HashMap, VecDeque},
 };
 
+const MAX_RETAINED_OUTPUT_BYTES: usize = 4 * 1024 * 1024;
+
 #[derive(Clone, Default)]
 pub struct ResultReader(pub Arc<RwLock<ResultCache>>);
 
-/// FIFO retained receipts, bounded by the shared file-byte limit (including IDs
-/// and serialized metadata). All live, restore and legacy insertions use this gate.
+/// FIFO retained receipts, bounded by estimated ID and raw-output bytes.
+/// All live, restore and legacy insertions use this gate.
 #[derive(Default)]
 pub struct ResultCache {
     entries: HashMap<String, RetainedOutput>,
@@ -21,8 +23,11 @@ pub struct ResultCache {
 
 impl ResultCache {
     fn entry_bytes(id: &str, value: &RetainedOutput) -> usize {
-        id.len()
-            .saturating_add(serde_json::to_vec(value).map_or(usize::MAX, |v| v.len()))
+        let raw_output = match value {
+            RetainedOutput::Verbatim(result) => &result.raw_output,
+            RetainedOutput::Raw(raw) => raw,
+        };
+        id.len().saturating_add(raw_output.len())
     }
 
     pub fn get(&self, id: &str) -> Option<&RetainedOutput> {
@@ -39,13 +44,12 @@ impl ResultCache {
             self.order.retain(|key| key != &id);
         }
         let size = Self::entry_bytes(&id, &value);
-        let limit = usize::try_from(crate::discovery::MAX_FILE_BYTES).unwrap_or(usize::MAX);
         // An individually oversized receipt cannot fit; do not evict useful
         // smaller receipts for an entry that would itself immediately disappear.
-        if size > limit {
+        if size > MAX_RETAINED_OUTPUT_BYTES {
             return;
         }
-        while self.bytes.saturating_add(size) > limit {
+        while self.bytes.saturating_add(size) > MAX_RETAINED_OUTPUT_BYTES {
             let Some(oldest) = self.order.pop_front() else {
                 break;
             };

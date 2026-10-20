@@ -178,7 +178,9 @@ validate before writing and report conflict locations with local
 context. Each replacement follows the last replaced line's own LF/CRLF ending;
 an insertion follows its preceding line (the first line when inserting at the
 start, LF for an empty file). A nonempty replacement before surviving lines gains
-a terminator when missing. Unedited bytes keep their original endings, including
+a terminator when missing. An insertion after an unterminated final line first
+terminates that line, using the preceding LF/CRLF ending (LF if none exists).
+Unedited bytes otherwise keep their original endings, including
 in mixed-ending files. Input and final file sizes use `MAX_FILE_BYTES`. Successful
 receipts include `regions`: verbatim numbered text for each changed region plus
 up to two lines on each side, using the final file's coordinates. Pure deletions
@@ -240,8 +242,8 @@ or retention limit. A metadata change invalidates the count; unchanged metadata
 cannot detect an external writer restoring the same timestamp and length.
 
 `tool_output(call_id, start_line, end_line)` reads retained raw ranges on demand,
-including after restore while the receipt is retained. Cache entries (IDs and
-serialized output metadata included) share a `MAX_FILE_BYTES` byte cap; insertion
+including after restore while the receipt is retained. Cache entries share a
+4 MiB `MAX_RETAINED_OUTPUT_BYTES` cap, estimated from ID and raw-output lengths; insertion
 evicts the oldest entries, and an individually oversized receipt is not cached.
 Unknown or evicted IDs return an explicit reread-file/rerun-tool hint, without
 unbounded eviction tombstones. New verbatim cache entries keep the result envelope and

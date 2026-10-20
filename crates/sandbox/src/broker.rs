@@ -17,18 +17,23 @@ pub(super) struct WireCommand {
     pub cwd: PathBuf,
 }
 const MAX_FRAME: usize = 16 * 1024 * 1024;
-struct ProcessGroup(rustix::process::Pid);
+struct ProcessGroup(Option<rustix::process::Pid>);
 impl ProcessGroup {
     fn for_child(child: &tokio::process::Child) -> Result<Self> {
         child
             .id()
             .and_then(|pid| i32::try_from(pid).ok())
             .and_then(rustix::process::Pid::from_raw)
-            .map(Self)
+            .map(|pid| Self(Some(pid)))
             .ok_or_else(|| SandboxViolation("broker child process group missing".into()))
     }
+    fn disarm(&mut self) {
+        self.0 = None;
+    }
     fn kill(&self) {
-        let _ = rustix::process::kill_process_group(self.0, rustix::process::Signal::KILL);
+        if let Some(pid) = self.0 {
+            let _ = rustix::process::kill_process_group(pid, rustix::process::Signal::KILL);
+        }
     }
 }
 impl Drop for ProcessGroup {
@@ -113,7 +118,7 @@ async fn execute(mut stream: UnixStream) -> Result<()> {
         }
     };
     // RAII also kills the group on cancellation, I/O errors and task unwinding.
-    let group = ProcessGroup::for_child(&child)?;
+    let mut group = ProcessGroup::for_child(&child)?;
     let mut stdin = child.stdin.take();
     let stdout = child
         .stdout
@@ -156,7 +161,11 @@ async fn execute(mut stream: UnixStream) -> Result<()> {
         Ok::<_, SandboxViolation>(writer)
     });
     let status = tokio::select! {
-        result = child.wait() => result?,
+        result = child.wait() => {
+            let status = result?;
+            group.disarm();
+            status
+        },
         _ = cancelled => {
             group.kill();
             child.wait().await?

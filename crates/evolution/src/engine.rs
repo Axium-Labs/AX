@@ -421,8 +421,8 @@ impl Engine {
     pub(crate) fn analysis_failed(&mut self, cursor: u64, reason: &str) -> Result<()> {
         const MAX_BATCH_FAILURES: u32 = 3;
         self.ledger.consecutive_failures = self.ledger.consecutive_failures.saturating_add(1);
-        if self.ledger.failed_batch_cursor != cursor {
-            self.ledger.failed_batch_cursor = cursor;
+        if self.ledger.failed_batch_cursor != self.ledger.processed_cursor {
+            self.ledger.failed_batch_cursor = self.ledger.processed_cursor;
             self.ledger.failed_batch_attempts = 0;
         }
         self.ledger.failed_batch_attempts += 1;

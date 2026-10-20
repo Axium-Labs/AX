@@ -607,7 +607,7 @@ fn validate_env(env: &std::collections::BTreeMap<String, String>) -> Result<()> 
     }
     Ok(())
 }
-pub(super) fn authorize_path(root: &Path, path: &Path, create: bool) -> Result<()> {
+pub(super) fn authorize_path(root: &Path, path: &Path, _create: bool) -> Result<()> {
     let directory = File::open(root)?;
     let relative = if path.is_absolute() {
         path.strip_prefix(root)
@@ -632,18 +632,12 @@ pub(super) fn authorize_path(root: &Path, path: &Path, create: bool) -> Result<(
         )
     };
     match resolve(relative) {
-        Ok(_) => Ok(()),
-        Err(rustix::io::Errno::NOENT) if create => resolve(
-            relative
-                .parent()
-                .filter(|p| !p.as_os_str().is_empty())
-                .unwrap_or_else(|| Path::new(".")),
-        )
-        .map(|_| ())
-        .map_err(|e| SandboxViolation(format!("workspace object resolution denied: {e}"))),
-        Err(e) => Err(SandboxViolation(format!(
-            "workspace object resolution denied: {e}"
-        ))),
+        Err(e @ (rustix::io::Errno::XDEV | rustix::io::Errno::LOOP)) => Err(SandboxViolation(
+            format!("workspace object resolution denied: {e}"),
+        )),
+        // NOENT/NOTDIR (including missing creation parents) and ordinary file
+        // access errors belong to the tool; only workspace escapes are denied.
+        _ => Ok(()),
     }
 }
 fn find_program(name: &str) -> Option<PathBuf> {

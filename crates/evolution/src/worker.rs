@@ -1,5 +1,5 @@
 use crate::{Action, CREATOR, Engine, Experience, now};
-use anyhow::{Result, ensure};
+use anyhow::{Context, Result, ensure};
 use model::{Message, ModelProvider, ModelRequest};
 use std::{
     fs,
@@ -284,8 +284,19 @@ fn process(
         )
         .await
     });
+    let response = match response
+        .map_err(anyhow::Error::from)
+        .and_then(|response| response.map_err(anyhow::Error::from))
+    {
+        Ok(response) => response,
+        Err(error) => {
+            engine.ledger.consecutive_failures =
+                engine.ledger.consecutive_failures.saturating_add(1);
+            engine.save()?;
+            return Err(error);
+        }
+    };
     let actions = (|| {
-        let response = response??;
         ensure!(
             response.tool_calls.is_empty(),
             "analyzer cannot execute tools"
@@ -295,6 +306,9 @@ fn process(
     let actions = match actions {
         Ok(actions) => actions,
         Err(error) => {
+            if error.is::<crate::storage::PersistenceFailure>() {
+                return Err(error);
+            }
             engine.analysis_failed(cursor, &error.to_string())?;
             return Err(error);
         }
@@ -356,23 +370,27 @@ fn process(
 }
 
 fn parse_actions(engine: &Engine, content: &str) -> Result<Vec<Action>> {
-    let start = content
-        .find('[')
+    // Try each opening bracket; streaming one value tolerates surrounding prose.
+    let value = content
+        .match_indices('[')
+        .find_map(|(start, _)| {
+            serde_json::Deserializer::from_str(&content[start..])
+                .into_iter::<Vec<serde_json::Value>>()
+                .next()?
+                .ok()
+        })
         .ok_or_else(|| anyhow::anyhow!("analysis has no JSON array"))?;
-    // Streaming one value tolerates code fences and prose after the first array.
-    let value = serde_json::Deserializer::from_str(&content[start..])
-        .into_iter::<Vec<serde_json::Value>>()
-        .next()
-        .ok_or_else(|| anyhow::anyhow!("analysis has no JSON array"))??;
     if value.len() > engine.config.max_actions {
-        engine.audit(
-            "ANALYSIS_TRUNCATED",
-            &format!(
-                "truncated {} actions to {}",
-                value.len(),
-                engine.config.max_actions
-            ),
-        )?;
+        engine
+            .audit(
+                "ANALYSIS_TRUNCATED",
+                &format!(
+                    "truncated {} actions to {}",
+                    value.len(),
+                    engine.config.max_actions
+                ),
+            )
+            .context(crate::storage::PersistenceFailure)?;
     }
     let mut actions = Vec::new();
     for (index, value) in value
@@ -382,10 +400,12 @@ fn parse_actions(engine: &Engine, content: &str) -> Result<Vec<Action>> {
     {
         match serde_json::from_value(value) {
             Ok(action) => actions.push(action),
-            Err(error) => engine.audit(
-                "INVALID_ACTION",
-                &format!("invalid action {index}: {error}"),
-            )?,
+            Err(error) => engine
+                .audit(
+                    "INVALID_ACTION",
+                    &format!("invalid action {index}: {error}"),
+                )
+                .context(crate::storage::PersistenceFailure)?,
         }
     }
     Ok(actions)

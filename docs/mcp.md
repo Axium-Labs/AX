@@ -15,6 +15,7 @@ Each confined stdio transport owns an independent SandboxManager and broker/PID
 namespace. It shares workspace/cache files with tools, but tool shell processes
 cannot read server credentials from procfs. Network behavior follows its policy:
 workspace allows networking; strict enforces denial. See [security.md](security.md).
+Strict mode also denies network access to stdio MCP servers.
 
 ## Configuration
 

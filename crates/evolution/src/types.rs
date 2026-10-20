@@ -83,7 +83,7 @@ pub struct Ledger {
     pub epoch: u64,
     /// Candidate name -> reviewed content digest, awaiting an explicit TUI choice.
     pub trial_requests: BTreeMap<String, String>,
-    /// Failed attempts for this exact pending byte range.
+    /// Invalid-reply attempts identified by the pending batch's starting cursor.
     pub failed_batch_cursor: u64,
     pub failed_batch_attempts: u32,
     /// Persists exponential scheduling backoff independently of batch skipping.

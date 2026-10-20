@@ -50,7 +50,7 @@ impl Tool for PatchTool {
         )
     }
     fn input_schema(&self) -> Value {
-        json!({"type":"object","properties":{"path":{"type":"string"},"edits":{"type":"array","minItems":1,"maxItems":128,"items":{"type":"object","properties":{"start_line":{"type":"integer","minimum":1},"delete_count":{"type":"integer","minimum":0},"expected_lines":{"type":"array","items":{"type":"string"},"description":"Required when delete_count > 0; exact original lines without number prefixes or terminators."},"new_text":{"type":"string"}},"required":["start_line","delete_count","new_text"],"allOf":[{"if":{"properties":{"delete_count":{"minimum":1}},"required":["delete_count"]},"then":{"required":["expected_lines"]}}],"additionalProperties":false}}},"required":["path","edits"],"additionalProperties":false})
+        json!({"type":"object","properties":{"path":{"type":"string"},"edits":{"type":"array","minItems":1,"maxItems":128,"items":{"type":"object","properties":{"start_line":{"type":"integer","minimum":1},"delete_count":{"type":"integer","minimum":0},"expected_lines":{"type":"array","items":{"type":"string"},"description":"Required when delete_count > 0; exact original lines without number prefixes or terminators."},"new_text":{"type":"string"}},"required":["start_line","delete_count","new_text"],"additionalProperties":false}}},"required":["path","edits"],"additionalProperties":false})
     }
     fn capability(&self, _input: &Value) -> Capability {
         Capability::FilesystemWrite
@@ -122,20 +122,7 @@ impl Tool for PatchTool {
                 return Err(ToolError::InvalidInput(json!({"diagnostics":[{"kind":"patch_conflict","path":path,"hunk":index,"start_line":edit.start_line,"actual_lines":actual,"context":context,"message":"Overlapping, out-of-range or stale hunk; no changes written. Read this range and repair this hunk."}]}).to_string()));
             }
             updated.push_str(&lines[cursor..start].concat());
-            let anchor = if edit.delete_count > 0 {
-                end - 1
-            } else {
-                start.saturating_sub(1)
-            };
-            let newline = if lines.get(anchor).is_some_and(|line| line.ends_with("\r\n")) {
-                "\r\n"
-            } else {
-                "\n"
-            };
-            let mut replacement = edit.new_text.replace("\r\n", "\n").replace('\n', newline);
-            if !replacement.is_empty() && !replacement.ends_with('\n') && end < lines.len() {
-                replacement.push_str(newline);
-            }
+            let replacement = prepare_replacement(&mut updated, &lines, start, end, edit);
             let new_start = start + additions - deletions;
             let added = replacement.split_inclusive('\n').count();
             changed_ranges.push((new_start, added));
@@ -164,6 +151,39 @@ impl Tool for PatchTool {
         let regions = preview_regions(&updated, changed_ranges);
         Ok(json!({"path":path,"edits_applied":input.edits.len(),"regions":regions,"changed_files":[{"path":path,"additions":additions,"deletions":deletions}]}).to_string())
     }
+}
+
+fn prepare_replacement(
+    updated: &mut String,
+    lines: &[&str],
+    start: usize,
+    end: usize,
+    edit: &Edit,
+) -> String {
+    let anchor = if edit.delete_count > 0 {
+        end - 1
+    } else {
+        start.saturating_sub(1)
+    };
+    let eof_insertion = edit.delete_count == 0 && start == lines.len();
+    let anchor = if eof_insertion && lines.get(anchor).is_some_and(|line| !line.ends_with('\n')) {
+        anchor.saturating_sub(1)
+    } else {
+        anchor
+    };
+    let newline = if lines.get(anchor).is_some_and(|line| line.ends_with("\r\n")) {
+        "\r\n"
+    } else {
+        "\n"
+    };
+    let mut replacement = edit.new_text.replace("\r\n", "\n").replace('\n', newline);
+    if eof_insertion && !replacement.is_empty() && !updated.is_empty() && !updated.ends_with('\n') {
+        updated.push_str(newline);
+    }
+    if !replacement.is_empty() && !replacement.ends_with('\n') && end < lines.len() {
+        replacement.push_str(newline);
+    }
+    replacement
 }
 
 fn preview_regions(updated: &str, ranges: Vec<(usize, usize)>) -> Vec<Value> {
