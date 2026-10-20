@@ -36,14 +36,18 @@ impl AgentKernel {
         F: FnMut(AgentEvent) + Send,
         H: FnMut(&[Message]) -> Result<(), AgentError> + Send,
     {
-        // Tool results are re-projected for the request without changing what
-        // the effective transcript keeps.
+        // Bound tool results before pressure checks. Keep verbatim declarations
+        // in the effective transcript for later cleanup and request projection.
         let chars = self.context_budget().tool_result_chars();
         for message in &mut self.messages {
             if message.role == model::Role::Tool
                 && let Ok(result) = serde_json::from_str::<tool::ToolResult>(&message.content)
             {
-                message.content = result.model_view(chars);
+                message.content = if result.verbatim {
+                    serde_json::to_string(&result.compact_verbatim(chars)).unwrap_or_default()
+                } else {
+                    result.model_view(chars)
+                };
             }
         }
         self.set_context(

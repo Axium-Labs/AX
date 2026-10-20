@@ -1,11 +1,36 @@
 //! Lossless stored results with a bounded, model-facing projection.
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
+use std::{borrow::Cow, collections::HashMap};
 
 #[derive(Clone, Default)]
-pub struct ResultReader(pub Arc<RwLock<HashMap<String, String>>>);
+pub struct ResultReader(pub Arc<RwLock<HashMap<String, RetainedOutput>>>);
+
+/// Typed cache metadata is an object; legacy raw cache values remain strings.
+/// Never infer source semantics by parsing a tool's raw text as an envelope.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum RetainedOutput {
+    Verbatim(ToolResult),
+    Raw(String),
+}
+
+impl From<&ToolResult> for RetainedOutput {
+    fn from(result: &ToolResult) -> Self {
+        if result.verbatim {
+            Self::Verbatim(result.clone())
+        } else {
+            Self::Raw(result.raw_output.clone())
+        }
+    }
+}
+
+impl From<String> for RetainedOutput {
+    fn from(raw: String) -> Self {
+        Self::Raw(raw)
+    }
+}
 
 #[async_trait::async_trait]
 impl crate::Tool for ResultReader {
@@ -31,6 +56,12 @@ impl crate::Tool for ResultReader {
         vec![]
     }
     async fn execute(&self, input: Value) -> Result<String, crate::ToolError> {
+        match self.execute_output(input).await? {
+            crate::ToolOutput::Text(text) | crate::ToolOutput::Verbatim { text, .. } => Ok(text),
+            crate::ToolOutput::Image { description, .. } => Ok(description),
+        }
+    }
+    async fn execute_output(&self, input: Value) -> Result<crate::ToolOutput, crate::ToolError> {
         let id = input["call_id"].as_str().unwrap_or_default();
         let start = usize::try_from(input["start_line"].as_u64().unwrap_or(0)).unwrap_or(0);
         let end = usize::try_from(input["end_line"].as_u64().unwrap_or(0)).unwrap_or(0);
@@ -43,27 +74,54 @@ impl crate::Tool for ResultReader {
             .0
             .read()
             .map_err(|_| crate::ToolError::Execution("raw result store unavailable".into()))?;
-        let raw = store.get(id).ok_or_else(|| {
+        let stored = store.get(id).ok_or_else(|| {
             crate::ToolError::InvalidInput(format!(
                 "unknown call_id {id}; use an earlier tool call ID"
             ))
         })?;
+        if let RetainedOutput::Verbatim(result) = stored {
+            let first = result.start_line.unwrap_or(1);
+            let start = start.max(first);
+            let text = result
+                .raw_output
+                .split_inclusive('\n')
+                .skip(start.saturating_sub(first))
+                .take(end.saturating_add(1).saturating_sub(start))
+                .collect();
+            return Ok(crate::ToolOutput::Verbatim {
+                text,
+                total_lines: result.total_lines.unwrap_or_default(),
+                start_line: start,
+            });
+        }
+        let RetainedOutput::Raw(raw) = stored else {
+            unreachable!()
+        };
         let pretty = serde_json::from_str::<Value>(raw)
             .and_then(|v| serde_json::to_string_pretty(&v))
             .unwrap_or_else(|_| raw.clone());
-        Ok(pretty
-            .lines()
-            .enumerate()
-            .skip(start - 1)
-            .take(end - start + 1)
-            .map(|(i, line)| format!("{}: {line}", i + 1))
-            .collect::<Vec<_>>()
-            .join("\n"))
+        Ok(crate::ToolOutput::Text(
+            pretty
+                .lines()
+                .enumerate()
+                .skip(start - 1)
+                .take(end - start + 1)
+                .map(|(i, line)| format!("{}: {line}", i + 1))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        ))
     }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ToolResult {
+    /// Source content must never be interpreted as JSON or compiler diagnostics.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub verbatim: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total_lines: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_line: Option<usize>,
     /// Set only from a typed runtime permission failure, never inferred from prose.
     #[serde(default, skip_serializing_if = "is_false")]
     pub permission_denied: bool,
@@ -78,6 +136,72 @@ pub struct ToolResult {
 }
 
 impl ToolResult {
+    /// Original content for typed data consumers; display prefixes stay in history.
+    /// Only strip the exact coordinate sequence declared by a verbatim tool.
+    #[must_use]
+    pub fn source_text(&self) -> Cow<'_, str> {
+        if !self.verbatim {
+            return Cow::Borrowed(&self.raw_output);
+        }
+        let mut number = self.start_line.unwrap_or(1);
+        let mut source = String::new();
+        for line in self.raw_output.split_inclusive('\n') {
+            let Some(content) = line.strip_prefix(&format!("{number}: ")) else {
+                return Cow::Borrowed(&self.raw_output);
+            };
+            source.push_str(content);
+            number = number.saturating_add(1);
+        }
+        Cow::Owned(source)
+    }
+
+    /// Preserve the output semantics declared by the executing tool.
+    #[must_use]
+    pub fn from_output(output: &crate::ToolOutput) -> Self {
+        match output {
+            crate::ToolOutput::Verbatim {
+                text,
+                total_lines,
+                start_line,
+            } => Self {
+                verbatim: true,
+                total_lines: Some(*total_lines),
+                start_line: Some(*start_line),
+                permission_denied: false,
+                global_blocker: None,
+                status: "success".into(),
+                summary: "Operation succeeded".into(),
+                diagnostics: Vec::new(),
+                raw_output: text.clone(),
+                truncated: false,
+            },
+            crate::ToolOutput::Text(text)
+            | crate::ToolOutput::Image {
+                description: text, ..
+            } => Self::new(true, text.clone()),
+        }
+    }
+
+    /// Keep a complete source-line prefix within the supplied context allowance.
+    /// Stored source coordinates survive repeated compaction and session restore.
+    #[must_use]
+    pub fn compact_verbatim(&self, max_chars: usize) -> Self {
+        let mut result = self.clone();
+        let mut remaining = max_chars;
+        let mut end = 0;
+        for line in self.raw_output.split_inclusive('\n') {
+            let length = line.chars().count();
+            if length > remaining {
+                break;
+            }
+            remaining -= length;
+            end += line.len();
+        }
+        result.truncated |= end < self.raw_output.len();
+        result.raw_output.truncate(end);
+        result
+    }
+
     #[must_use]
     pub fn from_legacy(raw_output: String) -> Self {
         let first = raw_output.lines().next().unwrap_or_default();
@@ -118,7 +242,7 @@ impl ToolResult {
                     .map(|line| json!({"message":line}))
                     .collect()
             });
-        Self { permission_denied: false, global_blocker: None, status: if success { "success" } else { "error" }.into(),
+        Self { verbatim: false, total_lines: None, start_line: None, permission_denied: false, global_blocker: None, status: if success { "success" } else { "error" }.into(),
             summary: if success { "Operation succeeded" } else { "Operation failed; repair the reported diagnostic locally and run the smallest relevant check before broader tests" }.into(),
             diagnostics, raw_output, truncated: parsed.as_ref().and_then(|v| v["truncated"].as_bool()).unwrap_or(false) }
     }
@@ -126,6 +250,22 @@ impl ToolResult {
     /// Budget is supplied by `ContextBudget`, never by the tool or provider.
     #[must_use]
     pub fn model_view(&self, max_chars: usize) -> String {
+        if self.verbatim {
+            let result = self.compact_verbatim(max_chars);
+            let start = result.start_line.unwrap_or(1);
+            let shown = start
+                .saturating_sub(1)
+                .saturating_add(result.raw_output.split_inclusive('\n').count())
+                .min(result.total_lines.unwrap_or(usize::MAX));
+            return json!({
+                "verbatim": true, "status": result.status, "summary": result.summary,
+                "diagnostics": result.diagnostics, "output": result.raw_output,
+                "total_lines": result.total_lines, "start_line": start,
+                "shown_through_line": shown,
+                "next_start_line": (result.truncated || result.total_lines.is_some_and(|total| shown < total)).then(|| shown.saturating_add(1)),
+                "truncated": result.truncated, "raw_output_available": true
+            }).to_string();
+        }
         let pretty = serde_json::from_str::<Value>(&self.raw_output)
             .and_then(|value| serde_json::to_string_pretty(&value))
             .unwrap_or_else(|_| self.raw_output.clone());

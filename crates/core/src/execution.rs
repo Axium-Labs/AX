@@ -226,7 +226,7 @@ impl ExecutionState {
             .get("_ax_observe")
             .and_then(Value::as_str)
             .and_then(|pointer| {
-                serde_json::from_str::<Value>(&result.raw_output)
+                serde_json::from_str::<Value>(&result.source_text())
                     .ok()
                     .and_then(|v| v.pointer(pointer).cloned())
             })

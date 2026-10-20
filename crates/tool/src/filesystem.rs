@@ -1,8 +1,9 @@
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{Value, json};
+use std::fmt::Write as _;
 
-use crate::{SafetyLevel, Tool, ToolError};
+use crate::{SafetyLevel, Tool, ToolError, ToolOutput};
 
 pub struct FilesystemTool;
 
@@ -40,7 +41,7 @@ impl Tool for FilesystemTool {
     }
 
     fn description(&self) -> &str {
-        "Read, list or write a known path. `read` accepts a 1-based start_line/end_line range when sufficient; omit the range for full file context. `list` shows exactly one directory level and is not a discovery tool: prefer find_files/glob for unknown locations and search for text or symbols. After discovery, prefer direct reads for context; targeted searches within known files remain useful. Batch independent reads when possible. Prefer patch for localized edits; write creates or replaces a whole file and is appropriate for requested full-file rewrites or generated artifacts. Inspect existing content before replacing it; writes require approval."
+        "Read, list or write a known path. `read` accepts a 1-based start_line/end_line range when sufficient; omit the range for full file context. All reads return verbatim text with `N: ` line-number prefixes; these prefixes are not file content and must be omitted from patch text/expected_lines. Truncated results report total_lines, shown_through_line and next_start_line; continue with that start_line. `list` shows exactly one directory level and is not a discovery tool: prefer find_files/glob for unknown locations and search for text or symbols. After discovery, prefer direct reads for context; targeted searches within known files remain useful. Batch independent reads when possible. Prefer patch for localized edits; write creates or replaces a whole file and is appropriate for requested full-file rewrites or generated artifacts. Inspect existing content before replacing it; writes require approval."
     }
 
     fn guidance(&self) -> Option<&'static str> {
@@ -92,25 +93,12 @@ impl Tool for FilesystemTool {
                 start_line,
                 end_line,
             } => {
-                let text = tokio::fs::read_to_string(&path)
-                    .await
-                    .map_err(|error| crate::path_error(std::path::Path::new(&path), &error))?;
-                if start_line.is_none() && end_line.is_none() {
-                    return Ok(text);
-                }
-                let start = start_line.unwrap_or(1);
-                let end = end_line.unwrap_or(start.saturating_add(79));
-                if start == 0 || end < start {
-                    return Err(ToolError::InvalidInput("invalid line range".into()));
-                }
-                Ok(text
-                    .lines()
-                    .enumerate()
-                    .skip(start - 1)
-                    .take(end - start + 1)
-                    .map(|(i, line)| format!("{}: {line}", i + 1))
-                    .collect::<Vec<_>>()
-                    .join("\n"))
+                let ToolOutput::Verbatim { text, .. } =
+                    read_file(&path, start_line, end_line).await?
+                else {
+                    unreachable!("file reads always declare verbatim text");
+                };
+                Ok(text)
             }
             FilesystemInput::List { path } => {
                 let mut entries = tokio::fs::read_dir(&path)
@@ -136,6 +124,21 @@ impl Tool for FilesystemTool {
         }
     }
 
+    async fn execute_output(&self, input: Value) -> Result<ToolOutput, ToolError> {
+        let parsed: FilesystemInput = serde_json::from_value(input.clone())
+            .map_err(|error| ToolError::InvalidInput(error.to_string()))?;
+        if let FilesystemInput::Read {
+            path,
+            start_line,
+            end_line,
+        } = parsed
+        {
+            read_file(&path, start_line, end_line).await
+        } else {
+            self.execute(input).await.map(ToolOutput::Text)
+        }
+    }
+
     fn resources(&self, input: &Value) -> Vec<crate::ResourceAccess> {
         let Some(path) = input["path"].as_str() else {
             return vec![crate::ResourceAccess::exclusive()];
@@ -147,6 +150,42 @@ impl Tool for FilesystemTool {
             crate::ResourceAccess::read(resource)
         }]
     }
+}
+
+async fn read_file(
+    path: &str,
+    start_line: Option<usize>,
+    end_line: Option<usize>,
+) -> Result<ToolOutput, ToolError> {
+    let text = tokio::fs::read_to_string(path)
+        .await
+        .map_err(|error| crate::path_error(std::path::Path::new(path), &error))?;
+    let start = start_line.unwrap_or(1);
+    let end = end_line.unwrap_or_else(|| {
+        if start_line.is_none() {
+            usize::MAX
+        } else {
+            start.saturating_add(79)
+        }
+    });
+    if start == 0 || end < start {
+        return Err(ToolError::InvalidInput("invalid line range".into()));
+    }
+    let total_lines = text.split_inclusive('\n').count();
+    let numbered = text
+        .split_inclusive('\n')
+        .enumerate()
+        .skip(start - 1)
+        .take(end.saturating_sub(start).saturating_add(1))
+        .fold(String::new(), |mut numbered, (i, line)| {
+            let _ = write!(numbered, "{}: {line}", i + 1);
+            numbered
+        });
+    Ok(ToolOutput::Verbatim {
+        text: numbered,
+        total_lines,
+        start_line: start,
+    })
 }
 
 #[cfg(test)]
@@ -162,7 +201,7 @@ mod tests {
             .execute(json!({"operation":"read","path":path,"start_line":2,"end_line":2}))
             .await
             .unwrap();
-        assert_eq!(result, "2: two");
+        assert_eq!(result, "2: two\n");
         let error = FilesystemTool
             .execute(json!({"operation":"read","path":root.join("missing.rs")}))
             .await

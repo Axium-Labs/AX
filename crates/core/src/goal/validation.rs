@@ -469,7 +469,7 @@ impl AgentKernel {
                         .0
                         .write()
                         .unwrap()
-                        .insert(call_id.clone(), raw.clone());
+                        .insert(call_id.clone(), raw.clone().into());
                     self.checkpoint_queue(checkpoint)?;
                     self.checkpoint_goal_host().await?;
                     return Err(AgentError::GoalStopped {
@@ -493,7 +493,7 @@ impl AgentKernel {
                 .0
                 .write()
                 .unwrap()
-                .insert(call_id, result.content);
+                .insert(call_id, result.content.into());
             evidence.push(receipt);
             self.checkpoint_queue(checkpoint)?;
             self.checkpoint_goal_host().await?;
@@ -587,11 +587,11 @@ fn parse_result(
             }),
         ValidatorKind::Host { .. } => {
             // Host tools may return the receipt directly or in the standard MCP envelope.
-            serde_json::from_str::<Value>(&result.raw_output)
+            serde_json::from_str::<Value>(&result.source_text())
                 .ok()
                 .and_then(|value| {
                     if value.get("protocol").is_some() {
-                        return Some(result.raw_output.clone());
+                        return Some(result.source_text().into_owned());
                     }
                     if value["isError"] == true {
                         return None;

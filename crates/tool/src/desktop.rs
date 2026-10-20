@@ -303,7 +303,7 @@ impl Tool for DesktopTool {
     }
     async fn execute(&self, input: Value) -> Result<String, ToolError> {
         match self.execute_output_authorized(input, &[], None).await? {
-            crate::ToolOutput::Text(text) => Ok(text),
+            crate::ToolOutput::Text(text) | crate::ToolOutput::Verbatim { text, .. } => Ok(text),
             crate::ToolOutput::Image { description, .. } => Ok(description),
         }
     }

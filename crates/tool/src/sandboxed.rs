@@ -106,7 +106,7 @@ impl Tool for SandboxedTool {
     }
     async fn execute(&self, input: Value) -> Result<String, ToolError> {
         match self.execute_output(input).await? {
-            ToolOutput::Text(text) => Ok(text),
+            ToolOutput::Text(text) | ToolOutput::Verbatim { text, .. } => Ok(text),
             ToolOutput::Image { .. } => {
                 Err(ToolError::Execution("multimodal output required".into()))
             }

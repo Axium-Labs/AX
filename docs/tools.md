@@ -178,14 +178,44 @@ Prefer `patch` for localized edits. `filesystem.write` creates or replaces the
 entire file, which suits requested full-file rewrites and generated artifacts;
 inspect existing content before replacing it. It does not append and still uses
 the existing write permission path. `filesystem.read` supports line ranges when
-sufficient and full-file reads when context requires them.
+sufficient and full-file reads when context requires them. Both forms return
+`N: line` with original 1-based file coordinates. The `N: ` prefix is display
+metadata, not file content: omit it from patch text and `expected_lines`. Read
+text retains the file's line endings (including CRLF), indentation, compact JSON
+formatting and final newline.
 
 Text results are stored as lossless `ToolResult` envelopes: `status`
 (`success`/`error`), `summary`, `diagnostics`, `raw_output`, `truncated`. Model
-projections derive from `ContextBudget`, retain key errors and remove redundant
-compiler warnings. Raw checkpoints remain authoritative.
+projections derive from `ContextBudget`. Tools declare source text through
+`ToolOutput::Verbatim { text, total_lines, start_line }` returned by
+`Tool::execute_output`; its default implementation keeps existing text behavior.
+The scheduler preserves this declaration in the envelope's additive `verbatim`,
+`total_lines` and `start_line` fields. Missing fields in old snapshots default to
+ordinary text behavior; the runtime never guesses source semantics from a tool
+name or the content itself.
+
+Successful verbatim results have empty `diagnostics`: words such as `error`,
+`failed` or `conflict` in a file are source content. Their model projection does
+not parse/pretty-print JSON or filter `warning:` lines. When the
+`ContextBudget::tool_result_chars()` allowance is exceeded, the projection keeps
+only complete leading lines and reports `total_lines`, `shown_through_line`,
+`next_start_line` and `truncated: true`. Continue with `filesystem.read` using
+that `start_line`. A single line larger than the allowance cannot be shown in
+part: the body is empty and `next_start_line` remains the first undisplayed line.
+Ordinary text results retain their existing diagnostic extraction, JSON
+formatting and compiler-warning cleanup. Raw checkpoints remain authoritative.
+See [ADR 0031](adr/0031-tool-declared-verbatim-output.md).
+
 `tool_output(call_id, start_line, end_line)` reads retained raw ranges on demand,
-including after restore. Typed DAG references still resolve the original value.
+including after restore. New verbatim cache entries keep the result envelope and
+its source metadata; old plain-string entries remain readable. For file receipts,
+ranges use original file coordinates within the retained read, preserving the
+existing prefixes and line terminators without adding another number prefix.
+Ordinary shell receipt reads keep their existing JSON formatting and line-number
+behavior. Typed DAG references, JSON work inventories and `_ax_observe` consume
+the original source value through `ToolResult::source_text()`: it removes the
+exact declared sequence of display prefixes on a separate copy. Stored and
+model-visible bodies retain those prefixes and unchanged source bytes.
 
 Nonzero shell exits fail. ACP live updates and replay retain failure status,
 result envelopes, original call IDs and tool names. ACP `turn_changes` lists

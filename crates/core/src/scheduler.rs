@@ -251,8 +251,10 @@ fn resolve(input: &Value, jobs: &[Job], outputs: &[Option<Message>]) -> Result<V
                 .position(|job| job.id == id)
                 .and_then(|index| outputs[index].as_ref())
                 .ok_or_else(|| ToolError::InvalidInput(format!("unresolved tool result: {id}")))?;
-            let raw = serde_json::from_str::<tool::ToolResult>(&output.content)
-                .map_or_else(|_| output.content.clone(), |result| result.raw_output);
+            let raw = serde_json::from_str::<tool::ToolResult>(&output.content).map_or_else(
+                |_| output.content.clone(),
+                |result| result.source_text().into_owned(),
+            );
             let value = serde_json::from_str(&raw).unwrap_or(Value::String(raw));
             if let Some(pointer) = object.get("pointer").and_then(Value::as_str) {
                 return value.pointer(pointer).cloned().ok_or_else(|| {
@@ -530,7 +532,7 @@ fn reused_message(id: &str, first: &str, output: &Message) -> (Message, tool::To
 fn message(id: &str, result: Result<ToolOutput, ToolError>) -> Message {
     let envelope = envelope(&result);
     match result.unwrap_or_else(|error| ToolOutput::Text(error.to_string())) {
-        ToolOutput::Text(_) => {
+        ToolOutput::Text(_) | ToolOutput::Verbatim { .. } => {
             Message::tool(id, serde_json::to_string(&envelope).unwrap_or_default())
         }
         ToolOutput::Image {
@@ -549,17 +551,16 @@ fn message(id: &str, result: Result<ToolOutput, ToolError>) -> Message {
 }
 
 fn envelope(result: &Result<ToolOutput, ToolError>) -> tool::ToolResult {
-    let raw = match result {
-        Ok(
-            ToolOutput::Text(text)
-            | ToolOutput::Image {
-                description: text, ..
-            },
-        )
-        | Err(ToolError::Execution(text) | ToolError::InvalidInput(text)) => text.clone(),
-        Err(error) => error.to_string(),
+    let mut envelope = match result {
+        Ok(output) => tool::ToolResult::from_output(output),
+        Err(error) => {
+            let raw = match error {
+                ToolError::Execution(text) | ToolError::InvalidInput(text) => text.clone(),
+                error => error.to_string(),
+            };
+            tool::ToolResult::new(false, raw)
+        }
     };
-    let mut envelope = tool::ToolResult::new(result.is_ok(), raw);
     envelope.permission_denied = matches!(
         result,
         Err(ToolError::PermissionDenied(_) | ToolError::SandboxViolation(_))

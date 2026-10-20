@@ -385,6 +385,13 @@ impl ModHost {
                 .await
             {
                 Ok(ToolOutput::Text(result)) => json!({"result":result,"isError":false}),
+                Ok(ToolOutput::Verbatim {
+                    text,
+                    total_lines,
+                    start_line,
+                }) => {
+                    json!({"result":text,"isError":false,"verbatim":{"total_lines":total_lines,"start_line":start_line}})
+                }
                 Ok(ToolOutput::Image {
                     description,
                     media_type,
@@ -434,6 +441,21 @@ impl ModHost {
             .get("result")
             .context("Mod tool hook must return {result} or call next")
             .map_err(|error| ToolError::Execution(error.to_string()))?;
+        if let (Some(text), Some(total_lines), Some(start_line)) = (
+            output.as_str(),
+            result["verbatim"]["total_lines"]
+                .as_u64()
+                .and_then(|n| usize::try_from(n).ok()),
+            result["verbatim"]["start_line"]
+                .as_u64()
+                .and_then(|n| usize::try_from(n).ok()),
+        ) {
+            return Ok(ToolOutput::Verbatim {
+                text: text.into(),
+                total_lines,
+                start_line,
+            });
+        }
         Ok(ToolOutput::Text(
             output
                 .as_str()

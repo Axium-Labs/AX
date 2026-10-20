@@ -297,11 +297,17 @@ fn recent_raw_start(messages: &[Message], budget: usize) -> usize {
     start
 }
 
-/// Compact one oversized tool result into a bounded diagnostic slice of itself:
-/// a few leading lines plus lines that look like diagnostics. The allowance is
-/// supplied by the caller's `ContextBudget`, so this tier owns no private
-/// character count.
+/// Keep verbatim results as typed envelopes containing complete leading lines.
+/// Other oversized results retain a few leading lines and likely diagnostics.
+/// The allowance comes from `ContextBudget`, never a private character count.
 fn compact_tool_output(output: &str, allowance_chars: usize) -> Option<String> {
+    if let Ok(result) = serde_json::from_str::<tool::ToolResult>(output)
+        && result.verbatim
+    {
+        let compacted = result.compact_verbatim(allowance_chars);
+        let short = serde_json::to_string(&compacted).ok()?;
+        return (estimate_text_tokens(&short) < estimate_text_tokens(output)).then_some(short);
+    }
     let per_line = (allowance_chars / 8).max(1);
     let retained_total = (allowance_chars * 3 / 4).max(per_line);
     if output.len() <= retained_total {

@@ -170,8 +170,9 @@ impl AgentKernel {
             if let Some(value) = message
                 .content
                 .strip_prefix(crate::long_project::RESULT_PREFIX)
-                && let Ok(results) =
-                    serde_json::from_str::<std::collections::HashMap<String, String>>(value)
+                && let Ok(results) = serde_json::from_str::<
+                    std::collections::HashMap<String, tool::RetainedOutput>,
+                >(value)
                 && let Ok(mut cache) = self.result_reader.0.write()
             {
                 cache.extend(results);
@@ -183,7 +184,9 @@ impl AgentKernel {
                 && let Ok(result) = serde_json::from_str::<tool::ToolResult>(&message.content)
                 && let Ok(mut store) = self.result_reader.0.write()
             {
-                store.insert(id.clone(), result.raw_output);
+                store
+                    .entry(id.clone())
+                    .or_insert_with(|| tool::RetainedOutput::from(&result));
             }
         }
         self.messages = messages;

@@ -402,7 +402,12 @@ impl AgentKernel {
                 .collect();
             for message in round.iter_mut().filter(|m| m.role == model::Role::Tool) {
                 if let Ok(result) = serde_json::from_str::<tool::ToolResult>(&message.content) {
-                    message.content = result.model_view(budget.tool_result_chars());
+                    message.content = if result.verbatim {
+                        serde_json::to_string(&result.compact_verbatim(budget.tool_result_chars()))
+                            .unwrap_or_default()
+                    } else {
+                        result.model_view(budget.tool_result_chars())
+                    };
                 }
             }
             let allowance = budget.recent_raw_budget().min(
@@ -414,6 +419,18 @@ impl AgentKernel {
             while crate::estimate_tokens(&round) > allowance {
                 let mut changed = false;
                 for message in round.iter_mut().filter(|m| m.role == model::Role::Tool) {
+                    if let Ok(result) = serde_json::from_str::<tool::ToolResult>(&message.content)
+                        && result.verbatim
+                    {
+                        if !result.raw_output.is_empty() {
+                            let compacted = result.compact_verbatim(
+                                result.raw_output.chars().count().saturating_sub(1),
+                            );
+                            message.content = serde_json::to_string(&compacted).unwrap_or_default();
+                            changed = true;
+                        }
+                        continue;
+                    }
                     if let Ok(mut value) =
                         serde_json::from_str::<serde_json::Value>(&message.content)
                         && let Some(output) = value["output"].as_str().filter(|s| !s.is_empty())

@@ -71,7 +71,7 @@ impl Tool for WrappedTool {
     }
     async fn execute(&self, input: Value) -> Result<String, ToolError> {
         match self.execute_output_constrained(input, &[]).await? {
-            ToolOutput::Text(text) => Ok(text),
+            ToolOutput::Text(text) | ToolOutput::Verbatim { text, .. } => Ok(text),
             ToolOutput::Image { description, .. } => Ok(description),
         }
     }
@@ -122,7 +122,7 @@ impl Tool for ModTool {
     // Node mods are trusted extensions, so OS confinement rejects their unbound tools.
     async fn execute(&self, input: Value) -> Result<String, ToolError> {
         match self.execute_output_constrained(input, &[]).await? {
-            ToolOutput::Text(text) => Ok(text),
+            ToolOutput::Text(text) | ToolOutput::Verbatim { text, .. } => Ok(text),
             ToolOutput::Image { description, .. } => Ok(description),
         }
     }

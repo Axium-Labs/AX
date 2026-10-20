@@ -495,7 +495,7 @@ impl AgentKernel {
                             .0
                             .write()
                             .unwrap()
-                            .insert(id.clone(), result.raw_output);
+                            .insert(id.clone(), tool::RetainedOutput::from(&result));
                     }
                     let blocker = serde_json::from_str::<tool::ToolResult>(&message.content)
                         .ok()
@@ -541,7 +541,7 @@ impl AgentKernel {
         for result in &results {
             if let Ok(envelope) = serde_json::from_str::<tool::ToolResult>(&result.content)
                 && envelope.status == "success"
-                && let Err(reason) = self.admit_work_items(&envelope.raw_output)
+                && let Err(reason) = self.admit_work_items(&envelope.source_text())
             {
                 self.set_context("[ax-work-admission]\n", Some(Message::system(format!("[ax-work-admission]\nInvalid work inventory: {reason}. Correct complete task definitions."))));
             }

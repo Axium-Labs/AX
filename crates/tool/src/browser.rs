@@ -273,6 +273,7 @@ impl Tool for BrowserTool {
     async fn execute(&self, input: Value) -> Result<String, ToolError> {
         match self.execute_output_authorized(input, &[], None).await? {
             ToolOutput::Text(text)
+            | ToolOutput::Verbatim { text, .. }
             | ToolOutput::Image {
                 description: text, ..
             } => Ok(text),

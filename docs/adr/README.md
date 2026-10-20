@@ -89,3 +89,5 @@ What becomes easier, what becomes harder, and what we accepted.
 - [0029 - Evidence-driven handoff](0029-evidence-driven-handoff.md) - bounded error recovery and reporting self-review before questions and ordinary finals.
 
 - [0030 - Unified model-selected delegation](0030-unified-model-selected-delegation.md) - task-neutral model decisions with shared local concurrency, depth and permission ceilings.
+
+- [0031 - Tool-declared verbatim output](0031-tool-declared-verbatim-output.md) - lossless source semantics and line-aware context projection declared by each tool execution.

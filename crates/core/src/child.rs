@@ -316,7 +316,9 @@ impl AgentKernel {
                 && let Ok(result) = serde_json::from_str::<tool::ToolResult>(&message.content)
                 && let Ok(mut store) = kernel.result_reader.0.write()
             {
-                store.insert(id.clone(), result.raw_output);
+                store
+                    .entry(id.clone())
+                    .or_insert_with(|| tool::RetainedOutput::from(&result));
             }
         }
         kernel.execution_root = Some(run.workspace_root().to_path_buf());

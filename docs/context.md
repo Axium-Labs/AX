@@ -66,6 +66,25 @@ budget** rather than fixed message count, and guarantees it never cuts through
 an unfinished tool-call round. It is used both when resuming a session and
 when the runtime assembles each request.
 
+### Tool result projection
+
+Before each request, `ToolResult::model_view` uses
+`ContextBudget::tool_result_chars()` to bound the visible body. Tools declare
+verbatim source output through `ToolOutput::Verbatim`; the scheduler stores
+`verbatim`, `total_lines` and `start_line` in the lossless result envelope.
+Old envelopes without these additive fields deserialize with ordinary text
+semantics. No tool-name matching determines whether an output is source text.
+
+Verbatim bodies retain their exact text, including JSON whitespace, `warning:`
+lines, CRLF and the final newline; file-read display prefixes (`N: `) carry the
+original file coordinates. Source content does not become `diagnostics`.
+Oversized bodies are clipped only between complete lines within the shared
+allowance. The projection supplies `total_lines`, `shown_through_line` and,
+when clipped, `next_start_line`, so the next read can resume at an exact file
+line. A line larger than the allowance produces an empty body and the same next
+line instead of a partial source line. Non-verbatim results retain their existing
+JSON formatting, diagnostic extraction and warning cleanup.
+
 ## Compression
 
 Compression affects only what is fed to the model. Raw messages remain in
@@ -77,6 +96,22 @@ the watermark advances.
 1. Tool-output cleanup;
 2. Deduplication;
 3. Semantic compression when still needed.
+
+Tool-output cleanup recognizes the stored verbatim declaration and retains a
+complete leading-line prefix with its original coordinates and truncation state.
+It does not collect diagnostic-looking source lines or run ordinary text cleanup
+over the body. Same-round result reuse changes the envelope summary only.
+Request preparation and Session rotation keep the typed envelope rather than
+reconstructing it from raw text, so subsequent requests retain the same source
+semantics. Semantic compression may still replace older conversation with a
+summary; the authoritative raw result remains available. See
+[ADR 0031](adr/0031-tool-declared-verbatim-output.md).
+
+The retained-output cache preserves verbatim envelopes and their source
+coordinates across restore; legacy plain-string entries are still supported.
+`tool_output` ranges over a file receipt use original file coordinates and keep
+its existing prefixes and line endings. Ordinary shell receipt reads retain
+their existing formatting behavior.
 
 **Automatic** pressure checks run before each model request, using
 projected next-request size against the shared `ContextBudget` pool.

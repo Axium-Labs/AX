@@ -11,7 +11,7 @@ pub use sandboxed::{SandboxedTool, sandbox_worker};
 mod workspace;
 pub use workspace::{RunContext, WorkspaceTool};
 mod result;
-pub use result::{ResultReader, ToolResult, path_error};
+pub use result::{ResultReader, RetainedOutput, ToolResult, path_error};
 mod discovery;
 mod find;
 mod patch;
@@ -94,6 +94,13 @@ pub enum ToolError {
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub enum ToolOutput {
     Text(String),
+    /// Tool-declared source text, already numbered without changing its bytes.
+    /// Metadata describes the original source, including for a ranged read.
+    Verbatim {
+        text: String,
+        total_lines: usize,
+        start_line: usize,
+    },
     Image {
         description: String,
         media_type: String,
