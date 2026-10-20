@@ -345,10 +345,6 @@ impl TaskQueue {
     }
 
     pub fn normalize_legacy(&mut self) {
-        // Saved child receipts prove a previous explicit delegation; resume it.
-        if self.tasks.iter().any(|t| t.child.is_some()) {
-            self.delegate = true;
-        }
         if self.goal_id.is_empty() {
             use std::hash::{Hash, Hasher};
             let mut hash = std::collections::hash_map::DefaultHasher::new();
@@ -425,9 +421,18 @@ impl TaskQueue {
             .rev()
             .filter(|m| m.role == model::Role::System)
             .find_map(|m| {
-                m.content
-                    .strip_prefix(STATE_PREFIX)
-                    .and_then(|v| serde_json::from_str(v).ok())
+                m.content.strip_prefix(STATE_PREFIX).and_then(|raw| {
+                    let value = serde_json::from_str::<Value>(raw).ok()?;
+                    let mut queue: Self = serde_json::from_value(value.clone()).ok()?;
+                    // Only checkpoints without an explicit mode infer it
+                    // from child handles. Explicit false must survive resume.
+                    if value.get("delegate").is_none()
+                        && queue.tasks.iter().any(|task| task.child.is_some())
+                    {
+                        queue.delegate = true;
+                    }
+                    Some(queue)
+                })
             });
         messages.retain(|m| {
             m.role != model::Role::System
@@ -473,9 +478,9 @@ impl TaskQueue {
 pub(crate) fn spec() -> ToolSpec {
     ToolSpec { kind: "function", function: FunctionSpec {
         name: TOOL_NAME.into(),
-        description: "Use only when the request is genuinely multi-item or long-running work that benefits from a tracked queue; a request you can complete directly or with a few calls needs no queue. Do ordinary setup/data reads before creating a queue. Queue concrete user deliverables, never a discovery checklist. Prefer task_source work mapping for projected tables. Register concrete executable work once known; append newly discovered items without replacing executed work. Prefer execution=children for independent work. Lists of instructions are not tasks. workspace declares repo_url and exact revision; output_dir preserves child artifacts before cleanup. Use alone in a round. execution=children delegates complete task inputs to isolated children; the runtime dispatches EVERY independent task at once, bounded by its own concurrency limit, and keeps dependent tasks waiting for their predecessor. dependencies are zero-based prior task indices. Declare resources (path or name, optional write flag) so two tasks that write the same thing never run at the same time. Finish the current task with completed/failed/skipped and an outcome. Consider recovery before failure; recovery is advisory. cancel stops the goal; actual runtime global blockers are classified by the controller. Text-only responses never advance tasks.".into(),
+        description: "Use only when genuinely multi-item or long-running work benefits from a tracked queue; complete small requests directly. Do setup/data reads before queueing concrete user deliverables, never discovery checklists or instruction rows. Use task_source work mapping for projected tables; new inventories use controller execution. Choose execution=children when independent work benefits from delegation and current limits allow it. action=configure changes the existing queue's execution mode without replacing tasks, dependencies or receipts; provide execution. Register known work with start and append newly discovered items without replacing executed work. workspace declares repo_url and exact revision; output_dir preserves child artifacts before cleanup. Use alone in a round. execution=children delegates complete inputs to isolated children; ready non-conflicting work shares the same concurrency and depth ceilings as ordinary subagents. Dependencies keep successors waiting; use them to honor sequential requests. dependencies are zero-based prior task indices. Declare resources (path or name, optional write flag) to serialize conflicting writes. Finish controller tasks with completed/failed/skipped and an outcome. Consider recovery before failure; recovery is advisory. cancel stops the goal; actual runtime global blockers are classified by the controller. Text-only responses never advance tasks.".into(),
         parameters: json!({"type":"object","properties":{
-            "action":{"type":"string","enum":["start","append","finish","block","cancel"]},
+            "action":{"type":"string","enum":["start","append","configure","finish","block","cancel"]},
             "execution":{"type":"string","enum":["controller","children"]},"dependencies":{"type":"array","items":{"type":"array","items":{"type":"integer","minimum":0}}},
             "overall_goal":{"type":"string"},"tasks":{"type":"array","minItems":2,"items":{"anyOf":[{"type":"string","description":"Complete independently executable task input, not a heading"},{"type":"object","properties":{"title":{"type":"string"},"input":{"type":"string","description":"Complete independently executable task input including necessary data/context"},"workspace":{"type":"object","properties":{"mode":{"type":"string","enum":["inherit","git","empty"]},"repo_url":{"type":"string"},"revision":{"type":"string"},"subdir":{"type":"string"}},"required":["mode"],"additionalProperties":false},"output_dir":{"type":"string"},"resources":{"type":"array","description":"Files or named resources this task touches","items":{"anyOf":[{"type":"string","description":"Path read by this task"},{"type":"object","properties":{"path":{"type":"string"},"name":{"type":"string"},"all":{"type":"boolean"},"write":{"type":"boolean","description":"True when the task modifies it"}},"additionalProperties":false}]}}},"required":["title","input"],"additionalProperties":false}]}},
             "evidence_call_ids":{"type":"array","items":{"type":"string"}},"status":{"type":"string","enum":["completed","failed","skipped"]},"reason":{"type":"string"}
@@ -621,6 +626,19 @@ pub(crate) fn apply(
                 plan.goal = queue.as_ref().and_then(|q| q.goal.clone());
                 *queue = Some(plan);
             }
+            Ok(())
+        }
+        Some("configure") => {
+            let delegate = match input["execution"].as_str() {
+                Some("children") => true,
+                Some("controller") => false,
+                _ => return Err("configure requires execution=controller or children".into()),
+            };
+            let queue = queue
+                .as_mut()
+                .filter(|queue| queue.goal_id == goal_id && queue.active())
+                .ok_or("no active goal")?;
+            queue.delegate = delegate;
             Ok(())
         }
         Some("finish") => {

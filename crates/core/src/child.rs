@@ -218,6 +218,50 @@ fn terminal_result_reviewed(messages: &[Message], reviewed: bool) -> Option<Chil
 }
 
 impl AgentKernel {
+    /// Apply the same parent ceiling and turn/tree budget to every host result.
+    /// Hosts provision isolation; they cannot create a fresh delegation allowance.
+    pub(crate) fn bind_child_delegation(&self, child: &mut PreparedChild) {
+        child.kernel.approval = std::sync::Arc::clone(&self.approval);
+        let host_profiles = std::mem::take(&mut child.kernel.permission_profiles);
+        child
+            .kernel
+            .permission_profiles
+            .clone_from(&self.permission_profiles);
+        // Standard hosts already fork the parent's profiles. Preserve extra
+        // host restrictions without doubling the inherited list at every level.
+        if serde_json::to_value(&host_profiles).ok()
+            != serde_json::to_value(&self.permission_profiles).ok()
+        {
+            child.kernel.permission_profiles.extend(host_profiles);
+        }
+        if child.kernel.permission_profiles.is_empty() {
+            child
+                .kernel
+                .permission_profiles
+                .push(tool::PermissionProfile::default());
+        }
+        child.kernel.subagent_config = self.subagent_config;
+        child.kernel.subagent_depth = self.subagent_depth.saturating_add(1);
+        if child.kernel.child_run.is_none() {
+            child.kernel.child_run = Some(child.run.clone());
+        }
+        child.kernel.subagent_pool.clone_from(&self.subagent_pool);
+        child.kernel.subagent_tools.clone_from(&self.subagent_tools);
+        child
+            .kernel
+            .agent_templates
+            .clone_from(&self.agent_templates);
+        child.kernel.child_models.clone_from(&self.child_models);
+        child.kernel.child_host = self.child_host.as_ref().map(|host| {
+            host.fork_for_child(child.kernel.child_run.as_ref().unwrap_or(&child.run))
+                .unwrap_or_else(|| std::sync::Arc::clone(host))
+        });
+        // Never keep a delegation tool that is still bound to another kernel.
+        child.kernel.tools.remove("subagent");
+        child.kernel.tools.remove("subagent_fork");
+        child.kernel.tools.remove("spawn_agent");
+    }
+
     #[must_use]
     pub fn with_child_host(mut self, host: std::sync::Arc<dyn ChildHost>) -> Self {
         self.child_host = Some(host);
@@ -238,13 +282,13 @@ impl AgentKernel {
     /// Bounded concurrency for independently ready children.
     #[must_use]
     pub fn with_child_concurrency(mut self, concurrency: usize) -> Self {
-        self.child_concurrency = concurrency.clamp(1, 64);
+        self.subagent_config.max_concurrent = concurrency.clamp(1, 64);
         self
     }
 
     #[must_use]
     pub fn child_concurrency(&self) -> usize {
-        self.child_concurrency
+        self.subagent_config.max_concurrent.clamp(1, 64)
     }
 
     /// Forks only explicit input/history and tools rebound to this child's scope.
@@ -277,6 +321,7 @@ impl AgentKernel {
         }
         kernel.execution_root = Some(run.workspace_root().to_path_buf());
         kernel.child_run = Some(run);
+        kernel.subagent_depth = self.subagent_depth.saturating_add(1);
         kernel.child_host = None;
         kernel
     }

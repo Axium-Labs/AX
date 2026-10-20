@@ -87,3 +87,5 @@ What becomes easier, what becomes harder, and what we accepted.
 - [0028 - Native desktop adapters](0028-native-desktop-adapters.md) - shared app/action permissions with native Windows, Linux and macOS drivers.
 
 - [0029 - Evidence-driven handoff](0029-evidence-driven-handoff.md) - bounded error recovery and reporting self-review before questions and ordinary finals.
+
+- [0030 - Unified model-selected delegation](0030-unified-model-selected-delegation.md) - task-neutral model decisions with shared local concurrency, depth and permission ceilings.

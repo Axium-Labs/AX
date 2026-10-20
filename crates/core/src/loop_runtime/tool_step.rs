@@ -329,20 +329,42 @@ impl AgentKernel {
         {
             let previous_queue = self.task_queue.clone();
             let queue_before = serde_json::to_string(&self.task_queue).unwrap();
+            let mut permission_denied = false;
             let result = if tool_calls.len() == 1 {
-                serde_json::from_str::<Value>(&tool_calls[0].function.arguments)
-                    .map_err(|error| error.to_string())
-                    .and_then(|input| {
+                async {
+                        let input = serde_json::from_str::<Value>(&tool_calls[0].function.arguments)
+                            .map_err(|error| error.to_string())?;
+                        if self.child_run.is_some() {
+                            return Err("task_queue is only available to the controller".into());
+                        }
+                        if input["execution"] == "children" && !self.queue_children_enabled() {
+                            return Err(format!(
+                                "Child delegation unavailable: {}. Use execution=controller or continue directly.",
+                                self.delegation_unavailable_reason().unwrap_or("queue delegation is controller-only")
+                            ));
+                        }
                         if input["action"] == "block" && !self.global_stop_evidenced(&input) {
                             return Err("Global stop requires an actual runtime global blocker. Local tool/skill/setup failures or untested resource assumptions cannot end the goal. Attempt the requested resource directly, recover setup, or record affected task failures and continue. User-exclusive decisions require request_user_input.".into());
                         }
+                        let mut updated_queue = self.task_queue.clone();
                         task_queue::apply(
-                            &mut self.task_queue,
+                            &mut updated_queue,
                             &input,
                             self.goal_id.as_deref().unwrap_or_default(),
                             self.parent_goal_id.as_deref(),
-                        )
-                    })
+                        )?;
+                        if input["execution"] == "children"
+                            && let Err(error) = self.authorize_queue_delegation(task_queue::TOOL_NAME, &input).await
+                        {
+                            permission_denied = matches!(error, tool::ToolError::PermissionDenied(_));
+                            return Err(error.to_string());
+                        }
+                        self.task_queue = updated_queue;
+                        if input["execution"] == "children" {
+                            self.continuation.queue_delegation_authorized = true;
+                        }
+                        Ok(())
+                    }.await
             } else {
                 Err("task_queue must be called alone; no tools in this round were executed".into())
             };
@@ -367,7 +389,8 @@ impl AgentKernel {
                     Err(reason) => format!("Queue update rejected: {reason}"),
                 });
                 let input = serde_json::from_str(&call.function.arguments).unwrap_or(Value::Null);
-                let envelope = tool::ToolResult::new(result.is_ok(), message.content.clone());
+                let mut envelope = tool::ToolResult::new(result.is_ok(), message.content.clone());
+                envelope.permission_denied = permission_denied;
                 let advanced = result.is_ok()
                     && queue_before != serde_json::to_string(&self.task_queue).unwrap();
                 self.execution.lock().unwrap().record_control(

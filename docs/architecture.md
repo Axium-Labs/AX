@@ -389,12 +389,22 @@ Once the model explicitly sets `execution="children"`, the runtime stops
 promoting one task per model round and dispatches the whole **ready frontier**
 instead. `pending` becomes ready when every dependency is `Completed`; every
 ready task whose declared `resources` do not overlap in-flight work is
-provisioned and started in the same batch, bounded by the supervisor's
-concurrency (`with_child_concurrency`, default 4). As children settle, newly
+provisioned and started in the same batch, bounded by the shared delegation
+pool (`SubagentConfig.max_concurrent`, default 8). `with_child_concurrency`
+remains a compatible setter for that same limit. Slots cover provisioning through
+receipt collection and are shared with ordinary subagents and descendants. As children settle, newly
 ready tasks are admitted immediately, so the controller never waits for one child
 before starting the next. A failed or timed-out child records its receipt and the
 frontier moves on. Cancelling or dropping the turn drops every child with it,
 because children are futures owned by the turn rather than detached tasks.
+
+Typed reader inventories start in controller mode; the model can explicitly
+choose children with `task_queue action=configure, execution=children` without
+replacing items. Admission and dispatch recheck the current depth and inherited
+tool restrictions, including on resume. Disabled restored delegation preserves
+child handles and receipts and reports the change to the model. Queue children
+inherit the absolute depth/configuration and can use ordinary delegation only
+below the cap; queue control remains controller-only.
 
 Conflict is decided by the existing resource model: a task may declare
 `resources` (path or name, with `write: true` when it modifies them) and two
@@ -532,12 +542,17 @@ There is no second loop or planner request. The adapter enforces bounded child
 admission and suppresses child content/reasoning in parent events, forwarding
 only compact lifecycle events. Delegated children rebind their own delegation
 tools only below the absolute depth cap and within inherited tool restrictions.
-All descendants share a concurrency pool, finite admission count and unique IDs;
+All descendants and queue children share a concurrency pool and absolute depth;
 nested admission rejects capacity exhaustion to avoid ancestor deadlocks.
+Ordinary subagents retain their 64-admission tree limit; queue batches are not
+capped at 64 total items. The general execution policy lets the main model judge
+the usefulness of delegation for research, writing, analysis, planning and coding,
+without a semantic classifier or role-specific split.
 Child hosts rebind provisioning to the immediate parent's workspace.
 CLI reloads global defaults plus project overrides before each turn. See
 [tools.md](tools.md#subagents), [ADR 0010](adr/0010-optional-subagents.md) and
-[ADR 0023](adr/0023-scoped-subagent-depth.md).
+[ADR 0023](adr/0023-scoped-subagent-depth.md) and
+[ADR 0030](adr/0030-unified-model-selected-delegation.md).
 
 ## Capability scope composition
 

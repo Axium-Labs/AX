@@ -559,14 +559,21 @@ call `prepare_subagents` before direct primitive use; normal agent turns
 prepare the handle automatically.
 
 Independent calls use the existing tool-round DAG and bounded concurrency.
-All levels share `max_concurrent` (default 8, 1–64); provisioning and ancestors
+Ordinary subagents and queue children at all levels share `max_concurrent`
+(default 8, 1–64); provisioning and ancestors
 waiting for their descendants count toward this bound. Root tasks can queue;
 nested tasks reject exhausted capacity instead of waiting on an occupied ancestor.
-At most 64 tasks are admitted across the turn's whole delegation tree.
+At most 64 ordinary subagents are admitted across the turn's delegation tree;
+queue inventories may contain more than 64 items and reuse the shared slots.
 `max_depth` accepts non-negative integers: 0 disables delegation, 1 permits direct
 children, and larger values permit further delegation up to that absolute depth.
-At the cap, both delegation tools are absent. The model chooses whether to call
-them; changing the limit does not spawn children or stop an already running turn.
+At the cap, both delegation tools are absent and queue child dispatch is rejected.
+The main model judges whether focused context, checking or parallel work justifies
+delegation across research, writing, analysis, planning and software tasks. No
+fixed profession or complexity threshold triggers a child. Small or tightly
+coupled work can stay with the main agent; user requests to work alone or in
+sequence take precedence. Changing the limit does not spawn children or stop an
+already running turn.
 Tools are a whitelist intersected with the child's rebound registry; unknown
 tools and delegation requests beyond the depth budget are rejected. Empty tools
 disables all child tools, including delegation. Provider/model/reasoning and the parent approval
@@ -683,20 +690,32 @@ model key is rejected; the child cannot create credentials or providers.
 Formatting alone never creates tasks. `TaskQueue::list_hints()` is optional
 metadata for a caller/model; it cannot schedule or spawn anything. The main
 model explicitly calls `task_queue(action="start", overall_goal, tasks)`.
-`execution="controller"` is the default; only explicit `execution="children"`
-delegates tasks through ChildHost. `dependencies` contains zero-based prior
+`execution="controller"` is the default, including new typed `ax_work_items`
+inventories; only explicit `execution="children"` delegates tasks through
+ChildHost. `action="configure"` requires `execution` and changes the current
+active queue's mode while preserving task IDs, dependencies, progress and receipts.
+Appending typed records preserves an existing explicit children choice when the
+current runtime permits it. `dependencies` contains zero-based prior
 task indices, one list per task. Invalid/forward dependencies are rejected;
 a failed dependency skips dependents while independent tasks continue.
 Queue responsibilities are state, dependencies, scheduling and outcomes.
 Old serialized queues retain their state; existing child receipts allow an
-explicit goal resume to continue an already delegated run.
+explicit goal resume to continue an already delegated run within current limits.
+Depth 0 or inherited empty delegation tools prevent both new and restored child
+dispatch. A restored prohibited queue retains its inventory/child handles and
+returns to controller execution with feedback, so it can continue directly.
 
 `resources` is optional per task: a bare string is a read of that path, and an
 object carries `path` or `name` plus `write`. The runtime refuses to run two
 tasks whose declared accesses conflict, so a shared file must be declared rather
 than assumed safe. All ready, non-conflicting tasks are dispatched in one batch
-and newly ready tasks are admitted as children settle; concurrency is the
-supervisor's, never a prompt instruction.
+and newly ready tasks are admitted as children settle; concurrency shares the
+ordinary subagent pool (default 8), never a separate prompt instruction or queue
+allowance. `with_child_concurrency` sets that same limit for embedders.
+Queue delegation uses the ordinary tools' declared Process/Safe permission
+boundary, including profile Deny/Ask and saved capability decisions. The current
+controller choice is authorized once before dispatch, not once per item; a new
+host turn rechecks authorization. Availability context is not a permission grant.
 
 ## Control tools and structured receipts
 
@@ -705,7 +724,7 @@ they change orchestration state instead of touching the world:
 
 | Tool | Purpose |
 |---|---|
-| `task_queue` | Create, finish, block or cancel a goal's tasks. |
+| `task_queue` | Create/append tasks, configure execution, finish, block or cancel a goal's tasks. |
 | `child_result` | Read a full child receipt by `child_id` (`full`, `findings`, `diagnostics`, `artifacts`, `diff`, `validation`, `metrics`); omit `child_id` to list receipts. |
 | `request_user_input` | Ask the user one structured question (`question`, `options`, `allow_free_text`) when the answer materially changes the result. |
 

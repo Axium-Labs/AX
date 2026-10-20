@@ -51,7 +51,6 @@ pub struct AgentKernel {
     pub(crate) child_host: Option<Arc<dyn ChildHost>>,
     pub(crate) child_run: Option<ChildRun>,
     pub(crate) child_budget: Option<ExecutionBudget>,
-    pub(crate) child_concurrency: usize,
     /// Controller-side receipt index. Durable, never part of the request.
     pub(crate) child_results: std::collections::BTreeMap<String, ChildResult>,
     /// Set while a `request_user_input` question is unanswered.

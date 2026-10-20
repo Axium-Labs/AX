@@ -13,6 +13,15 @@ work, and the runtime drives it to a terminal state. The runtime prompt and
 the per-capability guidance are injected at the start of the turn. See
 [agent-runtime.md](agent-runtime.md).
 
+The execution model decides whether useful subproblems can be delegated, across
+all task domains. Ordinary subagents and queue children use the same concurrency
+pool, inherited permissions and absolute depth ceiling. Typed data inventories
+default to controller execution; `task_queue action=configure` can explicitly
+select children without replacing the inventory. A restored queue whose current
+settings prohibit delegation receives model feedback and retains its task
+identities and receipts in controller mode. No classifier or extra planning
+request is introduced.
+
 ## Runtime state
 
 `continuation::TurnState` projects pending tool calls/results, task queue entries,

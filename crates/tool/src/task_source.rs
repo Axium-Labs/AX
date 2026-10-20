@@ -35,7 +35,7 @@ impl Tool for TaskSourceTool {
         "task_source"
     }
     fn description(&self) -> &'static str {
-        "Read only explicitly selected columns from parquet/JSON/CSV. Never load full parquet rows or answer fields for schema discovery. Use before task_queue when work items come from a table. Optional work mapping turns each record into a complete executable task and automatically registers/dispatches the inventory; no separate queue call is needed. Repository URL templates use {column} placeholders from selected fields only. Reader/setup errors are recoverable: install an available reader or use a projected fallback."
+        "Read only explicitly selected columns from parquet/JSON/CSV. Never load full parquet rows or answer fields for schema discovery. Use before task_queue when work items come from a table. Optional work mapping turns each record into a complete executable task and registers the inventory. A new inventory uses controller execution; explicitly choose task_queue action=configure execution=children when delegation helps and is available. Appending records preserves an existing explicit execution choice within runtime limits. Repository URL templates use {column} placeholders from selected fields only. Reader/setup errors are recoverable: install an available reader or use a projected fallback."
     }
     fn guidance(&self) -> Option<&'static str> {
         Some(

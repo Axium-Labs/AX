@@ -602,20 +602,31 @@ impl AgentKernel {
             {
                 return Err(AgentError::StepLimit(self.budget.max_steps));
             }
-            if self.child_host.is_some()
-                && self.task_queue.as_ref().is_some_and(|q| {
-                    q.delegate && q.state == QueueState::Active && child_dispatch::has_open_work(q)
-                })
-            {
-                // Dispatch the whole ready frontier at once; children that are
-                // independent run together, dependents wait for their
-                // predecessor, and one failure never stops the others.
-                if self.execute_ready_children(&emit, checkpoint).await? > 0 {
-                    if self.goal().is_some() {
-                        self.checkpoint_queue(checkpoint)?;
+            if self.task_queue.as_ref().is_some_and(|q| {
+                q.delegate && q.state == QueueState::Active && child_dispatch::has_open_work(q)
+            }) {
+                if let Err(reason) = self.ensure_queue_delegation_authorized().await {
+                    // Restored queues obey the current settings too. Keep task
+                    // identities and saved child handles for a later resume.
+                    self.task_queue.as_mut().unwrap().delegate = false;
+                    let feedback = Message::system(format!(
+                        "[ax-delegation-unavailable]\nChild delegation is currently unavailable: {reason}. The existing inventory is retained in controller execution. Continue authorized work directly; do not claim these items ran as children. Existing child handles and receipts remain available if delegation is enabled again."
+                    ));
+                    self.messages.push(feedback.clone());
+                    self.raw_turn_messages.push(feedback);
+                    self.checkpoint_queue(checkpoint)?;
+                    checkpoint(&self.raw_turn_messages)?;
+                } else {
+                    // Dispatch the whole ready frontier at once; children that are
+                    // independent run together, dependents wait for their
+                    // predecessor, and one failure never stops the others.
+                    if self.execute_ready_children(&emit, checkpoint).await? > 0 {
+                        if self.goal().is_some() {
+                            self.checkpoint_queue(checkpoint)?;
+                        }
+                        self.observe_goal_progress()?;
+                        continue;
                     }
-                    self.observe_goal_progress()?;
-                    continue;
                 }
             }
             steps_used = steps_used.saturating_add(1);

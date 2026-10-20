@@ -138,8 +138,15 @@ impl ModelProvider for DataProvider {
         };
         let result: Value = serde_json::from_str(&read.content).unwrap();
         assert_eq!(result["status"], "success");
-        let instances: Vec<usize> =
-            serde_json::from_str(result["output"].as_str().unwrap()).unwrap();
+        let dataset: Value = serde_json::from_str(result["output"].as_str().unwrap()).unwrap();
+        if dataset.get("ax_work_items").is_some() {
+            return Ok(call(
+                "delegate-inventory",
+                "task_queue",
+                &json!({"action":"configure","execution":"children"}),
+            ));
+        }
+        let instances: Vec<usize> = serde_json::from_value(dataset).unwrap();
         let tasks = instances.iter().map(|id| json!({
             "title":format!("instance {id}"),
             "input":format!("Process instance {id} from instances.json. Produce a terminal outcome."),
@@ -332,15 +339,8 @@ impl Fixture {
                     .iter()
                     .any(|m| m.content.starts_with("[ax-child-runtime]")))
                 .count(),
-            if fs::read_to_string(&self.provider.dataset)
-                .unwrap()
-                .contains("ax_work_items")
-            {
-                2
-            } else {
-                3
-            },
-            "typed inventory skips the manual plan round"
+            3,
+            "one data read, one explicit model delegation choice and one final answer"
         );
     }
     fn cleanup(self) {

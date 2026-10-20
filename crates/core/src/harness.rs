@@ -22,7 +22,9 @@ Missing venv, packages, runners, unavailable commands, no search matches and a s
 
 For edits, prefer structured patches and existing project scripts or format-aware serializers. Inspect the actual diff or changed region and use the smallest relevant validation before building on the edit. If an error appears after your change, compare with the pre-edit state before calling it pre-existing. Correct your own mistakes without overwriting unrelated changes. Change strategy after repeated failures instead of repeating speculative rewrites.
 
-Honor user-requested ordering: sequential work runs one item at a time; choose parallel execution only when compatible with the user goal. Do setup and data reads before queueing. Queue items must be concrete user deliverables, never a preliminary discovery/reporting checklist. Use task_source projected columns and work mapping for tables; it automatically registers records as children. Otherwise register concrete executable items with task_queue once known. Data readers may return {\"ax_work_items\":[{\"title\":...,\"input\":...,\"workspace\":...,\"output_dir\":...}]} to register work automatically. Each child input must include all its necessary data and output requirements, never sibling results or reference answers. Select allowed dataset columns at the reader, before loading data; execution and evaluator inputs stay separate.
+Decide whether to delegate from the actual task, available agents and current runtime limits. Proactively delegate bounded, self-contained work when focused context, independent checking or parallel progress is worth the coordination cost. This applies to research, writing, document review, data analysis, planning and software work; users need not name a profession or request subagents explicitly. Choose an applicable configured agent description or give a child a focused task. Complete small or tightly coupled work directly when splitting adds overhead. Do not delegate merely to fill slots or repeat work whose evidence is already sufficient. Honor user instructions to work alone or in sequence, existing authorization and permission denials. The main agent owns integration and the final result.
+
+Honor user-requested ordering: sequential work runs one item at a time; choose parallel execution only when compatible with the user goal. Do setup and data reads before queueing. Queue items must be concrete user deliverables, never a preliminary discovery/reporting checklist. Use task_source projected columns and work mapping for tables; it registers records without choosing delegation. Otherwise register concrete executable items with task_queue once known. Data readers may return {\"ax_work_items\":[{\"title\":...,\"input\":...,\"workspace\":...,\"output_dir\":...}]} to register work automatically. A new inventory runs in the controller until you explicitly choose task_queue execution=children (action=configure can change the existing queue without resending its items). Each child input must include all its necessary data and output requirements, never sibling results or reference answers. Select allowed dataset columns at the reader, before loading data; execution and evaluator inputs stay separate.
 
 A final answer requires every known item terminal and all requested durable reports written. Reconcile the report with current tool receipts, actual changed files and validation results. Distinguish attempted, changed, built, validated and externally delivered states; an unavailable measurement is unknown. Do not claim success, no change or a pre-existing fault without evidence. Use existing evidence when sufficient rather than rerunning unrelated checks. Freeze patches and save results before workspace cleanup. An unavailable official evaluator leaves official_resolved=null and does not prevent coding/local validation.";
 
@@ -126,6 +128,20 @@ impl AgentKernel {
             ))),
         );
         self.set_context("[ax-coding-harness]\n", Some(Message::system(POLICY)));
+        self.set_context(
+            "[ax-delegation-availability]\n",
+            Some(Message::system(format!(
+                "[ax-delegation-availability]\nCurrent structural availability, not an authorization grant. The model decides whether delegation helps; the runtime enforces these ceilings and inherited permissions. Waiting parents still occupy a concurrency slot. {}",
+                json!({
+                    "depth": self.subagent_depth,
+                    "max_depth": self.subagent_config.max_depth,
+                    "max_concurrent": self.subagent_config.max_concurrent,
+                    "ordinary_available": self.ordinary_delegation_enabled(),
+                    "queue_children_available": self.queue_children_enabled(),
+                    "unavailable_reason": self.delegation_unavailable_reason(),
+                })
+            ))),
+        );
         Ok(())
     }
 
@@ -190,9 +206,16 @@ impl AgentKernel {
             return Ok(false);
         }
         let goal = self.execution_state().overall_goal;
+        let execution = if self.queue_children_enabled()
+            && self.task_queue.as_ref().is_some_and(|queue| queue.delegate)
+        {
+            "children"
+        } else {
+            "controller"
+        };
         task_queue::apply(
             &mut self.task_queue,
-            &json!({"action": if append {"append"} else {"start"}, "overall_goal": goal, "tasks":items, "execution": if self.child_host.is_some() {"children"} else {"controller"}}),
+            &json!({"action": if append {"append"} else {"start"}, "overall_goal": goal, "tasks":items, "execution": execution}),
             self.goal_id.as_deref().unwrap_or_default(),
             self.parent_goal_id.as_deref(),
         )?;

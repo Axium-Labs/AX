@@ -44,7 +44,11 @@ kernel in `prepare_environment`:
   (`EnvironmentContext::detect`).
 - `[ax-coding-harness]` — the execution policy
   (`crates/core/src/harness.rs::POLICY`): recoverable setup observations,
-  queue discipline, child-input contracts and the terminal-state requirement.
+  model-selected delegation, queue discipline, child-input contracts and the
+  terminal-state requirement.
+- `[ax-delegation-availability]` — effective depth/concurrency ceilings and
+  structural availability of ordinary delegation and queue children. It is
+  replaced each turn and never grants permission.
 
 Applicable workspace instructions (`AGENTS.md` and `.ax/rules`) are injected by
 the CLI prompt boundary on every turn (`project_instructions::install`), in
@@ -104,11 +108,26 @@ advertises this extension. `session/cancel` remains a separate operation.
 | **Context** (runtime env, workspace, memory, session, project instructions) | It is relevant to the current request | Its presence alone is never a reason to act on it |
 | **Tools** | The request needs the capability | The model can satisfy the request directly |
 | **Task queue** | The request is multi-item or long-running | The request completes directly — an empty goal queue simply completes with the answer |
-| **Subagent** | A real independent, parallel or separately-scoped subproblem needs isolated context | One agent can complete the task |
+| **Subagent** | A bounded subproblem benefits from focused context, independent checking or parallel progress enough to justify coordination | Splitting small or tightly coupled work adds overhead, or the user requests working alone |
 | **request_user_input** | A user-exclusive decision suspends the goal | Permission questions — dangerous operations are authorized by the permission system |
 
 Context is injected by default; what is *conditional* is whether the model acts
 on it: the request decides that, never the mere presence of context.
+
+The main model makes this delegation decision for research, writing, document
+review, analysis, planning and software work. No profession, frontend/backend
+split, keyword classifier or complexity threshold determines it. The policy
+encourages useful delegation without requiring users to name roles, and keeps
+integration and the final answer with the main agent. User ordering and requests
+to work alone remain authoritative. Agent descriptions help select a suitable
+configured agent; a focused temporary task needs no named agent definition.
+
+Ordinary subagents and explicit queue children share one concurrency pool and
+absolute depth budget (defaults 8 / 1). Depth 0 disables both. Runtime checks
+apply to admission, dispatch and restored work; children inherit permission
+ceilings and tool restrictions. Typed work inventories register tasks but do not
+select delegation. See [tools.md](tools.md#subagents) and
+[ADR 0030](adr/0030-unified-model-selected-delegation.md).
 
 ## Loop hygiene
 

@@ -11,7 +11,7 @@ use std::sync::{
     Arc, Mutex,
     atomic::{AtomicBool, AtomicU64, Ordering},
 };
-use tokio::sync::{Notify, Semaphore, mpsc};
+use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore, mpsc};
 use tool::{Capability, ResourceAccess, SafetyLevel, Tool, ToolError};
 
 /// Metadata for an enabled named agent. Bodies remain on disk until invocation.
@@ -92,9 +92,55 @@ pub struct SubagentManager {
 /// Shared by all descendants of one turn. Ancestors waiting for children still
 /// occupy slots, so nested admission must reject exhaustion instead of queueing.
 pub(crate) struct SubagentPool {
-    slots: Semaphore,
+    slots: Arc<Semaphore>,
     next: AtomicU64,
     admitted: AtomicU64,
+}
+impl SubagentPool {
+    fn new(concurrency: usize) -> Self {
+        Self {
+            slots: Arc::new(Semaphore::new(concurrency.clamp(1, 64))),
+            next: AtomicU64::new(1),
+            admitted: AtomicU64::new(0),
+        }
+    }
+
+    pub(crate) fn available_slots(&self) -> usize {
+        self.slots.available_permits()
+    }
+
+    pub(crate) fn admit(&self) -> Result<(), AgentError> {
+        self.admitted
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
+                (count < 64).then_some(count + 1)
+            })
+            .map(|_| ())
+            .map_err(|_| {
+                ToolError::Execution("delegation admission limit reached for this turn".into())
+                    .into()
+            })
+    }
+
+    pub(crate) async fn acquire(&self, depth: usize) -> Result<OwnedSemaphorePermit, AgentError> {
+        if depth == 0 {
+            Arc::clone(&self.slots)
+                .acquire_owned()
+                .await
+                .map_err(|error| AgentError::WorkerJoin(error.to_string()))
+        } else {
+            self.try_acquire()
+        }
+    }
+
+    pub(crate) fn try_acquire(&self) -> Result<OwnedSemaphorePermit, AgentError> {
+        Arc::clone(&self.slots).try_acquire_owned().map_err(|_| {
+            ToolError::Execution(
+                "delegation concurrency limit reached; waiting ancestors count toward the limit"
+                    .into(),
+            )
+            .into()
+        })
+    }
 }
 impl SubagentManager {
     /// Existing delegation admission is evidence that controller-only usage is incomplete.
@@ -163,8 +209,8 @@ impl SubagentManager {
         if !self.accepting.load(Ordering::Acquire) {
             return Err(ToolError::Execution("subagents are disabled for this turn".into()).into());
         }
-        if self.controller.subagent_depth >= self.controller.subagent_config.max_depth {
-            return Err(ToolError::Execution("subagent maximum depth reached".into()).into());
+        if let Some(reason) = self.controller.delegation_unavailable_reason() {
+            return Err(ToolError::Execution(reason.into()).into());
         }
         let runtime = tokio::runtime::Handle::try_current()
             .map_err(|error| AgentError::WorkerJoin(error.to_string()))?;
@@ -219,19 +265,7 @@ impl SubagentManager {
         if !self.accepting.load(Ordering::Acquire) {
             return Err(ToolError::Execution("subagents are disabled for this turn".into()).into());
         }
-        if self
-            .pool
-            .admitted
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
-                (count < 64).then_some(count + 1)
-            })
-            .is_err()
-        {
-            return Err(ToolError::Execution(
-                "subagent admission limit reached for this turn".into(),
-            )
-            .into());
-        }
+        self.pool.admit()?;
         entries.insert(
             id.clone(),
             Arc::new(Pending {
@@ -317,20 +351,7 @@ impl SubagentManager {
         id: &str,
         pending: &Pending,
     ) -> Result<SubagentResult, AgentError> {
-        let _slot = if self.controller.subagent_depth == 0 {
-            self.pool
-                .slots
-                .acquire()
-                .await
-                .map_err(|e| AgentError::WorkerJoin(e.to_string()))?
-        } else {
-            self.pool.slots.try_acquire().map_err(|_| {
-                ToolError::Execution(
-                    "subagent concurrency limit reached; waiting ancestors count toward the limit"
-                        .into(),
-                )
-            })?
-        };
+        let _slot = self.pool.acquire(self.controller.subagent_depth).await?;
         // The timeout bounds child execution only. Waiting behind the
         // concurrency limit is queueing, and must not consume the child's own
         // execution time or report a timeout for work that never started.
@@ -350,27 +371,17 @@ impl SubagentManager {
 
     #[allow(clippy::too_many_lines)]
     async fn run_child(&self, id: &str, pending: &Pending) -> Result<SubagentResult, AgentError> {
-        let child = self
+        let mut child = self
             .host
             .prepare_with_policy(&self.controller, &pending.input, &pending.options.policy)
             .await?;
+        self.controller.bind_child_delegation(&mut child);
         let mut guard = ChildGuard {
             child,
             finished: false,
         };
         let child = &mut guard.child;
         let policy = &pending.options.policy;
-        child.kernel.approval = Arc::clone(&self.controller.approval);
-        child
-            .kernel
-            .permission_profiles
-            .clone_from(&self.controller.permission_profiles);
-        if child.kernel.permission_profiles.is_empty() {
-            child
-                .kernel
-                .permission_profiles
-                .push(tool::PermissionProfile::default());
-        }
         if policy.permissions == crate::child_policy::PermissionInheritance::Custom {
             child
                 .kernel
@@ -518,9 +529,6 @@ impl SubagentManager {
             }
         }
         // Rebind delegation to this child, never copy a tool bound to its parent.
-        child.kernel.subagent_config = self.controller.subagent_config;
-        child.kernel.subagent_depth = self.controller.subagent_depth + 1;
-        child.kernel.subagent_pool = Some(Arc::clone(&self.pool));
         child.kernel.subagent_tools = self
             .controller
             .subagent_tools
@@ -542,12 +550,6 @@ impl SubagentManager {
             })
             .cloned()
             .collect();
-        child.kernel.agent_templates.clone_from(&self.templates);
-        child.kernel.child_host = Some(
-            self.host
-                .fork_for_child(child.kernel.child_run.as_ref().unwrap_or(&child.run))
-                .unwrap_or_else(|| Arc::clone(&self.host)),
-        );
         self.event(AgentEvent::SubagentStarted { id: id.into() });
         let mut result: ChildResult = if let Some(outcome) = child.terminal.take() {
             outcome
@@ -743,6 +745,9 @@ impl Tool for SubagentTool {
     fn capability(&self, _: &Value) -> Capability {
         Capability::Process
     }
+    fn permission(&self, _: &Value) -> tool::ToolPermission {
+        delegation_permission()
+    }
     fn resources(&self, _: &Value) -> Vec<ResourceAccess> {
         // Child effect tools acquire process-wide resource leases themselves.
         // Holding a parent lease while awaiting a shared child would deadlock.
@@ -846,6 +851,100 @@ impl Tool for SubagentTool {
 }
 
 impl AgentKernel {
+    /// Reuse one controller authorization within a turn, including callers
+    /// that dispatch directly rather than through the model's control tool.
+    pub(crate) async fn ensure_queue_delegation_authorized(&mut self) -> Result<(), ToolError> {
+        if !self.queue_children_enabled() {
+            return Err(ToolError::Execution(
+                self.delegation_unavailable_reason()
+                    .unwrap_or("queue delegation is controller-only")
+                    .into(),
+            ));
+        }
+        if !self.continuation.queue_delegation_authorized {
+            let request = json!({"action":"configure","execution":"children"});
+            self.authorize_queue_delegation(crate::task_queue::TOOL_NAME, &request)
+                .await?;
+            self.continuation.queue_delegation_authorized = true;
+        }
+        Ok(())
+    }
+
+    /// A queue delegates through the same declared Process/Safe boundary as
+    /// the ordinary delegation tools. Call once for a controller request or
+    /// restored turn, rather than prompting separately for every queue item.
+    pub(crate) async fn authorize_queue_delegation(
+        &self,
+        name: &str,
+        input: &Value,
+    ) -> Result<(), ToolError> {
+        let permission = delegation_permission();
+        let decisions = self
+            .permission_profiles
+            .iter()
+            .map(|profile| profile.decision(name, input, permission.capability, &[]))
+            .collect::<Vec<_>>();
+        let decision = tool::resolve_profiles(&decisions);
+        if decision == tool::ProfileDecision::Deny
+            || self.approval.capability_decision(permission.capability)
+                == Some(tool::PermissionDecision::Deny)
+        {
+            return Err(ToolError::PermissionDenied(name.into()));
+        }
+        let approved = match decision {
+            tool::ProfileDecision::Ask => self.approval.ask(name, input, permission).await,
+            tool::ProfileDecision::Allowed => true,
+            tool::ProfileDecision::Unspecified => {
+                self.approval.approve(name, input, permission).await
+            }
+            tool::ProfileDecision::Deny => false,
+        };
+        if approved {
+            Ok(())
+        } else {
+            Err(ToolError::PermissionDenied(name.into()))
+        }
+    }
+
+    /// Structural availability only; transient capacity is checked at admission.
+    pub(crate) fn delegation_enabled(&self) -> bool {
+        self.delegation_unavailable_reason().is_none()
+    }
+
+    pub(crate) fn delegation_unavailable_reason(&self) -> Option<&'static str> {
+        if self.subagent_config.max_depth == 0 {
+            Some("local delegation is disabled (max_depth=0)")
+        } else if self.subagent_depth >= self.subagent_config.max_depth {
+            Some("the absolute delegation depth limit has been reached")
+        } else if self.subagent_tools.is_empty() {
+            Some("the inherited tool scope disables local delegation")
+        } else if self.approval.capability_decision(Capability::Process)
+            == Some(tool::PermissionDecision::Deny)
+        {
+            Some("the parent capability policy denies local delegation")
+        } else if self.child_host.is_none() {
+            Some("no child host is attached")
+        } else if self.child_run.is_some() && self.subagent_pool.is_none() {
+            Some("the child has no inherited delegation budget")
+        } else {
+            None
+        }
+    }
+
+    pub(crate) fn ordinary_delegation_enabled(&self) -> bool {
+        self.delegation_enabled()
+    }
+
+    pub(crate) fn queue_children_enabled(&self) -> bool {
+        self.ordinary_delegation_enabled() && self.child_run.is_none()
+    }
+
+    pub(crate) fn delegation_pool(&mut self) -> Arc<SubagentPool> {
+        Arc::clone(self.subagent_pool.get_or_insert_with(|| {
+            Arc::new(SubagentPool::new(self.subagent_config.max_concurrent))
+        }))
+    }
+
     /// Submit through the current turn's optional delegation primitive.
     ///
     /// # Errors
@@ -868,13 +967,17 @@ impl AgentKernel {
             .as_ref()
             .is_some_and(|manager| manager.cancel_agent(id))
     }
-    pub fn configure_subagents(&mut self, config: SubagentConfig) {
+    pub fn configure_subagents(&mut self, mut config: SubagentConfig) {
+        config.max_concurrent = config.max_concurrent.clamp(1, 64);
         self.subagent_config = config;
         if let Some(manager) = self.subagent_manager.take() {
             manager.shutdown();
         }
         self.tools.remove("subagent");
         self.tools.remove("subagent_fork");
+        if self.child_run.is_none() {
+            self.subagent_pool = None;
+        }
     }
     pub fn configure_agent_templates(&mut self, templates: Vec<AgentTemplate>) {
         self.agent_templates = templates;
@@ -887,16 +990,22 @@ impl AgentKernel {
     /// Prepare delegation without performing a model call or provisioning a
     /// child. A depth budget of zero is the only off switch.
     pub fn prepare_subagents(&mut self) -> Option<mpsc::UnboundedReceiver<AgentEvent>> {
-        if self.subagent_depth >= self.subagent_config.max_depth
-            || self.subagent_tools.is_empty()
-            || (self.child_run.is_some() && self.subagent_pool.is_none())
-        {
-            return None;
-        }
-        let host = self.child_host.clone()?;
         if let Some(previous) = self.subagent_manager.take() {
             previous.shutdown();
         }
+        self.tools.remove("subagent");
+        self.tools.remove("subagent_fork");
+        if self.child_run.is_none() {
+            // One pool per root turn; every queue child and ordinary subagent
+            // inherits it rather than opening a separate allowance.
+            self.subagent_pool = Some(Arc::new(SubagentPool::new(
+                self.subagent_config.max_concurrent,
+            )));
+        }
+        if !self.ordinary_delegation_enabled() {
+            return None;
+        }
+        let host = self.child_host.clone()?;
         let mut controller = self.fork_with_messages(vec![]);
         controller.tools.remove("subagent");
         controller.tools.remove("subagent_fork");
@@ -904,13 +1013,9 @@ impl AgentKernel {
         controller.subagent_config = self.subagent_config;
         controller.subagent_depth = self.subagent_depth;
         controller.subagent_tools.clone_from(&self.subagent_tools);
-        let pool = self.subagent_pool.clone().unwrap_or_else(|| {
-            Arc::new(SubagentPool {
-                slots: Semaphore::new(self.subagent_config.max_concurrent.clamp(1, 64)),
-                next: AtomicU64::new(1),
-                admitted: AtomicU64::new(0),
-            })
-        });
+        controller.child_host = Some(Arc::clone(&host));
+        let pool = self.delegation_pool();
+        controller.subagent_pool = Some(Arc::clone(&pool));
         let (events, receiver) = mpsc::unbounded_channel();
         let manager = Arc::new(SubagentManager {
             controller,
@@ -935,6 +1040,13 @@ impl AgentKernel {
             self.tools.register(SubagentTool::fork(manager));
         }
         Some(receiver)
+    }
+}
+
+fn delegation_permission() -> tool::ToolPermission {
+    tool::ToolPermission {
+        capability: Capability::Process,
+        safety: SafetyLevel::Safe,
     }
 }
 

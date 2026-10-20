@@ -100,14 +100,19 @@ to HEAD is rejected as recoverable input error. It returns the explicit typed en
 ```
 
 Any successful tool can return this envelope. The controller admits it before model
-context projection, deduplicates identical title/input pairs, and selects children
-when a host exists. Plain bullets, numbered rules and arbitrary table rows are
+context projection and deduplicates identical title/input pairs. New inventories
+use controller execution; data mapping alone never chooses delegation. The model
+can choose `task_queue action=configure, execution=children` when useful and
+available, retaining the existing task identities, dependencies and receipts.
+Appending records preserves an existing explicit execution choice within current
+runtime limits. Plain bullets, numbered rules and arbitrary table rows are
 never parsed as tasks. Models may also use `task_queue start` directly for concrete
 items. `append` preserves executed history, child receipts and task IDs while adding
 newly discovered items and offsetting dependencies. It cannot erase prior work.
 
 ```text
-Goal active → projected concrete inventory → start/append queue → ready children
+Goal active → projected concrete inventory → start/append controller queue
+→ model selects direct execution or configures children → ready work
 → task-local receipt → next independent ready item → all terminal → model report
 → completed
 ```
@@ -220,8 +225,7 @@ It also checks non-Git shell changes against the prepared content baseline and
 retention beneath a runtime directory, with nullable diff counts.
 `test/harness/child_deadline.rs` verifies that continuous model/tool activity cannot
 refresh an explicit child deadline and the next independent item still completes.
-Existing CLI prompt dispatch tests exercise CLI/TUI/ACP children (including
-automatic typed 23-item dispatch on both CLI and ACP) and kernel tests
+Existing CLI prompt dispatch tests exercise CLI/TUI/ACP children and kernel tests
 cover genuine request-user-input suspend/resume. These are harness tests, not a
 benchmark-specific planner or correctness oracle.
 

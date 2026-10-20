@@ -187,6 +187,9 @@ pub struct TurnState {
     pub handoff_question_reviewed: bool,
     #[serde(skip)]
     pub handoff_final_reviewed: bool,
+    /// A queue choice is authorized once per host turn, never persisted as a grant.
+    #[serde(skip)]
+    pub queue_delegation_authorized: bool,
     #[serde(skip)]
     pub goal_validation: Vec<crate::goal::ValidationEvidence>,
     #[serde(skip)]

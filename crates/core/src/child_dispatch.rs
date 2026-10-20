@@ -26,6 +26,7 @@ use futures_util::StreamExt;
 use futures_util::future::BoxFuture;
 use futures_util::stream::FuturesUnordered;
 use model::Message;
+use tokio::sync::OwnedSemaphorePermit;
 
 use crate::child::{ChildRun, ChildSaveSink, PreparedChild};
 use crate::child_result::{self, ChildObserver, ChildResult, ChildStatus};
@@ -50,9 +51,6 @@ impl AgentKernel {
         F: FnMut(AgentEvent) + Send,
         H: FnMut(&[Message]) -> Result<(), AgentError> + Send,
     {
-        let Some(host) = self.child_host.clone() else {
-            return Ok(0);
-        };
         let total = self
             .task_queue
             .as_ref()
@@ -60,9 +58,15 @@ impl AgentKernel {
         if total == 0 {
             return Ok(0);
         }
+        self.ensure_queue_delegation_authorized().await?;
+        let host = self
+            .child_host
+            .clone()
+            .expect("authorized queue child host");
         // The supervisor owns bounded concurrency and child lifecycle.
-        let supervisor = AgentSupervisor::bounded(self.child_concurrency);
+        let supervisor = AgentSupervisor::bounded(self.child_concurrency());
         let limit = supervisor.max_concurrency();
+        let pool = self.delegation_pool();
 
         let mut started = vec![false; total];
         let mut reserved: Vec<(usize, Vec<tool::ResourceAccess>)> = Vec::new();
@@ -74,9 +78,13 @@ impl AgentKernel {
         loop {
             let capacity = limit.saturating_sub(running.len() + settled.len());
             if capacity > 0 {
-                let ready = self.select_ready_children(&started, &reserved, capacity);
+                let can_wait = running.is_empty() && settled.is_empty();
+                let ready = self
+                    .reserve_ready_children(&pool, &started, &reserved, capacity, can_wait)
+                    .await?;
                 if !ready.is_empty() {
-                    for &index in &ready {
+                    for (index, _) in &ready {
+                        let index = *index;
                         started[index] = true;
                         let task = &mut self.task_queue.as_mut().unwrap().tasks[index];
                         // Persisted before dispatch: an interrupted task is
@@ -85,40 +93,23 @@ impl AgentKernel {
                         reserved.push((index, task.resources.clone()));
                     }
                     self.checkpoint_queue(checkpoint)?;
-                    for outcome in self.prepare_children(&host, &ready).await {
+                    for outcome in self.prepare_children(&host, ready).await {
                         match outcome {
-                            Prepared::Ready(index, child) => {
+                            Prepared::Ready(index, child, permit) => {
                                 executed += 1;
                                 self.attach_child(
-                                    index,
-                                    *child,
+                                    (index, *child, permit),
                                     emit,
                                     checkpoint,
                                     &mut running,
                                     &mut settled,
                                 )?;
                             }
-                            Prepared::Failed(index, error) => {
+                            Prepared::Failed(index, error, _permit) => {
                                 reserved.retain(|(held, _)| *held != index);
-                                let task_id = task_id_of(index);
-                                let mut result = ChildResult::failed(
-                                    format!(
-                                        "{}:{task_id}:setup",
-                                        self.goal_id.as_deref().unwrap_or_default()
-                                    ),
-                                    task_id,
-                                    ChildStatus::Failed,
-                                    error.to_string(),
+                                settled.push_back(
+                                    self.preparation_failure_receipt(&host, index, &error),
                                 );
-                                if let Err(persist_error) = host.persist_preparation_failure(
-                                    &self.task_queue.as_ref().unwrap().tasks[index],
-                                    &mut result,
-                                ) {
-                                    result.diagnostics.push(format!(
-                                        "setup receipt persistence failed: {persist_error}"
-                                    ));
-                                }
-                                settled.push_back((index, None, result, ExecutionState::fresh()));
                             }
                         }
                     }
@@ -151,6 +142,57 @@ impl AgentKernel {
             }
         }
         Ok(executed)
+    }
+
+    fn preparation_failure_receipt(
+        &self,
+        host: &std::sync::Arc<dyn crate::ChildHost>,
+        index: usize,
+        error: &AgentError,
+    ) -> ChildSettlement {
+        let task_id = task_id_of(index);
+        let mut result = ChildResult::failed(
+            format!(
+                "{}:{task_id}:setup",
+                self.goal_id.as_deref().unwrap_or_default()
+            ),
+            task_id,
+            ChildStatus::Failed,
+            error.to_string(),
+        );
+        if let Err(persist_error) = host.persist_preparation_failure(
+            &self.task_queue.as_ref().unwrap().tasks[index],
+            &mut result,
+        ) {
+            result
+                .diagnostics
+                .push(format!("setup receipt persistence failed: {persist_error}"));
+        }
+        (index, None, result, ExecutionState::fresh())
+    }
+
+    /// Reserve before provisioning. Never await a slot while the dispatcher
+    /// owns unpolled child futures that could release it.
+    async fn reserve_ready_children(
+        &self,
+        pool: &crate::subagent::SubagentPool,
+        started: &[bool],
+        reserved: &[(usize, Vec<tool::ResourceAccess>)],
+        capacity: usize,
+        can_wait: bool,
+    ) -> Result<Vec<(usize, OwnedSemaphorePermit)>, AgentError> {
+        let available = pool.available_slots().max(usize::from(can_wait));
+        let selected = self.select_ready_children(started, reserved, capacity.min(available));
+        let mut ready = Vec::with_capacity(selected.len());
+        for index in selected {
+            let permit = match pool.try_acquire() {
+                Ok(permit) => permit,
+                Err(_) if can_wait && ready.is_empty() => pool.acquire(self.subagent_depth).await?,
+                Err(_) => break,
+            };
+            ready.push((index, permit));
+        }
+        Ok(ready)
     }
 
     /// Indices of ready children, in queue order. `started` marks tasks this
@@ -207,29 +249,33 @@ impl AgentKernel {
     async fn prepare_children(
         &self,
         host: &std::sync::Arc<dyn crate::ChildHost>,
-        ready: &[usize],
+        ready: Vec<(usize, OwnedSemaphorePermit)>,
     ) -> Vec<Prepared> {
         let kernel: &AgentKernel = self;
         let inputs = ready
-            .iter()
-            .map(|&index| {
+            .into_iter()
+            .map(|(index, permit)| {
                 (
                     index,
                     self.task_queue.as_ref().unwrap().tasks[index].clone(),
+                    permit,
                 )
             })
             .collect::<Vec<_>>();
         let mut futures = Vec::with_capacity(inputs.len());
-        for (index, task) in inputs {
+        for (index, task, permit) in inputs {
             let host = host.clone();
-            futures.push(async move { (index, host.prepare_task(kernel, &task).await) });
+            futures.push(async move { (index, host.prepare_task(kernel, &task).await, permit) });
         }
         futures_util::future::join_all(futures)
             .await
             .into_iter()
-            .map(|(index, outcome)| match outcome {
-                Ok(child) => Prepared::Ready(index, Box::new(child)),
-                Err(error) => Prepared::Failed(index, error),
+            .map(|(index, outcome, permit)| match outcome {
+                Ok(mut child) => {
+                    self.bind_child_delegation(&mut child);
+                    Prepared::Ready(index, Box::new(child), permit)
+                }
+                Err(error) => Prepared::Failed(index, error, permit),
             })
             .collect()
     }
@@ -238,8 +284,7 @@ impl AgentKernel {
     /// start it running.
     fn attach_child<'a, F, H>(
         &mut self,
-        index: usize,
-        mut child: PreparedChild,
+        prepared: (usize, PreparedChild, OwnedSemaphorePermit),
         emit: &'a Mutex<F>,
         checkpoint: &mut H,
         running: &mut FuturesUnordered<BoxFuture<'a, ChildSettlement>>,
@@ -249,6 +294,7 @@ impl AgentKernel {
         F: FnMut(AgentEvent) + Send,
         H: FnMut(&[Message]) -> Result<(), AgentError> + Send,
     {
+        let (index, mut child, permit) = prepared;
         self.touch_progress();
         let child_id = child.run.session_id.clone();
         let task_id = task_id_of(index);
@@ -276,7 +322,7 @@ impl AgentKernel {
             return Ok(());
         }
         running.push(run_child_future(
-            index, task_id, child_id, input, child, emit,
+            index, task_id, child_id, input, child, permit, emit,
         ));
         Ok(())
     }
@@ -329,8 +375,8 @@ impl AgentKernel {
 enum Prepared {
     /// Boxed: a prepared child owns a kernel and a checkpoint, and the failure
     /// variant must not inflate every stack slot of the dispatch loop.
-    Ready(usize, Box<PreparedChild>),
-    Failed(usize, AgentError),
+    Ready(usize, Box<PreparedChild>, OwnedSemaphorePermit),
+    Failed(usize, AgentError, OwnedSemaphorePermit),
 }
 
 fn task_id_of(index: usize) -> String {
@@ -344,12 +390,14 @@ fn run_child_future<F>(
     child_id: String,
     input: String,
     child: PreparedChild,
+    permit: OwnedSemaphorePermit,
     emit: &Mutex<F>,
 ) -> BoxFuture<'_, ChildSettlement>
 where
     F: FnMut(AgentEvent) + Send,
 {
     Box::pin(async move {
+        let _permit = permit;
         let run = child.run.clone();
         let session = run.session_id.clone();
         let mut kernel = child.kernel;
