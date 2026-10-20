@@ -314,11 +314,8 @@ impl AgentKernel {
         for message in &kernel.messages {
             if let Some(id) = &message.tool_call_id
                 && let Ok(result) = serde_json::from_str::<tool::ToolResult>(&message.content)
-                && let Ok(mut store) = kernel.result_reader.0.write()
             {
-                store
-                    .entry(id.clone())
-                    .or_insert_with(|| tool::RetainedOutput::from(&result));
+                kernel.result_reader.restore(id, &result);
             }
         }
         kernel.execution_root = Some(run.workspace_root().to_path_buf());

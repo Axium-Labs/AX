@@ -41,15 +41,17 @@ impl Tool for FilesystemTool {
     }
 
     fn description(&self) -> &str {
-        "Read, list or write a known path. `read` accepts a 1-based start_line/end_line range when sufficient; omit the range for full file context. All reads return verbatim text with `N: ` line-number prefixes; these prefixes are not file content and must be omitted from patch text/expected_lines. Truncated results report total_lines, shown_through_line and next_start_line; continue with that start_line. `list` shows exactly one directory level and is not a discovery tool: prefer find_files/glob for unknown locations and search for text or symbols. After discovery, prefer direct reads for context; targeted searches within known files remain useful. Batch independent reads when possible. Prefer patch for localized edits; write creates or replaces a whole file and is appropriate for requested full-file rewrites or generated artifacts. Inspect existing content before replacing it; writes require approval."
+        "Read, list or write a known path. `read` accepts a 1-based start_line/end_line range when sufficient; omit the range for full file context. All reads return verbatim text with `N: ` line-number prefixes; these prefixes are not file content and must be omitted from patch text/expected_lines. Truncated results report total_lines, shown_through_line and next_start_line; continue with that start_line. A line too long to display shows only its beginning and sets line_truncated; use search to locate content inside it. Files above 4 MiB must be read by line range. `list` shows exactly one directory level and is not a discovery tool: prefer find_files/glob for unknown locations and search for text or symbols. After discovery, prefer direct reads for context; targeted searches within known files remain useful. Batch independent reads when possible. Prefer patch for localized edits; write creates or replaces a whole file and is appropriate for requested full-file rewrites or generated artifacts. Inspect existing content before replacing it; writes require approval."
     }
 
     fn guidance(&self) -> Option<&'static str> {
         Some(
             "filesystem: read only the smallest sufficient 1-based line range; omit the range only \
-             when the whole file is genuinely needed. `list` returns one directory level and is not \
-             a discovery tool. Batch independent reads of already-known paths into one call rather \
-             than alternating read -> model -> read.",
+             when the whole file is genuinely needed. Files above 4 MiB require a line range. If a \
+             result reports line_truncated, that line is too long to display in full; use search to \
+             locate content inside it. `list` returns one directory level and is not a discovery \
+             tool. Batch independent reads of already-known paths into one call rather than \
+             alternating read -> model -> read.",
         )
     }
 
@@ -85,21 +87,21 @@ impl Tool for FilesystemTool {
     }
 
     async fn execute(&self, input: Value) -> Result<String, ToolError> {
-        let input: FilesystemInput = serde_json::from_value(input)
+        match self.execute_output(input).await? {
+            ToolOutput::Text(text) | ToolOutput::Verbatim { text, .. } => Ok(text),
+            ToolOutput::Image { description, .. } => Ok(description),
+        }
+    }
+
+    async fn execute_output(&self, input: Value) -> Result<ToolOutput, ToolError> {
+        let parsed: FilesystemInput = serde_json::from_value(input)
             .map_err(|error| ToolError::InvalidInput(error.to_string()))?;
-        match input {
+        match parsed {
             FilesystemInput::Read {
                 path,
                 start_line,
                 end_line,
-            } => {
-                let ToolOutput::Verbatim { text, .. } =
-                    read_file(&path, start_line, end_line).await?
-                else {
-                    unreachable!("file reads always declare verbatim text");
-                };
-                Ok(text)
-            }
+            } => read_file(&path, start_line, end_line).await,
             FilesystemInput::List { path } => {
                 let mut entries = tokio::fs::read_dir(&path)
                     .await
@@ -113,29 +115,14 @@ impl Tool for FilesystemTool {
                     names.push(entry.file_name().to_string_lossy().into_owned());
                 }
                 names.sort_unstable();
-                Ok(names.join("\n"))
+                Ok(ToolOutput::Text(names.join("\n")))
             }
             FilesystemInput::Write { path, content } => {
                 tokio::fs::write(path, content)
                     .await
                     .map_err(|error| ToolError::Execution(error.to_string()))?;
-                Ok("write completed".to_owned())
+                Ok(ToolOutput::Text("write completed".to_owned()))
             }
-        }
-    }
-
-    async fn execute_output(&self, input: Value) -> Result<ToolOutput, ToolError> {
-        let parsed: FilesystemInput = serde_json::from_value(input.clone())
-            .map_err(|error| ToolError::InvalidInput(error.to_string()))?;
-        if let FilesystemInput::Read {
-            path,
-            start_line,
-            end_line,
-        } = parsed
-        {
-            read_file(&path, start_line, end_line).await
-        } else {
-            self.execute(input).await.map(ToolOutput::Text)
         }
     }
 
@@ -157,9 +144,6 @@ async fn read_file(
     start_line: Option<usize>,
     end_line: Option<usize>,
 ) -> Result<ToolOutput, ToolError> {
-    let text = tokio::fs::read_to_string(path)
-        .await
-        .map_err(|error| crate::path_error(std::path::Path::new(path), &error))?;
     let start = start_line.unwrap_or(1);
     let end = end_line.unwrap_or_else(|| {
         if start_line.is_none() {
@@ -171,6 +155,23 @@ async fn read_file(
     if start == 0 || end < start {
         return Err(ToolError::InvalidInput("invalid line range".into()));
     }
+    let metadata = tokio::fs::metadata(path)
+        .await
+        .map_err(|error| crate::path_error(std::path::Path::new(path), &error))?;
+    if metadata.len() > crate::discovery::MAX_FILE_BYTES {
+        if start_line.is_none() && end_line.is_none() {
+            return Err(ToolError::InvalidInput(format!(
+                "{path} is {} bytes, above the {} byte read limit; read a line range with \
+                 start_line/end_line or use search to locate content",
+                metadata.len(),
+                crate::discovery::MAX_FILE_BYTES
+            )));
+        }
+        return read_ranged_stream(path, start, end).await;
+    }
+    let text = tokio::fs::read_to_string(path)
+        .await
+        .map_err(|error| crate::path_error(std::path::Path::new(path), &error))?;
     let total_lines = text.split_inclusive('\n').count();
     let numbered = text
         .split_inclusive('\n')
@@ -184,6 +185,68 @@ async fn read_file(
     Ok(ToolOutput::Verbatim {
         text: numbered,
         total_lines,
+        start_line: start,
+    })
+}
+
+/// Ranged read for files above the size limit: only lines inside the request are
+/// kept, while the whole file is still counted so `total_lines` stays exact.
+/// Out-of-range lines are skipped through the buffer without being retained, so a
+/// single huge line cannot defeat the limit.
+async fn read_ranged_stream(path: &str, start: usize, end: usize) -> Result<ToolOutput, ToolError> {
+    use tokio::io::AsyncBufReadExt;
+    let file = tokio::fs::File::open(path)
+        .await
+        .map_err(|error| crate::path_error(std::path::Path::new(path), &error))?;
+    let mut reader = tokio::io::BufReader::new(file);
+    let mut number = 0usize;
+    let mut numbered = String::new();
+    let mut line = Vec::new();
+    let mut started = false;
+    let mut wanted = false;
+    loop {
+        let (consumed, complete) = {
+            let available = reader
+                .fill_buf()
+                .await
+                .map_err(|error| ToolError::Execution(error.to_string()))?;
+            if available.is_empty() {
+                break;
+            }
+            let length = available
+                .iter()
+                .position(|byte| *byte == b'\n')
+                .map_or(available.len(), |index| index + 1);
+            if !started {
+                number = number.saturating_add(1);
+                wanted = number >= start && number <= end;
+                started = true;
+            }
+            if wanted {
+                line.extend_from_slice(&available[..length]);
+            }
+            (length, available[length - 1] == b'\n')
+        };
+        reader.consume(consumed);
+        if complete {
+            if wanted {
+                let text = std::str::from_utf8(&line)
+                    .map_err(|_| ToolError::Execution(format!("{path} is not valid UTF-8 text")))?;
+                let _ = write!(numbered, "{number}: {text}");
+            }
+            line.clear();
+            started = false;
+        }
+    }
+    // A final line without a terminator still counts as a line.
+    if started && wanted && !line.is_empty() {
+        let text = std::str::from_utf8(&line)
+            .map_err(|_| ToolError::Execution(format!("{path} is not valid UTF-8 text")))?;
+        let _ = write!(numbered, "{number}: {text}");
+    }
+    Ok(ToolOutput::Verbatim {
+        text: numbered,
+        total_lines: number,
         start_line: start,
     })
 }
@@ -208,6 +271,108 @@ mod tests {
             .unwrap_err();
         assert!(error.to_string().contains("candidate_paths"));
         assert!(error.to_string().contains("actual.rs"));
+        tokio::fs::remove_file(path).await.unwrap();
+        tokio::fs::remove_dir(root).await.unwrap();
+    }
+
+    /// Above `MAX_FILE_BYTES` a whole-file read must fail with the size and the
+    /// limit, while a ranged read still works without loading the file.
+    #[tokio::test]
+    async fn oversized_file_requires_a_line_range() {
+        let root = std::env::temp_dir().join(format!("ax-read-big-{}", uuid::Uuid::new_v4()));
+        tokio::fs::create_dir(&root).await.unwrap();
+        let path = root.join("big.txt");
+        let mut content = String::new();
+        for line in 1..=200 {
+            let _ = writeln!(content, "line-{line:03} {}", "x".repeat(22_000));
+        }
+        tokio::fs::write(&path, &content).await.unwrap();
+        let size = tokio::fs::metadata(&path).await.unwrap().len();
+        assert!(size > crate::discovery::MAX_FILE_BYTES);
+
+        let error = FilesystemTool
+            .execute(json!({"operation":"read","path":path}))
+            .await
+            .unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("invalid tool input"), "{message}");
+        assert!(message.contains(&size.to_string()), "{message}");
+        assert!(
+            message.contains(&crate::discovery::MAX_FILE_BYTES.to_string()),
+            "{message}"
+        );
+        assert!(message.contains("start_line"), "{message}");
+        assert!(message.contains("search"), "{message}");
+
+        let output = FilesystemTool
+            .execute_output(json!({"operation":"read","path":path,"start_line":199,"end_line":200}))
+            .await
+            .unwrap();
+        let ToolOutput::Verbatim {
+            text,
+            total_lines,
+            start_line,
+        } = output
+        else {
+            panic!("file reads declare verbatim text");
+        };
+        assert_eq!(total_lines, 200);
+        assert_eq!(start_line, 199);
+        assert_eq!(text.lines().count(), 2);
+        assert!(text.starts_with("199: line-199 "));
+        assert!(text.ends_with('\n'));
+
+        // A range before the end, a CRLF file without a final newline and a
+        // range past EOF all keep the same coordinate semantics as a normal read.
+        let crlf = root.join("crlf.txt");
+        let mut body = String::new();
+        for line in 1..=120 {
+            let _ = write!(body, "row {line} {}\r\n", "y".repeat(40_000));
+        }
+        body.push_str("tail without newline");
+        tokio::fs::write(&crlf, &body).await.unwrap();
+        assert!(tokio::fs::metadata(&crlf).await.unwrap().len() > crate::discovery::MAX_FILE_BYTES);
+        let output = FilesystemTool
+            .execute_output(json!({"operation":"read","path":crlf,"start_line":2,"end_line":2}))
+            .await
+            .unwrap();
+        let ToolOutput::Verbatim {
+            text,
+            total_lines,
+            start_line,
+        } = output
+        else {
+            panic!("file reads declare verbatim text");
+        };
+        assert_eq!(start_line, 2);
+        assert_eq!(text.lines().count(), 1);
+        assert!(text.starts_with("2: row 2 "));
+        assert!(text.ends_with("\r\n"));
+        assert_eq!(total_lines, 121);
+
+        let output = FilesystemTool
+            .execute_output(json!({"operation":"read","path":crlf,"start_line":121,"end_line":121}))
+            .await
+            .unwrap();
+        let ToolOutput::Verbatim { text, .. } = output else {
+            panic!("file reads declare verbatim text");
+        };
+        assert_eq!(text, "121: tail without newline");
+
+        let output = FilesystemTool
+            .execute_output(json!({"operation":"read","path":crlf,"start_line":500,"end_line":500}))
+            .await
+            .unwrap();
+        let ToolOutput::Verbatim {
+            text, total_lines, ..
+        } = output
+        else {
+            panic!("file reads declare verbatim text");
+        };
+        assert_eq!(text, "");
+        assert_eq!(total_lines, 121);
+
+        tokio::fs::remove_file(crlf).await.unwrap();
         tokio::fs::remove_file(path).await.unwrap();
         tokio::fs::remove_dir(root).await.unwrap();
     }

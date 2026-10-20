@@ -182,11 +182,8 @@ impl AgentKernel {
         for message in &messages {
             if let Some(id) = &message.tool_call_id
                 && let Ok(result) = serde_json::from_str::<tool::ToolResult>(&message.content)
-                && let Ok(mut store) = self.result_reader.0.write()
             {
-                store
-                    .entry(id.clone())
-                    .or_insert_with(|| tool::RetainedOutput::from(&result));
+                self.result_reader.restore(id, &result);
             }
         }
         self.messages = messages;

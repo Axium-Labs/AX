@@ -200,11 +200,23 @@ not parse/pretty-print JSON or filter `warning:` lines. When the
 `ContextBudget::tool_result_chars()` allowance is exceeded, the projection keeps
 only complete leading lines and reports `total_lines`, `shown_through_line`,
 `next_start_line` and `truncated: true`. Continue with `filesystem.read` using
-that `start_line`. A single line larger than the allowance cannot be shown in
-part: the body is empty and `next_start_line` remains the first undisplayed line.
+that `start_line`. A single line larger than the allowance keeps only its
+beginning, truncated on a UTF-8 character boundary: the view adds
+`line_truncated: true` plus a short note, and `next_start_line` is the following
+line, so reading always advances. Use `search` to locate content further inside
+such a line. The verbatim view carries only source fields — `verbatim`, `output`,
+`total_lines`, `start_line`, `shown_through_line`, `next_start_line`,
+`truncated`, `line_truncated`, `raw_output_available` — because `status`,
+`summary` and `diagnostics` carry no information for declared source text.
 Ordinary text results retain their existing diagnostic extraction, JSON
 formatting and compiler-warning cleanup. Raw checkpoints remain authoritative.
 See [ADR 0031](adr/0031-tool-declared-verbatim-output.md).
+
+`filesystem.read` checks the file size before loading it and reuses the 4 MiB
+`MAX_FILE_BYTES` limit that `search` already applies. Above it, a whole-file read
+returns `invalid tool input` with the actual size, the limit and a hint to use a
+line range or `search`. A ranged read is still allowed: it streams the file, keeps
+only the requested lines in memory and counts them to keep `total_lines` exact.
 
 `tool_output(call_id, start_line, end_line)` reads retained raw ranges on demand,
 including after restore. New verbatim cache entries keep the result envelope and

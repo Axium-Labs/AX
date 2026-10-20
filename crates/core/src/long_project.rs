@@ -9,6 +9,46 @@ pub const CONTEXT_PREFIX: &str = "[ax-long-project]\n";
 pub const ROTATION_PREFIX: &str = "[ax-session-handoff]\n";
 pub const COMMIT_PREFIX: &str = "[ax-session-successor]\n";
 
+/// Shrink one retained round until it fits, halving each result per pass.
+/// Halving converges in logarithmically many passes; the previous
+/// decrement-by-one step re-serialized the whole body once per pass.
+/// Returns the number of passes performed.
+fn shrink_round(round: &mut [Message], allowance: usize) -> usize {
+    let mut passes = 0;
+    while crate::estimate_tokens(round) > allowance {
+        let mut changed = false;
+        for message in round.iter_mut().filter(|m| m.role == model::Role::Tool) {
+            if let Ok(result) = serde_json::from_str::<tool::ToolResult>(&message.content)
+                && result.verbatim
+            {
+                if !result.raw_output.is_empty() {
+                    let compacted =
+                        result.compact_verbatim(result.raw_output.chars().count().div_ceil(2));
+                    if compacted.raw_output != result.raw_output {
+                        message.content = serde_json::to_string(&compacted).unwrap_or_default();
+                        changed = true;
+                    }
+                }
+                continue;
+            }
+            if let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&message.content)
+                && let Some(output) = value["output"].as_str().filter(|s| !s.is_empty())
+            {
+                let short: String = output.chars().take(output.chars().count() / 2).collect();
+                value["output"] = serde_json::json!(short);
+                value["truncated"] = serde_json::json!(true);
+                message.content = value.to_string();
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+        passes += 1;
+    }
+    passes
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct LongProjectConfig {
@@ -416,37 +456,7 @@ impl AgentKernel {
                     .saturating_sub(crate::estimate_tokens(&context))
                     .saturating_sub(budget.pool.next_request_reserve),
             );
-            while crate::estimate_tokens(&round) > allowance {
-                let mut changed = false;
-                for message in round.iter_mut().filter(|m| m.role == model::Role::Tool) {
-                    if let Ok(result) = serde_json::from_str::<tool::ToolResult>(&message.content)
-                        && result.verbatim
-                    {
-                        if !result.raw_output.is_empty() {
-                            let compacted = result.compact_verbatim(
-                                result.raw_output.chars().count().saturating_sub(1),
-                            );
-                            message.content = serde_json::to_string(&compacted).unwrap_or_default();
-                            changed = true;
-                        }
-                        continue;
-                    }
-                    if let Ok(mut value) =
-                        serde_json::from_str::<serde_json::Value>(&message.content)
-                        && let Some(output) = value["output"].as_str().filter(|s| !s.is_empty())
-                    {
-                        let short: String =
-                            output.chars().take(output.chars().count() / 2).collect();
-                        value["output"] = serde_json::json!(short);
-                        value["truncated"] = serde_json::json!(true);
-                        message.content = value.to_string();
-                        changed = true;
-                    }
-                }
-                if !changed {
-                    break;
-                }
-            }
+            shrink_round(&mut round, allowance);
             if crate::estimate_tokens(&round) <= allowance {
                 context.extend(round);
             }
@@ -505,5 +515,69 @@ impl AgentKernel {
         self.compression_dirty = true;
         self.rotation_requested = false;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    use std::fmt::Write as _;
+
+    fn verbatim_result(lines: usize) -> String {
+        let text = (1..=lines).fold(String::new(), |mut text, line| {
+            let _ = writeln!(text, "{line}: {}", "x".repeat(200));
+            text
+        });
+        serde_json::to_string(&tool::ToolResult::from_output(
+            &tool::ToolOutput::Verbatim {
+                text,
+                total_lines: lines,
+                start_line: 1,
+            },
+        ))
+        .unwrap()
+    }
+
+    /// Rotation used to drop one line per pass, so the number of full
+    /// re-serializations grew with the body. Halving must stay logarithmic.
+    #[test]
+    fn shrinking_a_large_round_halves_instead_of_removing_one_line() {
+        let mut round: Vec<Message> = (0..8)
+            .map(|index| Message::tool(format!("call-{index}"), verbatim_result(400)))
+            .collect();
+        let before = crate::estimate_tokens(&round);
+        // A target the old per-line loop needed ~hundreds of passes for.
+        let allowance = before / 40;
+        let passes = shrink_round(&mut round, allowance);
+        assert!(
+            passes <= 12,
+            "halving must stay logarithmic in body size, took {passes} passes"
+        );
+        assert!(crate::estimate_tokens(&round) <= before);
+        for message in &round {
+            let result: tool::ToolResult = serde_json::from_str(&message.content).unwrap();
+            assert!(result.verbatim);
+            assert!(result.truncated);
+            assert!(result.total_lines.is_some());
+            // Complete leading lines only, with the declared coordinate prefix.
+            assert!(result.raw_output.is_empty() || result.raw_output.ends_with('\n'));
+            if !result.raw_output.is_empty() {
+                assert!(result.raw_output.starts_with("1: "));
+            }
+        }
+    }
+
+    /// The loop must terminate even when the allowance can never be met.
+    #[test]
+    fn shrinking_terminates_when_the_allowance_can_never_be_met() {
+        let mut round = vec![
+            Message::tool("call-0", verbatim_result(400)),
+            Message::tool("call-1", json!({"output":"y"}).to_string()),
+        ];
+        let passes = shrink_round(&mut round, 0);
+        assert!(passes <= 16, "bounded passes expected, took {passes}");
+        // Re-running is a no-op: nothing below the floor changes any more.
+        assert_eq!(shrink_round(&mut round, 0), 0);
     }
 }

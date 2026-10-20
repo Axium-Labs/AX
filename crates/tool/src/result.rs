@@ -7,6 +7,32 @@ use std::{borrow::Cow, collections::HashMap};
 #[derive(Clone, Default)]
 pub struct ResultReader(pub Arc<RwLock<HashMap<String, RetainedOutput>>>);
 
+impl ResultReader {
+    /// Rebuild one cache entry from saved history.
+    ///
+    /// Saved tool messages may already hold a compacted projection rather than
+    /// the original receipt, so a truncated envelope is never allowed to replace
+    /// a complete one for the same call. It stays marked `truncated`, which lets
+    /// `tool_output` refuse ranges it no longer retains instead of answering an
+    /// empty range that looks like missing content.
+    pub fn restore(&self, id: &str, result: &ToolResult) {
+        let Ok(mut store) = self.0.write() else {
+            return;
+        };
+        let entry = RetainedOutput::from(result);
+        match store.entry(id.to_owned()) {
+            std::collections::hash_map::Entry::Occupied(mut existing) => {
+                if existing.get().is_partial() && !entry.is_partial() {
+                    existing.insert(entry);
+                }
+            }
+            std::collections::hash_map::Entry::Vacant(slot) => {
+                slot.insert(entry);
+            }
+        }
+    }
+}
+
 /// Typed cache metadata is an object; legacy raw cache values remain strings.
 /// Never infer source semantics by parsing a tool's raw text as an envelope.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -23,6 +49,15 @@ impl From<&ToolResult> for RetainedOutput {
         } else {
             Self::Raw(result.raw_output.clone())
         }
+    }
+}
+
+impl RetainedOutput {
+    /// A cache entry rebuilt from saved history may already hold a compacted
+    /// projection instead of the original receipt.
+    #[must_use]
+    pub fn is_partial(&self) -> bool {
+        matches!(self, Self::Verbatim(result) if result.truncated)
     }
 }
 
@@ -79,41 +114,73 @@ impl crate::Tool for ResultReader {
                 "unknown call_id {id}; use an earlier tool call ID"
             ))
         })?;
-        if let RetainedOutput::Verbatim(result) = stored {
-            let first = result.start_line.unwrap_or(1);
-            let start = start.max(first);
-            let text = result
-                .raw_output
-                .split_inclusive('\n')
-                .skip(start.saturating_sub(first))
-                .take(end.saturating_add(1).saturating_sub(start))
-                .collect();
-            return Ok(crate::ToolOutput::Verbatim {
-                text,
-                total_lines: result.total_lines.unwrap_or_default(),
-                start_line: start,
-            });
+        match stored {
+            RetainedOutput::Verbatim(result) => {
+                let first = result.start_line.unwrap_or(1);
+                let start = start.max(first);
+                let mut retained = result.raw_output.split_inclusive('\n').count();
+                // A `line_truncated` tail is half a source line, so it is not a
+                // complete line the reader can return. The advance rule already
+                // sent the model past it, which keeps the two views consistent.
+                let partial_tail = result.line_truncated
+                    && !result.raw_output.is_empty()
+                    && !result.raw_output.ends_with('\n');
+                if partial_tail {
+                    retained = retained.saturating_sub(1);
+                }
+                let retained_end = first.saturating_add(retained).saturating_sub(1);
+                // A restored projection holds only a prefix: reporting "no lines"
+                // for the rest would look like an empty range.
+                if result.truncated && start > retained_end {
+                    let retained_scope = if retained == 0 {
+                        format!("no complete lines from {first} (only the start of that long line)")
+                    } else {
+                        format!("only lines {first}..{retained_end}")
+                    };
+                    return Err(crate::ToolError::InvalidInput(format!(
+                        "receipt {id} retained {retained_scope} of {}; \
+                         read the file again with a line range or locate the content with search",
+                        result.total_lines.unwrap_or(retained_end)
+                    )));
+                }
+                let take = end
+                    .saturating_add(1)
+                    .saturating_sub(start)
+                    .min(retained_end.saturating_add(1).saturating_sub(start));
+                let text = result
+                    .raw_output
+                    .split_inclusive('\n')
+                    .skip(start.saturating_sub(first))
+                    .take(take)
+                    .collect();
+                Ok(crate::ToolOutput::Verbatim {
+                    text,
+                    total_lines: result.total_lines.unwrap_or_default(),
+                    start_line: start,
+                })
+            }
+            RetainedOutput::Raw(raw) => {
+                let pretty = serde_json::from_str::<Value>(raw)
+                    .and_then(|v| serde_json::to_string_pretty(&v))
+                    .unwrap_or_else(|_| raw.clone());
+                Ok(crate::ToolOutput::Text(
+                    pretty
+                        .lines()
+                        .enumerate()
+                        .skip(start - 1)
+                        .take(end - start + 1)
+                        .map(|(i, line)| format!("{}: {line}", i + 1))
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                ))
+            }
         }
-        let RetainedOutput::Raw(raw) = stored else {
-            unreachable!()
-        };
-        let pretty = serde_json::from_str::<Value>(raw)
-            .and_then(|v| serde_json::to_string_pretty(&v))
-            .unwrap_or_else(|_| raw.clone());
-        Ok(crate::ToolOutput::Text(
-            pretty
-                .lines()
-                .enumerate()
-                .skip(start - 1)
-                .take(end - start + 1)
-                .map(|(i, line)| format!("{}: {line}", i + 1))
-                .collect::<Vec<_>>()
-                .join("\n"),
-        ))
     }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+// Independent persisted flags, each with its own meaning and serde default.
+#[allow(clippy::struct_excessive_bools)]
 pub struct ToolResult {
     /// Source content must never be interpreted as JSON or compiler diagnostics.
     #[serde(default, skip_serializing_if = "is_false")]
@@ -122,6 +189,9 @@ pub struct ToolResult {
     pub total_lines: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub start_line: Option<usize>,
+    /// A single source line exceeded the allowance; only its beginning is kept.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub line_truncated: bool,
     /// Set only from a typed runtime permission failure, never inferred from prose.
     #[serde(default, skip_serializing_if = "is_false")]
     pub permission_denied: bool,
@@ -167,6 +237,7 @@ impl ToolResult {
                 verbatim: true,
                 total_lines: Some(*total_lines),
                 start_line: Some(*start_line),
+                line_truncated: false,
                 permission_denied: false,
                 global_blocker: None,
                 status: "success".into(),
@@ -183,7 +254,10 @@ impl ToolResult {
     }
 
     /// Keep a complete source-line prefix within the supplied context allowance.
-    /// Stored source coordinates survive repeated compaction and session restore.
+    /// A first line longer than the allowance keeps only its beginning and sets
+    /// `line_truncated`, so the next read advances past it instead of repeating
+    /// the same empty line. Stored source coordinates survive repeated
+    /// compaction and session restore.
     #[must_use]
     pub fn compact_verbatim(&self, max_chars: usize) -> Self {
         let mut result = self.clone();
@@ -191,11 +265,22 @@ impl ToolResult {
         let mut end = 0;
         for line in self.raw_output.split_inclusive('\n') {
             let length = line.chars().count();
-            if length > remaining {
-                break;
+            if length <= remaining {
+                remaining -= length;
+                end += line.len();
+                continue;
             }
-            remaining -= length;
-            end += line.len();
+            if end == 0 {
+                // Only the first line is eligible: keeping a UTF-8 boundary-safe
+                // prefix is better than an empty body that cannot advance.
+                result.line_truncated = true;
+                end = line
+                    .chars()
+                    .take(remaining)
+                    .map(char::len_utf8)
+                    .sum::<usize>();
+            }
+            break;
         }
         result.truncated |= end < self.raw_output.len();
         result.raw_output.truncate(end);
@@ -242,7 +327,7 @@ impl ToolResult {
                     .map(|line| json!({"message":line}))
                     .collect()
             });
-        Self { verbatim: false, total_lines: None, start_line: None, permission_denied: false, global_blocker: None, status: if success { "success" } else { "error" }.into(),
+        Self { verbatim: false, total_lines: None, start_line: None, line_truncated: false, permission_denied: false, global_blocker: None, status: if success { "success" } else { "error" }.into(),
             summary: if success { "Operation succeeded" } else { "Operation failed; repair the reported diagnostic locally and run the smallest relevant check before broader tests" }.into(),
             diagnostics, raw_output, truncated: parsed.as_ref().and_then(|v| v["truncated"].as_bool()).unwrap_or(false) }
     }
@@ -253,18 +338,35 @@ impl ToolResult {
         if self.verbatim {
             let result = self.compact_verbatim(max_chars);
             let start = result.start_line.unwrap_or(1);
+            let displayed = result.raw_output.split_inclusive('\n').count();
             let shown = start
                 .saturating_sub(1)
-                .saturating_add(result.raw_output.split_inclusive('\n').count())
+                .saturating_add(displayed)
                 .min(result.total_lines.unwrap_or(usize::MAX));
-            return json!({
-                "verbatim": true, "status": result.status, "summary": result.summary,
-                "diagnostics": result.diagnostics, "output": result.raw_output,
+            // A clipped single line still has to advance, or the next read would
+            // repeat the same line forever.
+            let next = if result.line_truncated {
+                Some(start.saturating_add(1))
+            } else {
+                (result.truncated || result.total_lines.is_some_and(|total| shown < total))
+                    .then(|| shown.saturating_add(1))
+            };
+            let mut view = json!({
+                "verbatim": true, "output": result.raw_output,
                 "total_lines": result.total_lines, "start_line": start,
                 "shown_through_line": shown,
-                "next_start_line": (result.truncated || result.total_lines.is_some_and(|total| shown < total)).then(|| shown.saturating_add(1)),
-                "truncated": result.truncated, "raw_output_available": true
-            }).to_string();
+                "next_start_line": next,
+                "truncated": result.truncated,
+                "line_truncated": result.line_truncated,
+                "raw_output_available": true
+            });
+            if result.line_truncated {
+                view["note"] = json!(format!(
+                    "line {start} is longer than the allowance; only its beginning is shown. \
+                     Use search to locate content inside this line."
+                ));
+            }
+            return view.to_string();
         }
         let pretty = serde_json::from_str::<Value>(&self.raw_output)
             .and_then(|value| serde_json::to_string_pretty(&value))
@@ -314,6 +416,273 @@ pub fn path_error(path: &std::path::Path, error: &std::io::Error) -> crate::Tool
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Tool;
+    use std::fmt::Write as _;
+
+    /// A first line longer than the allowance used to produce an empty body and
+    /// the same `next_start_line`, so a reread could never make progress.
+    #[test]
+    fn oversized_first_line_keeps_a_prefix_and_advances() {
+        let result = ToolResult::from_output(&crate::ToolOutput::Verbatim {
+            text: format!("1: {}\n2: short\n", "é".repeat(200)),
+            total_lines: 2,
+            start_line: 1,
+        });
+        let compacted = result.compact_verbatim(10);
+        assert_eq!(compacted.raw_output, "1: ééééééé");
+        assert!(compacted.line_truncated);
+        assert!(compacted.truncated);
+
+        let view: Value = serde_json::from_str(&result.model_view(10)).unwrap();
+        assert_eq!(view["line_truncated"], true);
+        assert_eq!(view["next_start_line"], 2);
+        assert_eq!(view["start_line"], 1);
+        assert_eq!(view["shown_through_line"], 1);
+        assert_eq!(view["total_lines"], 2);
+        assert!(view["note"].as_str().unwrap().contains("search"));
+
+        // The next read starts at line 2 and completes normally.
+        let next: Value = serde_json::from_str(
+            &ToolResult::from_output(&crate::ToolOutput::Verbatim {
+                text: "2: short\n".into(),
+                total_lines: 2,
+                start_line: 2,
+            })
+            .model_view(10),
+        )
+        .unwrap();
+        assert_eq!(next["line_truncated"], false);
+        assert!(next["next_start_line"].is_null());
+    }
+
+    /// A clipped line in the middle of a range must not be reported as shown, and
+    /// the projection must not claim a partial line was complete.
+    #[test]
+    fn oversized_later_line_stops_before_it_without_line_truncation() {
+        let result = ToolResult::from_output(&crate::ToolOutput::Verbatim {
+            text: format!("1: ab\n2: {}\n", "x".repeat(100)),
+            total_lines: 2,
+            start_line: 1,
+        });
+        let view: Value = serde_json::from_str(&result.model_view(10)).unwrap();
+        assert_eq!(view["output"], "1: ab\n");
+        assert_eq!(view["line_truncated"], false);
+        assert_eq!(view["shown_through_line"], 1);
+        assert_eq!(view["next_start_line"], 2);
+        assert!(view.get("note").is_none());
+    }
+
+    /// Verbatim views carry only source fields; the removed ones carry no
+    /// information for declared source text.
+    #[test]
+    fn verbatim_view_omits_fields_it_cannot_inform() {
+        let result = ToolResult::from_output(&crate::ToolOutput::Verbatim {
+            text: "1: content\n".into(),
+            total_lines: 1,
+            start_line: 1,
+        });
+        let view: Value = serde_json::from_str(&result.model_view(4096)).unwrap();
+        let mut keys: Vec<_> = view.as_object().unwrap().keys().cloned().collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            [
+                "line_truncated",
+                "next_start_line",
+                "output",
+                "raw_output_available",
+                "shown_through_line",
+                "start_line",
+                "total_lines",
+                "truncated",
+                "verbatim"
+            ]
+        );
+    }
+
+    /// Even a zero allowance must not leave the model stuck on one line.
+    #[test]
+    fn zero_allowance_still_advances_past_a_long_first_line() {
+        let result = ToolResult::from_output(&crate::ToolOutput::Verbatim {
+            text: format!("1: {}\n", "x".repeat(50)),
+            total_lines: 1,
+            start_line: 1,
+        });
+        let view: Value = serde_json::from_str(&result.model_view(0)).unwrap();
+        assert_eq!(view["output"], "");
+        assert_eq!(view["line_truncated"], true);
+        assert_eq!(view["next_start_line"], 2);
+    }
+
+    /// Compact JSON must reach the model byte for byte, differing only by the
+    /// declared `N: ` prefixes.
+    #[test]
+    fn compact_json_source_keeps_exact_bytes() {
+        let body = r#"{"name":"ax","scripts":{"build":"tsc"},"private":true}"#;
+        let result = ToolResult::from_output(&crate::ToolOutput::Verbatim {
+            text: format!("1: {body}"),
+            total_lines: 1,
+            start_line: 1,
+        });
+        let view: Value = serde_json::from_str(&result.model_view(4096)).unwrap();
+        assert_eq!(view["output"], format!("1: {body}"));
+        assert_eq!(result.source_text(), body);
+    }
+
+    /// A `warning:` line is source content; successful shell-style output still
+    /// filters compiler warnings.
+    #[test]
+    fn warning_lines_survive_source_and_vanish_from_command_output() {
+        let source = ToolResult::from_output(&crate::ToolOutput::Verbatim {
+            text: "1: warning: file content\n".into(),
+            total_lines: 1,
+            start_line: 1,
+        });
+        assert!(source.model_view(4096).contains("warning: file content"));
+
+        let command = ToolResult::new(
+            true,
+            "warning: unused variable\nbuild complete\nexit_code: 0".into(),
+        );
+        let view: Value = serde_json::from_str(&command.model_view(4096)).unwrap();
+        assert_eq!(view["status"], "success");
+        assert!(!view["output"].as_str().unwrap().contains("warning:"));
+        assert!(view["output"].as_str().unwrap().contains("build complete"));
+    }
+
+    /// Old saved envelopes predate the additive fields and stay ordinary text.
+    #[test]
+    fn legacy_envelope_without_source_fields_is_plain_text() {
+        let old = r#"{"status":"success","summary":"Operation succeeded","diagnostics":[],"raw_output":"exit_code: 0\nok","truncated":false}"#;
+        let result: ToolResult = serde_json::from_str(old).unwrap();
+        assert!(!result.verbatim);
+        assert!(!result.line_truncated);
+        assert!(result.start_line.is_none());
+        let view: Value = serde_json::from_str(&result.model_view(4096)).unwrap();
+        assert_eq!(view["output"], "exit_code: 0\nok");
+        assert_eq!(view["status"], "success");
+    }
+
+    /// `source_text` restores the original body; a non-contiguous prefix run is
+    /// returned untouched rather than being partly stripped.
+    #[test]
+    fn source_text_round_trips_or_returns_the_original() {
+        let declared = ToolResult::from_output(&crate::ToolOutput::Verbatim {
+            text: "7: first\n8: 9: literal\n".into(),
+            total_lines: 8,
+            start_line: 7,
+        });
+        assert_eq!(declared.source_text(), "first\n9: literal\n");
+
+        let broken = ToolResult::from_output(&crate::ToolOutput::Verbatim {
+            text: "7: first\n9: second\n".into(),
+            total_lines: 9,
+            start_line: 7,
+        });
+        assert_eq!(broken.source_text(), "7: first\n9: second\n");
+    }
+
+    /// Old caches were a plain `HashMap<String, String>` of raw output.
+    #[test]
+    fn legacy_result_cache_deserializes_as_raw_output() {
+        let cache: HashMap<String, RetainedOutput> =
+            serde_json::from_str(r#"{"call-1":"exit_code: 0\nok"}"#).unwrap();
+        match &cache["call-1"] {
+            RetainedOutput::Raw(raw) => assert_eq!(raw, "exit_code: 0\nok"),
+            RetainedOutput::Verbatim(_) => panic!("legacy string must stay raw"),
+        }
+        assert!(!cache["call-1"].is_partial());
+    }
+
+    /// A `line_truncated` receipt holds only the beginning of its first line and
+    /// no complete line at all, so no range can be served from it; the error says
+    /// why instead of returning a fragment as if it were a line.
+    #[tokio::test]
+    async fn line_truncated_receipt_never_returns_half_a_line() {
+        let original = ToolResult::from_output(&crate::ToolOutput::Verbatim {
+            text: format!("1: {}\n2: second\n", "x".repeat(400)),
+            total_lines: 2,
+            start_line: 1,
+        });
+        let compacted = original.compact_verbatim(20);
+        assert!(compacted.line_truncated);
+        assert!(!compacted.raw_output.ends_with('\n'));
+        let view: Value = serde_json::from_str(&compacted.model_view(4096)).unwrap();
+        assert_eq!(view["next_start_line"], 2);
+
+        let reader = ResultReader::default();
+        reader.restore("half", &compacted);
+        for start in [1, 2] {
+            let error = reader
+                .execute_output(json!({"call_id":"half","start_line":start,"end_line":start}))
+                .await
+                .unwrap_err();
+            assert!(error.to_string().contains("no complete lines"), "{error}");
+            assert!(error.to_string().contains("search"), "{error}");
+        }
+
+        // A receipt that keeps a complete leading line still serves it.
+        let mixed = ToolResult::from_output(&crate::ToolOutput::Verbatim {
+            text: format!("1: ab\n2: {}\n", "y".repeat(400)),
+            total_lines: 2,
+            start_line: 1,
+        })
+        .compact_verbatim(20);
+        assert!(!mixed.line_truncated);
+        let reader = ResultReader::default();
+        reader.restore("mixed", &mixed);
+        let output = reader
+            .execute_output(json!({"call_id":"mixed","start_line":1,"end_line":1}))
+            .await
+            .unwrap();
+        assert_eq!(ToolResult::from_output(&output).raw_output, "1: ab\n");
+    }
+
+    /// A compacted envelope restored from history must not be treated as the
+    /// complete receipt: an unretained range reports why instead of going empty.
+    #[tokio::test]
+    async fn truncated_receipt_refuses_ranges_it_no_longer_retains() {
+        let original = ToolResult::from_output(&crate::ToolOutput::Verbatim {
+            text: (1..=40).fold(String::new(), |mut text, n| {
+                let _ = writeln!(text, "{n}: line {n}");
+                text
+            }),
+            total_lines: 40,
+            start_line: 1,
+        });
+        let reader = ResultReader::default();
+        reader.restore("read", &original);
+        let compacted = original.compact_verbatim(60);
+        assert!(compacted.truncated);
+        reader.restore("read", &compacted);
+        let retained = compacted.raw_output.split_inclusive('\n').count();
+        {
+            let store = reader.0.read().unwrap();
+            assert!(
+                matches!(&store["read"], RetainedOutput::Verbatim(r) if r.raw_output.len() > compacted.raw_output.len()),
+                "a compacted projection must not replace the complete receipt"
+            );
+        }
+
+        // With only the truncated envelope available, the cache stays partial.
+        let partial = ResultReader::default();
+        partial.restore("read", &compacted);
+        let error = partial
+            .execute_output(json!({"call_id":"read","start_line":39,"end_line":40}))
+            .await
+            .unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("retained only lines"), "{message}");
+        assert!(message.contains("search"), "{message}");
+        assert!(retained < 40);
+
+        let inside = partial
+            .execute_output(json!({"call_id":"read","start_line":1,"end_line":2}))
+            .await
+            .unwrap();
+        assert!(matches!(inside, crate::ToolOutput::Verbatim { .. }));
+    }
+
     #[test]
     fn legacy_shell_errors_remain_errors() {
         assert_eq!(

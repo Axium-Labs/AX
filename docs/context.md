@@ -81,9 +81,11 @@ original file coordinates. Source content does not become `diagnostics`.
 Oversized bodies are clipped only between complete lines within the shared
 allowance. The projection supplies `total_lines`, `shown_through_line` and,
 when clipped, `next_start_line`, so the next read can resume at an exact file
-line. A line larger than the allowance produces an empty body and the same next
-line instead of a partial source line. Non-verbatim results retain their existing
-JSON formatting, diagnostic extraction and warning cleanup.
+line. A line larger than the allowance keeps only its beginning on a UTF-8
+character boundary, sets `line_truncated`, and points `next_start_line` at the
+following line: the projection advances instead of repeating an empty line, and
+`search` locates content deeper inside that line. Non-verbatim results retain
+their existing JSON formatting, diagnostic extraction and warning cleanup.
 
 ## Compression
 
@@ -109,9 +111,14 @@ summary; the authoritative raw result remains available. See
 
 The retained-output cache preserves verbatim envelopes and their source
 coordinates across restore; legacy plain-string entries are still supported.
-`tool_output` ranges over a file receipt use original file coordinates and keep
-its existing prefixes and line endings. Ordinary shell receipt reads retain
-their existing formatting behavior.
+Restore rebuilds the cache from saved messages, which may already hold a
+compacted projection, so a truncated envelope never replaces a complete receipt
+for the same call. `tool_output` refuses a range that a truncated receipt no
+longer retains instead of answering an empty range. Ranges over a file receipt
+use original file coordinates and keep its existing prefixes and line endings.
+Ordinary shell receipt reads retain their existing formatting behavior. Rotation
+shrinks retained rounds by halving each result per pass, so the work stays
+logarithmic in body size while still retaining only complete lines.
 
 **Automatic** pressure checks run before each model request, using
 projected next-request size against the shared `ContextBudget` pool.
