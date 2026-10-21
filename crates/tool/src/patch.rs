@@ -248,3 +248,7 @@ mod tests {
         drop(cleanup);
     }
 }
+
+#[cfg(test)]
+#[path = "../../../test/round4_regressions/patch.rs"]
+mod round4_regressions;

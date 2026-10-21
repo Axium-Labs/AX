@@ -152,15 +152,7 @@ fn jsonl_append_survives_failed_ledger_save_without_double_usage() {
     f.engine
         .apply(create("release-check", ids.clone()), 100_000)
         .unwrap();
-    f.engine
-        .apply(
-            Action::Promote {
-                name: "release-check".into(),
-                evidence: ids,
-            },
-            100_000,
-        )
-        .unwrap();
+    f.confirm_trial("release-check");
     let path = f.engine.root.join("ledger.json");
     let backup = f.engine.root.join("ledger.backup");
     fs::rename(&path, &backup).unwrap();
@@ -298,15 +290,7 @@ fn legacy_migration_preserves_skill_usage_and_recovers_orphan_usage() {
     f.engine
         .apply(create("release-check", ids.clone()), 100_000)
         .unwrap();
-    f.engine
-        .apply(
-            Action::Promote {
-                name: "release-check".into(),
-                evidence: ids,
-            },
-            100_000,
-        )
-        .unwrap();
+    f.confirm_trial("release-check");
     let mut e = experience(6);
     e.skills_used.push("release-check".into());
     f.engine.record(e.clone()).unwrap();

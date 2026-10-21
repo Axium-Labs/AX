@@ -148,7 +148,7 @@ async fn child_reads_and_lists_are_bound_to_the_child_workspace() {
             json!({"operation":"read","path":"src/main.rs"})
         )
         .await,
-        "fn main() {}\n"
+        "1: fn main() {}\n"
     );
     assert_eq!(
         text_call(&child, "filesystem", json!({"operation":"list","path":"."})).await,

@@ -573,10 +573,10 @@ impl Tool for LargeTestTool {
     }
     async fn execute(&self, input: Value) -> Result<String, ToolError> {
         if input["large"] == true {
-            Ok(format!(
+            Err(ToolError::Execution(format!(
                 "cargo test\n{}\ntest result: FAILED. 243 passed; 1 failed\nparser::tests::nested\nsrc/parser.rs:281 stack overflow\nexit=101",
                 "progress line\n".repeat(2000)
-            ))
+            )))
         } else {
             Ok("quick check passed".into())
         }

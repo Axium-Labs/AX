@@ -1,27 +1,21 @@
 # Round 4 regression tests
 
-Base: AX `main@d761fdc`; branch `test/round-4-regressions`.
+These tests are part of the workspace's regular test suite:
 
-Tests stay under `test/` per workspace rules. No implementation or production
-Cargo target depends on these files. `run.py` creates a disposable copy and adds
-only test modules and a harness-free Linux test target there. It uses the actual
-production implementations, including the private worker `process()` and
-`parse_actions()` functions; it does not extract or copy their logic.
-
-```powershell
-python test/round4_regressions/run.py ../axtest/round4-regressions-run
-cargo test --workspace --manifest-path ../axtest/round4-regressions-run/Cargo.toml
+```sh
+cargo test --workspace
 ```
 
-Keep separate Cargo target directories for the original tree and the disposable
-copy so switching trees cannot reuse a test binary from a different module set.
+The unit tests are included by `patch.rs` and `worker.rs` under `#[cfg(test)]`.
+They exercise the actual implementations, including the private worker
+`process()` and `parse_actions()` functions.
 
-The runner also emits a tar archive. Extract it to a native Linux filesystem,
-then run `cargo test --workspace --no-fail-fast` there. The Linux sandbox cannot
-use the Windows-mounted WSL filesystem as its confined workspace. The Linux
-target skips its six cases only when `/usr/bin/bwrap` is absent; if bwrap exists,
-preparation or runtime failures fail the suite. On other platforms, the Linux
-target is excluded and prints a platform skip message.
+`linux.rs` is the `runtime-core` crate's `round4_regressions_linux` test target
+with `harness = false`. On Linux it runs all six sandbox cases when
+`/usr/bin/bwrap` exists; preparation or runtime failures fail the target. If
+`/usr/bin/bwrap` is absent, or the platform is not Linux, the target prints
+`SKIP` and exits successfully. Use a native Linux filesystem for the repository
+and sandbox workspace when running through WSL.
 
 ## Cross-platform unit tests
 
@@ -53,11 +47,3 @@ envelope's `permission_denied` and status. The search case requires an error;
 an empty successful result does not satisfy this regression. The disconnect
 case kills only the host proxy, then verifies its background child is absent
 or a non-executing zombie and the command group's heartbeat has stopped.
-
-## Known failing contract exposed on d761fdc
-
-The missing-search case returns success with an empty matches array and
-`permission_denied=false`, rather than an ordinary error. Its assertion is
-intentionally retained and is not ignored. This test-only task does not change
-the implementation. Therefore the Linux regression workspace has a failing
-target until that behavior is fixed in a separate implementation change.

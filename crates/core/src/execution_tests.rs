@@ -239,7 +239,7 @@ async fn loop_corrects_eight_ineffective_calls_and_history_survives_compression_
         .unwrap();
     let result: tool::ToolResult = serde_json::from_str(&observed.content).unwrap();
     assert_eq!(result.status, "success");
-    assert_eq!(result.raw_output, "dataset");
+    assert_eq!(result.raw_output, "1: dataset");
     assert_eq!(std::fs::read_to_string(output).unwrap(), "requested result");
     assert_eq!(kernel.execution_state().progress.advances, 1);
     assert!(!kernel.execution_state().progress.no_progress);
@@ -541,7 +541,7 @@ async fn search_no_match_allows_alternate_search_and_read() {
     assert_eq!(empty["matches"], json!([]));
     let found: Value = serde_json::from_str(&result_for(&kernel, 1).raw_output).unwrap();
     assert_eq!(found["matches"].as_array().unwrap().len(), 1);
-    assert_eq!(result_for(&kernel, 2).raw_output, "needle");
+    assert_eq!(result_for(&kernel, 2).raw_output, "1: needle");
     std::fs::remove_dir_all(root).unwrap();
 }
 #[tokio::test]

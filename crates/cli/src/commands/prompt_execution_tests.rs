@@ -52,6 +52,19 @@ fn call(id: &str, name: &str, input: &Value) -> ModelResponse {
         finish_reason: None,
     }
 }
+fn source_text(result: &Value) -> String {
+    assert_eq!(result["verbatim"], true);
+    result["output"]
+        .as_str()
+        .unwrap()
+        .split_inclusive('\n')
+        .map(|line| {
+            let (number, content) = line.split_once(": ").unwrap();
+            assert!(number.parse::<usize>().is_ok());
+            content
+        })
+        .collect()
+}
 #[async_trait]
 impl ModelProvider for DataProvider {
     fn name(&self) -> &'static str {
@@ -137,8 +150,8 @@ impl ModelProvider for DataProvider {
             ));
         };
         let result: Value = serde_json::from_str(&read.content).unwrap();
-        assert_eq!(result["status"], "success");
-        let dataset: Value = serde_json::from_str(result["output"].as_str().unwrap()).unwrap();
+        assert_eq!(result["verbatim"], true);
+        let dataset: Value = serde_json::from_str(&source_text(&result)).unwrap();
         if dataset.get("ax_work_items").is_some() {
             return Ok(call(
                 "delegate-inventory",

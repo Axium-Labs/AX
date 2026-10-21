@@ -2853,6 +2853,7 @@ dependencies = [
  "async-trait",
  "futures-util",
  "model",
+ "sandbox",
  "serde",
  "serde_json",
  "thiserror 2.0.20",

@@ -410,3 +410,7 @@ fn parse_actions(engine: &Engine, content: &str) -> Result<Vec<Action>> {
     }
     Ok(actions)
 }
+
+#[cfg(test)]
+#[path = "../../../test/round4_regressions/evolution.rs"]
+mod round4_regressions;

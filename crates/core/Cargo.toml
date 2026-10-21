@@ -17,7 +17,13 @@ futures-util.workspace = true
 url = "2"
 
 [dev-dependencies]
+sandbox = { path = "../sandbox" }
 tokio.workspace = true
 
 [lints]
 workspace = true
+
+[[test]]
+name = "round4_regressions_linux"
+path = "../../test/round4_regressions/linux.rs"
+harness = false

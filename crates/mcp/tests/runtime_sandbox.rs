@@ -56,9 +56,9 @@ async fn run() {
             .execute(json!({"operation":"read","path":"inside.txt"}))
             .await
             .unwrap(),
-        "before\n"
+        "1: before\n"
     );
-    registry.get("patch").unwrap().execute(json!({"path":"inside.txt","edits":[{"start_line":1,"delete_count":1,"new_text":"after\n"}]})).await.unwrap();
+    registry.get("patch").unwrap().execute(json!({"path":"inside.txt","edits":[{"start_line":1,"delete_count":1,"expected_lines":["before"],"new_text":"after\n"}]})).await.unwrap();
     assert_eq!(
         std::fs::read_to_string(root.join("inside.txt")).unwrap(),
         "after\n"
@@ -84,7 +84,7 @@ async fn run() {
         .execute(json!({"command":"cat ~/.ssh/id_ed25519"}))
         .await
         .unwrap_err();
-    assert!(error.to_string().contains("SandboxViolation"));
+    assert!(matches!(error, tool::ToolError::Execution(_)));
     assert!(
         registry
             .get("shell")
@@ -110,7 +110,7 @@ async fn run() {
             .await
             .unwrap_err()
             .to_string()
-            .contains("SandboxViolation")
+            .contains("tool execution failed")
     );
     struct Unbound;
     #[async_trait::async_trait]

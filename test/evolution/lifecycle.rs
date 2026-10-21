@@ -29,6 +29,22 @@ impl Fixture {
             })
             .collect()
     }
+    fn confirm_trial(&mut self, name: &str) {
+        self.engine.record(experience(99)).unwrap();
+        self.engine.ledger.epoch += 1;
+        self.engine
+            .apply(
+                Action::Promote {
+                    name: name.into(),
+                    evidence: self.engine.recent.iter().map(|e| e.id.clone()).collect(),
+                },
+                100_000,
+            )
+            .unwrap();
+        assert_eq!(self.engine.ledger.skills[name].state, State::Candidate);
+        let digest = self.engine.ledger.skills[name].digest.clone();
+        self.engine.review_candidate(name, &digest, true).unwrap();
+    }
 }
 impl Drop for Fixture {
     fn drop(&mut self) {
@@ -118,15 +134,11 @@ fn one_off_low_confidence_failed_and_cross_project_evidence_cannot_create() {
     for e in &mut f.engine.recent {
         e.success = true;
     }
-    assert!(f.engine.evidence_gate(&ids, 0.0, 100_000).unwrap() < f.engine.config.create_score);
+    assert!(f.engine.evidence_gate(&ids, 0.0).unwrap() < f.engine.config.create_score);
+    assert!(f.engine.evidence_gate(&["invented".into()], 1.0).is_err());
     assert!(
         f.engine
-            .evidence_gate(&["invented".into()], 1.0, 100_000)
-            .is_err()
-    );
-    assert!(
-        f.engine
-            .evidence_gate(&[ids[0].clone(), ids[0].clone()], 1.0, 100_000)
+            .evidence_gate(&[ids[0].clone(), ids[0].clone()], 1.0)
             .is_err()
     );
 }
@@ -152,16 +164,7 @@ fn lifecycle_routes_only_trial_and_active_and_requires_real_trial_outcomes() {
         f.engine.ledger.skills["release-check"].state,
         State::Candidate
     );
-    f.engine.ledger.epoch += 1;
-    f.engine
-        .apply(
-            Action::Promote {
-                name: "release-check".into(),
-                evidence: f.engine.ledger.skills["release-check"].evidence.clone(),
-            },
-            100_000,
-        )
-        .unwrap();
+    f.confirm_trial("release-check");
     assert_eq!(f.engine.ledger.skills["release-check"].state, State::Trial);
     assert_eq!(
         skill::SkillCatalog::index(f.engine.root.join("live"))
@@ -204,16 +207,7 @@ fn refinement_records_corrections_and_retrials_without_resetting_lifetime_counts
     f.engine
         .apply(create("release-check", ids.clone()), 100_000)
         .unwrap();
-    f.engine.ledger.epoch = 1;
-    f.engine
-        .apply(
-            Action::Promote {
-                name: "release-check".into(),
-                evidence: f.engine.ledger.skills["release-check"].evidence.clone(),
-            },
-            100_000,
-        )
-        .unwrap();
+    f.confirm_trial("release-check");
     for i in 6..12 {
         let mut e = experience(i);
         e.skills_used.push("release-check".into());
