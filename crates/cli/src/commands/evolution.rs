@@ -37,7 +37,11 @@ fn manage(cli: &Cli, command: &EvolutionCommand) -> Result<Value> {
                 "pending": engine.ledger.pending,
                 "last_analysis": engine.ledger.last_analysis,
                 "consecutive_failures": engine.ledger.consecutive_failures,
-                "backoff_secs": engine.analysis_cooldown(),
+                "backoff_secs": if engine.ledger.consecutive_failures == 0 {
+                    0
+                } else {
+                    engine.analysis_cooldown()
+                },
                 "pending_reviews": engine.ledger.trial_requests.len(),
             }))
         }
@@ -46,7 +50,11 @@ fn manage(cli: &Cli, command: &EvolutionCommand) -> Result<Value> {
                 .ledger
                 .skills
                 .iter()
-                .filter(|(_, meta)| meta.source == "evolved" && meta.project == engine.project)
+                .filter(|(_, meta)| {
+                    meta.source == "evolved"
+                        && meta.project == engine.project
+                        && meta.state != evolution::State::Deleted
+                })
                 .map(|(name, meta)| {
                     json!({
                         "name": name,

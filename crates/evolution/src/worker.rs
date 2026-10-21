@@ -208,7 +208,7 @@ Use the latest user correction as the authoritative preference when evidence con
 Return [] if no durable learning is justified.
 ";
 
-#[allow(clippy::too_many_arguments, clippy::too_many_lines)] // Keep the locked analysis boundary together.
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)] // Keep the analysis preparation/application boundary together.
 fn process(
     root: &std::path::Path,
     database: &std::path::Path,
@@ -219,7 +219,7 @@ fn process(
     command: Option<Command>,
     cached: &mut Option<Engine>,
 ) -> Result<bool> {
-    let _lock = Engine::writer_lock(root)?;
+    let lock = Engine::writer_lock(root)?;
     if let Some(engine) = cached {
         engine.refresh()?;
     } else {
@@ -246,10 +246,6 @@ fn process(
     if !engine.due(ended, time) {
         return Ok(false);
     }
-    // Persist attempt time before requesting a model, including failed/invalid analyses.
-    // Pending data remains available for the next eligible attempt.
-    engine.ledger.last_analysis = time;
-    engine.save()?;
     // Conservatively allow one UTF-8 byte per token; reserves derive from this provider.
     let budget = provider
         .context_window()
@@ -260,9 +256,18 @@ fn process(
         )
         .saturating_sub(CREATOR.len() + CONTRACT.len());
     let (input, cursor) = engine.prepare_analysis(budget)?;
+    let processed_cursor = engine.ledger.processed_cursor;
+    let evidence = engine.recent.clone();
+    let timeout_secs = engine.config.analysis_timeout_secs;
+    let max_actions = engine.config.max_actions;
+    // Persist attempt time before releasing the writer for the model request.
+    // Pending data remains available for the next eligible attempt.
+    engine.ledger.last_analysis = time;
+    engine.save()?;
+    drop(lock);
     let response = runtime.block_on(async {
         tokio::time::timeout(
-            std::time::Duration::from_secs(engine.config.analysis_timeout_secs),
+            std::time::Duration::from_secs(timeout_secs),
             provider.complete(ModelRequest {
                 messages: vec![
                     Message::system(format!("{CREATOR}\n{CONTRACT}")),
@@ -273,11 +278,29 @@ fn process(
         )
         .await
     });
-    let response = match response
+    let analysis = response
         .map_err(anyhow::Error::from)
         .and_then(|response| response.map_err(anyhow::Error::from))
-    {
-        Ok(response) => response,
+        .map(|response| {
+            ensure!(
+                response.tool_calls.is_empty(),
+                "analyzer cannot execute tools"
+            );
+            parse_analysis(&response.content, max_actions)
+        });
+    // Another process may have recorded observations or consumed this batch.
+    // Refresh before any audit, failure checkpoint or action from this attempt.
+    let _lock = Engine::writer_lock(root)?;
+    engine.refresh()?;
+    if engine.ledger.processed_cursor != processed_cursor {
+        engine.audit("ANALYSIS_SUPERSEDED", "analysis superseded")?;
+        return Ok(false);
+    }
+    // Appended observations can evict the prepared batch from the recent buffer.
+    // Validate actions against the evidence the model saw, with refreshed control state.
+    engine.recent = evidence;
+    let analysis = match analysis {
+        Ok(analysis) => analysis,
         Err(error) => {
             engine.ledger.consecutive_failures =
                 engine.ledger.consecutive_failures.saturating_add(1);
@@ -285,14 +308,7 @@ fn process(
             return Err(error);
         }
     };
-    let actions = (|| {
-        ensure!(
-            response.tool_calls.is_empty(),
-            "analyzer cannot execute tools"
-        );
-        parse_actions(engine, &response.content)
-    })();
-    let actions = match actions {
+    let actions = match analysis.and_then(|analysis| analysis.audit(engine)) {
         Ok(actions) => actions,
         Err(error) => {
             if error.is::<crate::storage::PersistenceFailure>() {
@@ -358,7 +374,23 @@ fn process(
     Ok(true)
 }
 
-fn parse_actions(engine: &Engine, content: &str) -> Result<Vec<Action>> {
+struct ParsedAnalysis {
+    actions: Vec<Action>,
+    audits: Vec<(&'static str, String)>,
+}
+
+impl ParsedAnalysis {
+    fn audit(self, engine: &Engine) -> Result<Vec<Action>> {
+        for (event, result) in self.audits {
+            engine
+                .audit(event, &result)
+                .context(crate::storage::PersistenceFailure)?;
+        }
+        Ok(self.actions)
+    }
+}
+
+fn parse_analysis(content: &str, max_actions: usize) -> Result<ParsedAnalysis> {
     // Try each opening bracket; streaming one value tolerates surrounding prose.
     let value = content
         .match_indices('[')
@@ -369,35 +401,28 @@ fn parse_actions(engine: &Engine, content: &str) -> Result<Vec<Action>> {
                 .ok()
         })
         .ok_or_else(|| anyhow::anyhow!("analysis has no JSON array"))?;
-    if value.len() > engine.config.max_actions {
-        engine
-            .audit(
-                "ANALYSIS_TRUNCATED",
-                &format!(
-                    "truncated {} actions to {}",
-                    value.len(),
-                    engine.config.max_actions
-                ),
-            )
-            .context(crate::storage::PersistenceFailure)?;
+    let mut audits = Vec::new();
+    if value.len() > max_actions {
+        audits.push((
+            "ANALYSIS_TRUNCATED",
+            format!("truncated {} actions to {max_actions}", value.len()),
+        ));
     }
     let mut actions = Vec::new();
-    for (index, value) in value
-        .into_iter()
-        .take(engine.config.max_actions)
-        .enumerate()
-    {
+    for (index, value) in value.into_iter().take(max_actions).enumerate() {
         match serde_json::from_value(value) {
             Ok(action) => actions.push(action),
-            Err(error) => engine
-                .audit(
-                    "INVALID_ACTION",
-                    &format!("invalid action {index}: {error}"),
-                )
-                .context(crate::storage::PersistenceFailure)?,
+            Err(error) => {
+                audits.push(("INVALID_ACTION", format!("invalid action {index}: {error}")));
+            }
         }
     }
-    Ok(actions)
+    Ok(ParsedAnalysis { actions, audits })
+}
+
+#[cfg(test)]
+fn parse_actions(engine: &Engine, content: &str) -> Result<Vec<Action>> {
+    parse_analysis(content, engine.config.max_actions)?.audit(engine)
 }
 
 #[cfg(test)]

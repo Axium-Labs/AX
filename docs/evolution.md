@@ -139,7 +139,10 @@ storage resolution and accepts the global `--data-dir` override; project UUIDs
 still isolate projects sharing that directory. Each subcommand acquires the
 same exclusive `<evolution-root>/writer.lock` as the learning worker before
 opening the Engine or reading or changing Evolution data. A command waits for
-the current writer and releases the lock when it finishes. Inspection can
+the current writer and releases the lock when it finishes. The worker holds
+this lock only while preparing an analysis or applying its result; it releases
+the lock during the model request and response parsing, so management commands
+can proceed while analysis is in flight. Inspection can
 perform normal Engine recovery or legacy-ledger migration under that lock.
 No provider request is needed.
 
@@ -157,21 +160,27 @@ ax evolution archive release-workflow
 ```
 
 - `status` returns `enabled`, `pending`, `last_analysis`,
-  `consecutive_failures`, `backoff_secs` and `pending_reviews`. `enabled`
+  `consecutive_failures`, `backoff_secs` and `pending_reviews`. `enabled` is
+  a boolean; the other fields are nonnegative integers. `enabled`
   combines both personalization gates with the project's Evolution `enabled`
   setting. `pending` counts Experiences awaiting analysis. `last_analysis` is
   the last persisted attempt time in Unix seconds (`0` means no attempt).
-  `backoff_secs` is the current scheduling interval, including the base
-  cooldown; it is not the remaining wait. Consecutive failures increase the
-  interval using the worker's existing exponential backoff.
+  `backoff_secs` is `0` when `consecutive_failures` is `0`. Otherwise it is
+  the worker's current exponential retry interval, including the base cooldown;
+  it is not the remaining wait. The ordinary cooldown still applies when
+  there are no failures.
 - `skills` returns an array of evolved Skill metadata with `name`, `state`,
   `use_count`, `success_count`, `failure_count`, `created_at`, `last_used_at`
-  and `evidence_count`. Timestamps use Unix seconds. Each entry's `digest` is
-  the queued review digest, or `null` when no review is pending.
+  and `evidence_count`. Deleted tombstones are omitted. Timestamps use Unix
+  seconds. Each entry includes `digest`: the queued review digest, or `null`
+  when no review is pending (including non-candidate Skills). `name` and the
+  lowercase `state` are strings; counters and timestamps are nonnegative
+  integers; `digest` is a string or `null`.
 - `show <name>` returns `name`, `state`, the complete file in `skill_md`, and
   `evidence` entries containing `id` and a `task` summary of at most 200 Unicode
   characters. Evidence is read from authoritative JSONL, including records
-  outside the worker's recent buffer.
+  outside the worker's recent buffer. `name`, `state` and `skill_md` are
+  strings; `evidence` is an array of objects with string `id` and `task` fields.
 - `review <name>` requires `--digest` and exactly one of `--accept` or
   `--reject`. It uses `Engine::review_candidate`: acceptance moves the queued
   candidate to trial; rejection archives it. A mismatched digest, changed
@@ -247,6 +256,14 @@ failures retain pending work and cannot authorize an unaudited skip. Attempt tim
 persists before requesting the provider. Consecutive failed analysis attempts
 double the cooldown, capped at 24 hours, across restarts; a successful analysis
 resets the backoff. The default request timeout is 120 seconds.
+Preparation snapshots the selected batch's end cursor and its starting
+`processed_cursor` while holding `writer.lock`, then persists `last_analysis`.
+The model request and parsing run without the lock. Before applying a result,
+the worker reacquires the lock and refreshes the Engine, preserving concurrent
+observations and management changes. If `processed_cursor` has changed, the
+worker discards the result and writes an `ANALYSIS_SUPERSEDED` audit with
+`analysis superseded`; it does not apply actions, run maintenance, consume
+evidence or alter failure/backoff counters for that obsolete attempt.
 Replaying a JSONL-only append recovers telemetry once;
 duplicate IDs are suppressed even outside the recent buffer and across restart.
 As before, separate Skill files, Memory, audit and ledger writes do not form a
