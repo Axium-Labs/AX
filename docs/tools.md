@@ -129,8 +129,10 @@ implementation, not two agents' worth of logic:
   `__pycache__`, caches, `coverage`, `vendor`, `.ax` and `child-runs` by default,
   honour `.gitignore` rules plus `.axignore` even outside a git checkout, never
   follow symlinks and never read files above 4 MB.
-- A search with no match returns `success` with an empty `matches` array. It is
-  an observation, not a failure.
+- An existing scope with no match returns `success` with an empty `matches`
+  array (`search`) or `paths` array (`find_files`/`glob`). A missing `path`/`root`
+  returns the same `path_error` execution diagnostic as `filesystem`, including
+  nearby candidate paths.
 - Traversal is provided by the `ignore` crate — the walker ripgrep uses — and
   matching by `regex`, so AX carries its own implementation and never shells out
   to a user-installed `rg`.
@@ -159,9 +161,10 @@ is involved.
 Tool descriptions supply default preferences without changing permissions or the
 dependency DAG. Prefer direct reads/lists for known paths, `find_files`/`glob` for
 unknown locations, and `search` for text, symbols or regexes. A known file may
-still need a targeted regex/symbol/usage search. An empty result is a successful
-observation; avoid identical searches without new evidence, but changed files,
-revised patterns/scopes or explicit user verification can justify another search.
+still need a targeted regex/symbol/usage search. An empty result from an existing
+scope is a successful observation; avoid identical searches without new evidence,
+but changed files, revised patterns/scopes or explicit user verification can justify
+another search.
 Identical discovery calls within one round retain the existing result reuse.
 
 Use shell for builds, tests, Git operations and command-line workflows. Prefer

@@ -284,8 +284,8 @@ fn render(root: &str, output: OutputMode, max_results: usize, mut collected: Col
     value.to_string()
 }
 
-/// One bounded, ignore-aware scan. Returns an empty result — never an error —
-/// when nothing matches.
+/// One bounded, ignore-aware scan. An existing scope with no matches returns
+/// an empty result.
 fn run(plan: &Plan) -> Result<Collected, ToolError> {
     let regex = regex::RegexBuilder::new(&plan.pattern)
         .case_insensitive(!plan.case_sensitive)
@@ -296,7 +296,9 @@ fn run(plan: &Plan) -> Result<Collected, ToolError> {
     let state = Mutex::new(Collected::default());
     let results = AtomicUsize::new(0);
     let stopped = AtomicBool::new(false);
-    if std::fs::symlink_metadata(&plan.root).is_ok_and(|metadata| metadata.is_file()) {
+    let metadata = std::fs::symlink_metadata(&plan.root)
+        .map_err(|error| crate::path_error(&plan.root, &error))?;
+    if metadata.is_file() {
         let relative = result_path(&plan.workspace, &plan.root, &plan.root);
         scan_file(
             plan, &regex, &state, &results, &stopped, &plan.root, relative,
@@ -567,6 +569,48 @@ mod tests {
         .await;
         assert_eq!(result["files"], json!(["src/lib.rs", "src/other.rs"]));
         assert_eq!(result["count"], 2);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn missing_scope_returns_path_error_for_path_and_root() {
+        let root = fixture();
+        let tool = SearchTool::new(root.clone());
+        for key in ["path", "root"] {
+            let mut input = json!({"query":"needle"});
+            input[key] = json!("sre");
+            let error = tool.execute(input).await.unwrap_err();
+            let ToolError::Execution(message) = error else {
+                panic!("expected path execution error, got {error:?}");
+            };
+            let result: Value = serde_json::from_str(&message).unwrap();
+            let diagnostic = &result["diagnostics"][0];
+            assert_eq!(diagnostic["kind"], "path_error");
+            assert_eq!(diagnostic["path"], json!(root.join("sre")));
+            assert!(
+                diagnostic["candidate_paths"]
+                    .as_array()
+                    .unwrap()
+                    .contains(&json!(root.join("src")))
+            );
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn existing_scope_without_matches_returns_successful_empty_result() {
+        let root = fixture();
+        let tool = SearchTool::new(root.clone());
+        for key in ["path", "root"] {
+            let mut input = json!({"query":"unlikely-ax-search-match-7b63"});
+            input[key] = json!("src");
+            let output = tool.execute(input).await.unwrap();
+            let result: Value = serde_json::from_str(&output).unwrap();
+            assert_eq!(result["root"], "src");
+            assert_eq!(result["matches"], json!([]));
+            assert_eq!(result["count"], 0);
+            assert_eq!(result["truncated"], false);
+        }
         std::fs::remove_dir_all(root).unwrap();
     }
 

@@ -203,7 +203,7 @@ impl Tool for FindFilesTool {
         let root = display_scope(&plan.workspace, &plan.root);
         let outcome = tokio::task::spawn_blocking(move || collect(&plan))
             .await
-            .map_err(|error| ToolError::Execution(error.to_string()))?;
+            .map_err(|error| ToolError::Execution(error.to_string()))??;
         Ok(json!({
             "root": root,
             "paths": outcome.paths,
@@ -216,32 +216,32 @@ impl Tool for FindFilesTool {
 }
 
 /// One bounded, ignore-aware traversal. Metadata only: no file is opened.
-fn collect(plan: &Plan) -> Outcome {
+fn collect(plan: &Plan) -> Result<Outcome, ToolError> {
     let mut outcome = Outcome {
         paths: Vec::new(),
         truncated: false,
         skipped: 0,
     };
-    if let Ok(metadata) = std::fs::symlink_metadata(&plan.root) {
-        if metadata.file_type().is_symlink() {
+    let metadata = std::fs::symlink_metadata(&plan.root)
+        .map_err(|error| crate::path_error(&plan.root, &error))?;
+    if metadata.file_type().is_symlink() {
+        outcome.skipped += 1;
+        return Ok(outcome);
+    }
+    if metadata.is_file() {
+        let name = file_name(&plan.root);
+        if plan.kind.accepts(false) && plan.globs.allows(&name, &name) {
+            outcome
+                .paths
+                .push(result_path(&plan.workspace, &plan.root, &plan.root));
+        } else {
             outcome.skipped += 1;
-            return outcome;
         }
-        if metadata.is_file() {
-            let name = file_name(&plan.root);
-            if plan.kind.accepts(false) && plan.globs.allows(&name, &name) {
-                outcome
-                    .paths
-                    .push(result_path(&plan.workspace, &plan.root, &plan.root));
-            } else {
-                outcome.skipped += 1;
-            }
-            return outcome;
-        }
-        if !metadata.is_dir() {
-            outcome.skipped += 1;
-            return outcome;
-        }
+        return Ok(outcome);
+    }
+    if !metadata.is_dir() {
+        outcome.skipped += 1;
+        return Ok(outcome);
     }
     for entry in walker(&plan.root, plan.max_depth).build() {
         let Ok(entry) = entry else {
@@ -276,7 +276,7 @@ fn collect(plan: &Plan) -> Outcome {
         }
     }
     outcome.paths.sort_unstable();
-    outcome
+    Ok(outcome)
 }
 
 fn file_name(path: &Path) -> String {
@@ -388,6 +388,48 @@ mod tests {
             .map(|path| path.as_str().unwrap())
             .collect();
         assert_eq!(names, vec!["axout", "src", "tests"]);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn missing_scope_returns_path_error_for_path_and_root() {
+        let root = fixture();
+        let tool = FindFilesTool::new(root.clone());
+        for key in ["path", "root"] {
+            let mut input = json!({"pattern":"*.rs"});
+            input[key] = json!("sre");
+            let error = tool.execute(input).await.unwrap_err();
+            let ToolError::Execution(message) = error else {
+                panic!("expected path execution error, got {error:?}");
+            };
+            let result: Value = serde_json::from_str(&message).unwrap();
+            let diagnostic = &result["diagnostics"][0];
+            assert_eq!(diagnostic["kind"], "path_error");
+            assert_eq!(diagnostic["path"], json!(root.join("sre")));
+            assert!(
+                diagnostic["candidate_paths"]
+                    .as_array()
+                    .unwrap()
+                    .contains(&json!(root.join("src")))
+            );
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn existing_scope_without_matches_returns_successful_empty_result() {
+        let root = fixture();
+        let tool = FindFilesTool::new(root.clone());
+        for key in ["path", "root"] {
+            let mut input = json!({"pattern":"*.unlikely-ax-find-match-7b63"});
+            input[key] = json!("src");
+            let output = tool.execute(input).await.unwrap();
+            let result: Value = serde_json::from_str(&output).unwrap();
+            assert_eq!(result["root"], "src");
+            assert_eq!(result["paths"], json!([]));
+            assert_eq!(result["count"], 0);
+            assert_eq!(result["truncated"], false);
+        }
         std::fs::remove_dir_all(root).unwrap();
     }
 
