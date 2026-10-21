@@ -3,7 +3,7 @@
 use std::num::NonZeroUsize;
 use std::path::PathBuf;
 
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 
 use crate::config;
 
@@ -65,8 +65,44 @@ pub(crate) struct Cli {
     #[command(subcommand)]
     pub(crate) command: Option<Command>,
 }
+
+/// Preserve clap's usual UX, while the Evolution command also reports parse errors as JSON.
+pub(crate) fn parse() -> Cli {
+    let arguments = std::env::args_os().collect::<Vec<_>>();
+    match Cli::try_parse_from(&arguments) {
+        Ok(cli) => cli,
+        Err(error) => {
+            // Clap's partial parser understands option values, so a value named
+            // "evolution" cannot accidentally opt another command into JSON mode.
+            let evolution = Cli::command()
+                .ignore_errors(true)
+                .mut_subcommand("evolution", |command| {
+                    command
+                        .disable_help_flag(true)
+                        .disable_help_subcommand(true)
+                        .mut_subcommands(|command| command.disable_help_flag(true))
+                })
+                .try_get_matches_from(&arguments)
+                .is_ok_and(|matches| matches.subcommand_name() == Some("evolution"));
+            if evolution {
+                if error.use_stderr() {
+                    crate::commands::evolution::fail(error, 2);
+                }
+                println!("{}", serde_json::json!({"help": error.to_string()}));
+                std::process::exit(0);
+            }
+            error.exit()
+        }
+    }
+}
+
 #[derive(Subcommand)]
 pub(crate) enum Command {
+    /// Inspect and manage evolved Skills in the current project. All output is JSON.
+    Evolution {
+        #[command(subcommand)]
+        command: EvolutionCommand,
+    },
     /// Manage independent application/site access; never weakens the workspace sandbox.
     HostPermissions {
         #[arg(long, value_parser = ["computer", "browser"])]
@@ -215,6 +251,28 @@ pub(crate) enum Command {
     },
     /// Start the inline terminal UI while preserving native scrollback.
     Tui,
+}
+
+#[derive(Subcommand)]
+pub(crate) enum EvolutionCommand {
+    /// Show observation backlog, analysis retry interval and queued review count.
+    Status,
+    /// List evolved-Skill lifecycle metadata and queued review digests.
+    Skills,
+    /// Show the full Skill file and up to 200 characters of each evidence task.
+    Show { name: String },
+    /// Resolve a queued review only if its exact content digest still matches.
+    Review {
+        name: String,
+        #[arg(long)]
+        digest: String,
+        #[arg(long, conflicts_with = "reject", required_unless_present = "reject")]
+        accept: bool,
+        #[arg(long, conflicts_with = "accept", required_unless_present = "accept")]
+        reject: bool,
+    },
+    /// Archive an owned candidate, trial or active Skill using its lifecycle rules.
+    Archive { name: String },
 }
 #[derive(Subcommand)]
 pub(crate) enum CapabilityCommand {

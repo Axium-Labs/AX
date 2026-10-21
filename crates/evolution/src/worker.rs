@@ -1,8 +1,9 @@
 use crate::{Action, CREATOR, Engine, Experience, now};
 use anyhow::{Context, Result, ensure};
 use model::{Message, ModelProvider, ModelRequest};
+#[cfg(test)]
+use std::fs;
 use std::{
-    fs,
     path::PathBuf,
     sync::{
         Arc, Mutex,
@@ -218,19 +219,7 @@ fn process(
     command: Option<Command>,
     cached: &mut Option<Engine>,
 ) -> Result<bool> {
-    for path in root.ancestors() {
-        crate::storage::plain(path)?;
-    }
-    fs::create_dir_all(root)?;
-    let lock_path = root.join("writer.lock");
-    crate::storage::plain(&lock_path)?;
-    let lock = fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .read(true)
-        .write(true)
-        .open(lock_path)?;
-    lock.lock()?; // Blocking happens exclusively on this worker thread; OS releases crash locks.
+    let _lock = Engine::writer_lock(root)?;
     if let Some(engine) = cached {
         engine.refresh()?;
     } else {

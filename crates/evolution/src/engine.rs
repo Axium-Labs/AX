@@ -8,7 +8,7 @@ use std::{
     collections::{BTreeMap, HashMap},
     fs,
     io::Write,
-    path::PathBuf,
+    path::{Path, PathBuf},
 };
 
 use anyhow::{Context, Result, ensure};
@@ -41,6 +41,25 @@ pub struct Engine {
 }
 
 impl Engine {
+    /// Hold this file for the entire read/modify operation, including `open`.
+    /// The worker and management commands share this process-safe writer lock.
+    pub fn writer_lock(root: &Path) -> Result<fs::File> {
+        for path in root.ancestors() {
+            plain(path)?;
+        }
+        fs::create_dir_all(root)?;
+        let path = root.join("writer.lock");
+        plain(&path)?;
+        let lock = fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(path)?;
+        lock.lock()?;
+        Ok(lock)
+    }
+
     pub fn open(root: PathBuf, database: PathBuf, project: String) -> Result<Self> {
         // Check every ancestor, including junctions on Windows.
         for path in root.ancestors() {
@@ -408,7 +427,9 @@ impl Engine {
             && (ended || self.ledger.pending >= self.config.batch_size)
             && time.saturating_sub(self.ledger.last_analysis) >= self.analysis_cooldown()
     }
-    fn analysis_cooldown(&self) -> u64 {
+    /// Current persisted retry interval, including the ordinary cooldown.
+    #[must_use]
+    pub fn analysis_cooldown(&self) -> u64 {
         const MAX_BACKOFF_SECS: u64 = 24 * 60 * 60;
         if self.ledger.consecutive_failures == 0 {
             return self.config.cooldown_secs;
@@ -455,6 +476,16 @@ impl Engine {
         Ok(directory)
     }
     pub fn owned(&self, name: &str) -> Result<String> {
+        let text = self.skill_text(name)?;
+        ensure!(
+            digest(&text) == self.ledger.skills[name].digest,
+            "skill edited externally; automatic mutation refused"
+        );
+        Ok(text)
+    }
+    /// Inspect a project's evolved package even if the user edited its text.
+    /// Mutations must still use `owned` to enforce its recorded content digest.
+    pub fn skill_text(&self, name: &str) -> Result<String> {
         let meta = self
             .ledger
             .skills
@@ -466,12 +497,29 @@ impl Engine {
                 && meta.state != State::Deleted,
             "protected skill"
         );
-        let text = fs::read_to_string(self.path(name, meta.state)?.join("SKILL.md"))?;
+        Ok(fs::read_to_string(
+            self.path(name, meta.state)?.join("SKILL.md"),
+        )?)
+    }
+    /// Read retained raw evidence by its indexed byte range, outside the recent window.
+    pub fn experience(&self, id: &str) -> Result<Experience> {
+        let index = self
+            .ids
+            .get(id)
+            .ok_or_else(|| anyhow::anyhow!("unknown evidence: {id}"))?;
+        let (_, start, end) = self.records[*index];
+        let (experience, _, _) = crate::storage::read_experiences_range(
+            &self.root.join("experiences.jsonl"),
+            start,
+            end,
+        )?
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("missing evidence: {id}"))??;
         ensure!(
-            digest(&text) == meta.digest,
-            "skill edited externally; automatic mutation refused"
+            experience.id == id && experience.project == self.project,
+            "wrong evidence identity"
         );
-        Ok(text)
+        Ok(experience)
     }
     pub(crate) fn evidence<'a>(&'a self, ids: &[String]) -> Result<Vec<&'a Experience>> {
         let unique: std::collections::BTreeSet<_> = ids.iter().collect();
@@ -605,6 +653,10 @@ impl Engine {
                 State::Archived
             },
         )
+    }
+    /// Explicit user archival uses the same guarded lifecycle transition as retirement.
+    pub fn archive_skill(&mut self, name: &str) -> Result<()> {
+        self.transition(name, State::Archived)
     }
     fn can_archive(&self, name: &str) -> Result<()> {
         self.owned(name)?;

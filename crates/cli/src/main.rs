@@ -56,7 +56,6 @@ mod update;
 mod worktree_changes;
 
 use anyhow::{Result, anyhow};
-use clap::Parser;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -66,9 +65,12 @@ async fn main() -> Result<()> {
         return result;
     }
     let startup_timer = tool::telemetry::Timer::new("startup.resolve");
-    let cli = args::Cli::parse();
+    let cli = args::parse();
     if cli.update {
         if cli.command.is_some() {
+            if matches!(cli.command, Some(args::Command::Evolution { .. })) {
+                commands::evolution::fail("--update cannot be combined with a subcommand", 2);
+            }
             return Err(anyhow!("--update cannot be combined with a subcommand"));
         }
         return update::run().await;

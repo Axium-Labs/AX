@@ -47,6 +47,10 @@ fn read_answer() -> Result<Option<String>> {
 /// # Errors
 /// Returns an error when settings validation or the launcher fails.
 pub(crate) fn run_preflight(cli: &Cli) -> Result<bool> {
+    if let Some(Command::Evolution { command }) = &cli.command {
+        commands::evolution::run(cli, command);
+        return Ok(true);
+    }
     if let Some(Command::GoalSettings {
         scope,
         json_stdin,
@@ -234,6 +238,7 @@ pub(crate) async fn dispatch(
             | Command::Settings { .. }
             | Command::GoalSettings { .. }
             | Command::Personalize { .. }
+            | Command::Evolution { .. }
             | Command::ComputerUse { .. }
             | Command::HostPermissions { .. }
             | Command::Crew { .. }

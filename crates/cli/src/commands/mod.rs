@@ -7,6 +7,7 @@
 
 pub(crate) mod agents;
 pub(crate) mod backup;
+pub(crate) mod evolution;
 pub(crate) mod run;
 
 #[cfg(test)]
