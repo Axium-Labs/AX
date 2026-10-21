@@ -137,6 +137,7 @@ async fn execute(
                     fields.keys().all(|k| [
                         "memory",
                         "tool_memory",
+                        "evolution",
                         "writing",
                         "instructions",
                         "expected_instructions",
@@ -181,10 +182,9 @@ async fn execute(
                 if input["clear_writing_folder"] == true {
                     native.arg("--clear-writing-folder");
                 }
-                for (key, value) in fields
-                    .iter()
-                    .filter(|(k, _)| ["memory", "tool_memory", "writing"].contains(&k.as_str()))
-                {
+                for (key, value) in fields.iter().filter(|(k, _)| {
+                    ["memory", "tool_memory", "evolution", "writing"].contains(&k.as_str())
+                }) {
                     let enabled = value
                         .as_bool()
                         .ok_or_else(|| anyhow!("invalid personalization switch"))?;

@@ -119,9 +119,12 @@ pub(crate) enum Command {
         /// Master memory switch: retrieval, `remember` declarations and the memory tool.
         #[arg(long, action = clap::ArgAction::Set)]
         memory: Option<bool>,
-        /// Allow tool-driven memory creation and automatic Experience learning.
+        /// Allow tool-driven memory creation.
         #[arg(long, action = clap::ArgAction::Set)]
         tool_memory: Option<bool>,
+        /// Allow automatic Experience learning and Skill evolution.
+        #[arg(long, action = clap::ArgAction::Set)]
+        evolution: Option<bool>,
         #[arg(long, action = clap::ArgAction::Set)]
         writing: Option<bool>,
         /// Folder of the user's own documents used as a writing-style reference.

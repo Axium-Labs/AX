@@ -44,7 +44,7 @@ impl Recorder {
             skill_calls: HashMap::new(),
             sink: crate::config::AxConfig::load()
                 .ok()
-                .filter(|config| config.personalization.tool_memory_active())
+                .filter(|config| config.personalization.evolution_active())
                 .and_then(|_| state.evolution.as_ref().and_then(::evolution::Handle::sink)),
             completed: false,
             instruction_paths: state
@@ -333,7 +333,7 @@ impl ReplState {
     }
     pub(crate) fn evolution_prepare(&mut self, selection: &ModelSelection) {
         if !crate::config::AxConfig::load()
-            .is_ok_and(|config| config.personalization.tool_memory_active())
+            .is_ok_and(|config| config.personalization.evolution_active())
         {
             return;
         }

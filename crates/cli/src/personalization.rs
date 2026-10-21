@@ -4,9 +4,11 @@
 //!
 //! - `memory_enabled` is the master switch. Off means no memory is retrieved,
 //!   no `remember …` declaration is stored and the `memory` tool is absent.
-//! - `tool_memory` permits tool-driven memory changes and Experience learning.
+//! - `tool_memory` permits tool-driven memory changes.
 //!   Off leaves existing recall and explicit `remember` declarations available,
-//!   but memory tools cannot store new facts and Evolution does not learn.
+//!   but memory tools cannot store new facts.
+//! - `evolution` independently permits Experience recording and analysis when
+//!   memory is enabled. Old configurations inherit their `tool_memory` value.
 //! - Custom instructions are the global instruction file `<AX home>/AGENTS.md`,
 //!   already resolved first in every turn's project instructions.
 //! - `writing_folder` points at the user's own documents. Short excerpts are
@@ -34,15 +36,45 @@ const fn default_true() -> bool {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "StoredPersonalization")]
+#[allow(clippy::struct_excessive_bools)] // Independent user-configured switches persist as booleans.
 pub struct PersonalizationConfig {
     #[serde(default = "default_true")]
     pub memory_enabled: bool,
     #[serde(default = "default_true")]
     pub tool_memory: bool,
+    pub evolution: bool,
     #[serde(default)]
     pub writing_enabled: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub writing_folder: Option<PathBuf>,
+}
+
+/// Missing Evolution settings preserve the pre-split learning behavior.
+#[derive(Deserialize)]
+struct StoredPersonalization {
+    #[serde(default = "default_true")]
+    memory_enabled: bool,
+    #[serde(default = "default_true")]
+    tool_memory: bool,
+    #[serde(default)]
+    evolution: Option<bool>,
+    #[serde(default)]
+    writing_enabled: bool,
+    #[serde(default)]
+    writing_folder: Option<PathBuf>,
+}
+
+impl From<StoredPersonalization> for PersonalizationConfig {
+    fn from(value: StoredPersonalization) -> Self {
+        Self {
+            memory_enabled: value.memory_enabled,
+            tool_memory: value.tool_memory,
+            evolution: value.evolution.unwrap_or(value.tool_memory),
+            writing_enabled: value.writing_enabled,
+            writing_folder: value.writing_folder,
+        }
+    }
 }
 
 impl Default for PersonalizationConfig {
@@ -50,6 +82,7 @@ impl Default for PersonalizationConfig {
         Self {
             memory_enabled: true,
             tool_memory: true,
+            evolution: true,
             writing_enabled: false,
             writing_folder: None,
         }
@@ -57,10 +90,10 @@ impl Default for PersonalizationConfig {
 }
 
 impl PersonalizationConfig {
-    /// Tool-driven memory creation and automatic learning require both switches.
+    /// Experience recording and analysis require the independent learning switch.
     #[must_use]
-    pub(crate) const fn tool_memory_active(&self) -> bool {
-        self.memory_enabled && self.tool_memory
+    pub(crate) const fn evolution_active(&self) -> bool {
+        self.memory_enabled && self.evolution
     }
 }
 
@@ -69,6 +102,7 @@ impl PersonalizationConfig {
 pub(crate) struct Changes<'a> {
     pub memory_enabled: Option<bool>,
     pub tool_memory: Option<bool>,
+    pub evolution: Option<bool>,
     pub writing_enabled: Option<bool>,
     pub writing_folder: Option<&'a Path>,
     pub clear_writing_folder: bool,
@@ -96,6 +130,9 @@ pub(crate) fn manage(home: &Path, changes: &Changes<'_>) -> Result<serde_json::V
     }
     if let Some(value) = changes.tool_memory {
         next.tool_memory = value;
+    }
+    if let Some(value) = changes.evolution {
+        next.evolution = value;
     }
     if let Some(value) = changes.writing_enabled {
         next.writing_enabled = value;
@@ -157,6 +194,7 @@ pub(crate) fn manage(home: &Path, changes: &Changes<'_>) -> Result<serde_json::V
     Ok(serde_json::json!({
         "memory_enabled": config.personalization.memory_enabled,
         "tool_memory": config.personalization.tool_memory,
+        "evolution": config.personalization.evolution,
         "writing_enabled": config.personalization.writing_enabled,
         "writing_folder": config.personalization.writing_folder,
         "instructions_path": target,

@@ -98,6 +98,7 @@ pub(crate) fn run_preflight(cli: &Cli) -> Result<bool> {
     if let Some(Command::Personalize {
         memory,
         tool_memory,
+        evolution,
         writing,
         writing_folder,
         clear_writing_folder,
@@ -111,6 +112,7 @@ pub(crate) fn run_preflight(cli: &Cli) -> Result<bool> {
             &crate::personalization::Changes {
                 memory_enabled: *memory,
                 tool_memory: *tool_memory,
+                evolution: *evolution,
                 writing_enabled: *writing,
                 writing_folder: writing_folder.as_deref(),
                 clear_writing_folder: *clear_writing_folder,
