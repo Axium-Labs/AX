@@ -93,15 +93,96 @@ promote automatically. The idle TUI displays the candidate instructions: `y`
 accepts trial, `n` archives, and Esc leaves the candidate pending for a later TUI
 session. Up/down scroll the instructions. Changed packages invalidate stale
 reviews. ACP and `ax run` keep candidate state and never accept these reviews.
+`ax evolution review` provides the same explicit decision outside the TUI.
 Trial-to-active still requires the existing successful trial usage gates.
 Trial and active Skills share a discoverable
 directory and use model-directed skill selection, elastic context budgets, enable/disable
 settings and tool permission checks. Archival immediately removes the package
-from discovery. Evolved instructions are refreshed after analysis and stripped
-from resumed snapshots so old archived instructions cannot be restored.
+from discovery. Other running sessions pick up changed package state on a later
+Skill catalog refresh or restart. Evolved instructions are refreshed after
+analysis and stripped from resumed snapshots so old archived instructions
+cannot be restored.
 Deleted entries retain bounded metadata tombstones and an append-only deletion
 audit; raw session history and Experience
 JSONL are never deleted by Evolution.
+
+## Personalization switches
+
+Evolution observation and worker preparation require both
+`personalization.memory_enabled` and the independent
+`personalization.evolution` switch. `personalization.tool_memory` controls
+tool-driven Memory writes; it no longer controls Experience learning. New
+installations default all three switches to `true`. When an existing
+personalization configuration has no `evolution` field, its value inherits
+that configuration's `tool_memory` value, preserving the previous learning
+behavior on upgrade. An explicit `evolution` value takes precedence.
+
+```bash
+ax personalize --evolution false
+ax personalize --tool-memory false --evolution true
+ax personalize
+```
+
+`ax personalize` returns the resulting `evolution` boolean with the other
+personalization fields in JSON. Turning Evolution off stops new Experience
+recording and worker preparation; `--memory false` also prevents both. The
+project Evolution configuration's `enabled` switch remains an additional gate
+for recording and analysis. These switches do not remove learned packages or
+disable inspection, review and archival. Existing live Skills can be disabled
+through `/skills`.
+
+## Evolution commands
+
+`ax evolution` operates on the project containing the current directory,
+including when invoked from a project subdirectory. It follows the normal
+storage resolution and accepts the global `--data-dir` override; project UUIDs
+still isolate projects sharing that directory. Each subcommand acquires the
+same exclusive `<evolution-root>/writer.lock` as the learning worker before
+opening the Engine or reading or changing Evolution data. A command waits for
+the current writer and releases the lock when it finishes. Inspection can
+perform normal Engine recovery or legacy-ledger migration under that lock.
+No provider request is needed.
+
+All command results are JSON on stdout. `--help`, including subcommand help,
+returns `{"help":"..."}`. A failed command or invalid Evolution arguments
+return `{"error":"..."}` and a nonzero exit status.
+
+```bash
+ax evolution status
+ax evolution skills
+ax evolution show release-workflow
+ax evolution review release-workflow --digest <digest> --accept
+ax evolution review release-workflow --digest <digest> --reject
+ax evolution archive release-workflow
+```
+
+- `status` returns `enabled`, `pending`, `last_analysis`,
+  `consecutive_failures`, `backoff_secs` and `pending_reviews`. `enabled`
+  combines both personalization gates with the project's Evolution `enabled`
+  setting. `pending` counts Experiences awaiting analysis. `last_analysis` is
+  the last persisted attempt time in Unix seconds (`0` means no attempt).
+  `backoff_secs` is the current scheduling interval, including the base
+  cooldown; it is not the remaining wait. Consecutive failures increase the
+  interval using the worker's existing exponential backoff.
+- `skills` returns an array of evolved Skill metadata with `name`, `state`,
+  `use_count`, `success_count`, `failure_count`, `created_at`, `last_used_at`
+  and `evidence_count`. Timestamps use Unix seconds. Each entry's `digest` is
+  the queued review digest, or `null` when no review is pending.
+- `show <name>` returns `name`, `state`, the complete file in `skill_md`, and
+  `evidence` entries containing `id` and a `task` summary of at most 200 Unicode
+  characters. Evidence is read from authoritative JSONL, including records
+  outside the worker's recent buffer.
+- `review <name>` requires `--digest` and exactly one of `--accept` or
+  `--reject`. It uses `Engine::review_candidate`: acceptance moves the queued
+  candidate to trial; rejection archives it. A mismatched digest, changed
+  package or absent pending review fails without accepting the candidate.
+  Obtain the digest from `skills` and review the full instructions with `show`
+  before deciding.
+- `archive <name>` uses the existing owned-package lifecycle transition to
+  archived state, removes the package from discovery and clears its pending
+  review. Review and archive results contain `name` and the resulting `state`.
+  Ownership, content-digest and lifecycle guards continue to apply; archival
+  does not delete raw Experiences or session history.
 
 ## Ownership, persistence and configuration
 
