@@ -133,6 +133,12 @@ Owns:
   When a configured budget or timeout fires, hanging tool calls get a
   placeholder result so the message record stays well-formed.
 - The **`AgentEvent` stream**: token deltas, tool state, compression events.
+  `SubagentActivity` scopes public delegated prose, tools and lifecycle by
+  execution identity, including immediate-parent links for nested delegation.
+  The ACP composition adapter renders these as separate child envelopes and
+  records parent-owned recovery indices; raw child history stays with its
+  existing child store and child reasoning is excluded. See
+  [ACP delegated activity](acp-crew.md#delegated-agent-activity).
 - **Dependency-aware tool rounds**: independent declared effects execute with
   bounded concurrency; typed result references and shared write resources add
   DAG edges. Process-wide leases serialize conflicting filesystem, Git and

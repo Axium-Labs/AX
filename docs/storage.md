@@ -247,6 +247,17 @@ placeholders and do not replay side effects.
 
 ### Child session persistence
 
+ACP also writes compact `[ax-subagent]` `AgentState` indices in the parent
+session for ordinary delegation and queue children. They retain the execution
+ID, optional immediate-parent ID, task, lifecycle/summary, and the private
+`ChildRun` locator. They use the existing JSONL/agent-state write path without a
+schema migration. These UI recovery indices are excluded from model context and
+context token accounting. Child prose/tool records stay in the child's own
+authoritative JSONL. ACP and Crew history views strip the private locator and
+recover scoped activity from owned child stores; see
+[ACP delegated activity](acp-crew.md#delegated-agent-activity) for validation and
+replay bounds.
+
 Queued tasks optionally contain a `child` descriptor (`goal_id`, `session_id`,
 `cwd`, `state_dir`, `memory_scope`, execution budget). Identity is checkpointed in the controller queue before
 child execution. Each child owns `state/child.sqlite3` and its separate

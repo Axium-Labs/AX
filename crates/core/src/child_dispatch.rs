@@ -106,6 +106,16 @@ impl AgentKernel {
                                 )?;
                             }
                             Prepared::Failed(index, error, _permit) => {
+                                let mut activity = crate::SubagentActivity::running(
+                                    uuid::Uuid::new_v4().to_string(),
+                                    self.task_queue.as_ref().unwrap().tasks[index]
+                                        .task_input()
+                                        .to_owned(),
+                                    None,
+                                );
+                                activity.status = "failed".into();
+                                activity.error = Some(error.to_string());
+                                (emit.lock().unwrap())(activity.into_event());
                                 reserved.retain(|(held, _)| *held != index);
                                 settled.push_back(
                                     self.preparation_failure_receipt(&host, index, &error),
@@ -314,10 +324,17 @@ impl AgentKernel {
         // so a disconnect can resume the same child instead of provisioning a
         // second one and redoing its side effects.
         self.checkpoint_queue(checkpoint)?;
+        let activity = crate::SubagentActivity::running(
+            child_id.clone(),
+            input.clone(),
+            Some(child.run.clone()),
+        );
+        (emit.lock().unwrap())(activity.clone().into_event());
         if let Some(mut result) = child.terminal.take() {
             // Already finished in an earlier process; never re-run it.
             result.child_id = child_id;
             result.task_id = task_id;
+            emit_child_finished(emit, activity, &result);
             settled.push_back((index, Some(child.run), result, ExecutionState::fresh()));
             return Ok(());
         }
@@ -399,30 +416,18 @@ where
     Box::pin(async move {
         let _permit = permit;
         let run = child.run.clone();
-        let session = run.session_id.clone();
+        let activity =
+            crate::SubagentActivity::running(child_id.clone(), input.clone(), Some(run.clone()));
         let mut kernel = child.kernel;
         let mut checkpoint = child.checkpoint;
         let observer = Mutex::new(ChildObserver::new());
         let shared = &observer;
         let outcome = {
             let sink: ChildSaveSink<'_> = Box::new(|messages| checkpoint.save(messages));
-            let event_session = session.clone();
-            let events: Box<dyn FnMut(AgentEvent) + Send + '_> = Box::new(move |mut event| {
+            let observed_activity = activity.clone();
+            let events: Box<dyn FnMut(AgentEvent) + Send + '_> = Box::new(move |event| {
                 shared.lock().unwrap().observe(&event);
-                match &mut event {
-                    AgentEvent::ToolStarted { id, .. } | AgentEvent::ToolFinished { id, .. } => {
-                        *id = format!("{event_session}:{id}");
-                    }
-                    _ => {}
-                }
-                // Child text and turn boundaries are not controller output.
-                if !matches!(
-                    event,
-                    AgentEvent::ContentDelta { .. }
-                        | AgentEvent::ModelConnection { .. }
-                        | AgentEvent::TurnStarted
-                        | AgentEvent::TurnFinished
-                ) {
+                if let Some(event) = observed_activity.observe(event) {
                     (emit.lock().unwrap())(event);
                 }
             });
@@ -446,8 +451,25 @@ where
                 .failure_reason
                 .get_or_insert_with(|| error.to_string());
         }
+        emit_child_finished(emit, activity, &result);
         (index, Some(run), result, child_state)
     })
+}
+
+fn emit_child_finished<F: FnMut(AgentEvent) + Send>(
+    emit: &Mutex<F>,
+    mut activity: crate::SubagentActivity,
+    result: &ChildResult,
+) {
+    activity.status = match result.status {
+        ChildStatus::Completed => "completed",
+        ChildStatus::Cancelled => "cancelled",
+        _ => "failed",
+    }
+    .into();
+    activity.summary = Some(result.summary.clone());
+    activity.error.clone_from(&result.failure_reason);
+    (emit.lock().unwrap())(activity.into_event());
 }
 
 fn classify_child_error(error: &AgentError) -> ChildStatus {

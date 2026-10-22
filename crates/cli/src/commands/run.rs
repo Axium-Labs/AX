@@ -113,6 +113,7 @@ fn render_event(event: AgentEvent) {
         | AgentEvent::Completion { .. }
         | AgentEvent::GoalEvaluated { .. }
         | AgentEvent::SubagentProgress { .. }
+        | AgentEvent::SubagentActivity { .. }
         | AgentEvent::TurnStarted
         | AgentEvent::ThinkingDelta { .. } => {}
     }

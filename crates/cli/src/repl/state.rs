@@ -446,6 +446,14 @@ impl ReplState {
                 .filter(|message| has_snapshot || message.kind != MessageKind::AgentState)
                 .map(restore_message),
         );
+        // Activity indices are UI recovery metadata, including when restored
+        // after an effective-context snapshot. Never expose their host paths
+        // or duplicate delegated prompts to the model.
+        self.loaded_messages.retain(|message| {
+            !message
+                .content
+                .starts_with(runtime_core::subagent::ACTIVITY_PREFIX)
+        });
         let recovered = session_restore::interrupted_results(&self.loaded_messages);
         // Persist recovery results without replaying tools with unknown side effects.
         for message in &recovered {

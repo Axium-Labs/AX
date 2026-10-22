@@ -133,8 +133,8 @@ git push origin v0.2.0
 
 The workflow:
 
-1. Builds Windows x64, Linux x64/arm64 musl and macOS Intel/Apple Silicon binaries.
-2. Packages Windows ZIP and Unix `.tar.gz` archives with the executable, `skills/`
+1. Builds the Windows x64 binary.
+2. Packages a Windows ZIP with the executable, `skills/`
    and `mcp.example.toml`; generates `SHA256SUMS` and publishes the GitHub Release.
    The release workflow does not run tests.
 
@@ -171,3 +171,6 @@ uses actual AX ACP workers and the Crew gateway with a controlled provider,
 including lease expiry, fenced takeover and cumulative Goal budget recovery.
 Local integration fixtures and their outputs are maintained outside the published
 build contract.
+
+Current release assets cover Windows x64 only; source support for other
+platforms is unchanged.

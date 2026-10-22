@@ -210,8 +210,12 @@ fn now_seconds() -> i64 {
         .unwrap_or(0)
 }
 
-fn update(out: &Outbox, session_id: &str, event: AgentEvent, calls: &mut HashMap<String, String>) {
+#[path = "acp_subagents.rs"]
+mod subagents;
+
+fn event_update(event: AgentEvent, calls: &mut HashMap<String, String>) -> Option<Value> {
     let body = match event {
+        AgentEvent::SubagentActivity { activity } => subagents::activity_update(&activity, calls),
         AgentEvent::SessionRotated {
             goal_id,
             previous_session,
@@ -286,7 +290,14 @@ fn update(out: &Outbox, session_id: &str, event: AgentEvent, calls: &mut HashMap
         | AgentEvent::ModelStarted { .. }
         | AgentEvent::ContextCompressed { .. }
         | AgentEvent::TurnStarted
-        | AgentEvent::TurnFinished => return,
+        | AgentEvent::TurnFinished => return None,
+    };
+    Some(body)
+}
+
+fn update(out: &Outbox, session_id: &str, event: AgentEvent, calls: &mut HashMap<String, String>) {
+    let Some(body) = event_update(event, calls) else {
+        return;
     };
     let _ = out.send(json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":session_id,"update":stamp(body, now_seconds())}}));
 }
@@ -301,10 +312,24 @@ pub(super) async fn run_session_prompt(
     session_id: &str,
 ) -> Result<String> {
     let mut calls = HashMap::new();
-    run_prompt_with(state, selection, approval, prompt, |event| {
+    let database = crate::bootstrap::database_path(&state.data_dir);
+    let mut activity_store = None;
+    let mut history_error = None;
+    let result = run_prompt_with(state, selection, approval, prompt, |event| {
+        if let AgentEvent::SubagentActivity { activity } = &event
+            && activity.event.is_none()
+            && let Err(error) =
+                subagents::persist(&mut activity_store, &database, session_id, activity)
+        {
+            history_error.get_or_insert(error);
+        }
         update(out, session_id, event, &mut calls);
     })
-    .await
+    .await;
+    if let Some(error) = history_error {
+        return Err(error.context("saving delegated run history"));
+    }
+    result
 }
 
 /// Every catalog provider AX cannot drive, with the reason. Clients render
@@ -558,15 +583,16 @@ fn apply_permission_profile(store: &PermissionStore, profile: Option<&str>) {
 }
 
 fn replay(out: &Outbox, session_id: &str, state: &mut ReplState) -> Result<()> {
-    replay_store(out, session_id, session_id, state.store()?, false)
+    let root = state.data_dir.join("child-runs");
+    let mut replay = subagents::HistoryReplay::new(out, session_id, &root);
+    replay_store(&mut replay, session_id, state.store()?, None)
 }
 
 fn replay_store(
-    out: &Outbox,
-    session_id: &str,
+    replay: &mut subagents::HistoryReplay<'_>,
     source_session: &str,
     store: &mut memory::MemoryStore,
-    tools_only: bool,
+    scope: Option<&Value>,
 ) -> Result<()> {
     let mut pages = Vec::new();
     let mut before = None;
@@ -578,18 +604,32 @@ fn replay_store(
         before = page.first().map(|item| item.id);
         pages.push(page);
     }
-    let mut children = HashSet::new();
-    let call_id = |id: &str| {
-        if tools_only {
-            format!("{source_session}:{id}")
-        } else {
-            id.to_owned()
-        }
-    };
-    for message in pages.into_iter().rev().flatten() {
+    let messages = pages.into_iter().rev().flatten().collect::<Vec<_>>();
+    replay_messages(replay, messages, scope);
+    Ok(())
+}
+
+fn replay_messages(
+    replay: &mut subagents::HistoryReplay<'_>,
+    messages: Vec<memory::StoredMessage>,
+    scope: Option<&Value>,
+) {
+    // New indices retain execution ids; do not also expand legacy descriptors.
+    let indexed = messages
+        .iter()
+        .filter(|message| message.role == MessageRole::System)
+        .filter_map(|message| message.content.strip_prefix(subagents::PREFIX))
+        .filter_map(|data| serde_json::from_str::<Value>(data).ok())
+        .filter_map(|body| {
+            body.pointer("/run/session_id")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        })
+        .collect::<HashSet<_>>();
+    for message in messages {
         let update = match message.role {
             MessageRole::User => {
-                if tools_only {
+                if scope.is_some() {
                     continue;
                 }
                 json!({"sessionUpdate":"user_message_chunk","messageId":message.metadata.pointer("/provider_metadata/axMessageId").and_then(Value::as_str).map_or_else(||message.id.to_string(),str::to_owned),"content":{"type":"text","text":message.content},"_ax":{"steering":message.metadata.pointer("/provider_metadata/axSteering").and_then(Value::as_bool).unwrap_or(false)}})
@@ -603,11 +643,10 @@ fn replay_store(
                             .and_then(|text| serde_json::from_str::<Value>(text).ok())
                             .unwrap_or(Value::Null);
                         let detail = runtime_core::tool_activity(name, &input);
-                        let start = json!({"sessionUpdate":"tool_call","toolCallId":call_id(call["id"].as_str().unwrap_or("unknown")),"title":detail,"kind":name,"rawInput":{"name":name,"arguments":input},"status":"pending"});
-                        out.send(json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":session_id,"update":stamp(start,message.created_at)}})).ok();
+                        replay.send(json!({"sessionUpdate":"tool_call","toolCallId":call["id"],"title":detail,"kind":name,"rawInput":{"name":name,"arguments":input},"status":"pending"}), message.created_at, scope);
                     }
                 }
-                if tools_only {
+                if message.content.is_empty() {
                     continue;
                 }
                 json!({"sessionUpdate":"agent_message_chunk","messageId":message.id.to_string(),"content":{"type":"text","text":message.content}})
@@ -615,46 +654,50 @@ fn replay_store(
             MessageRole::Tool => {
                 let result = serde_json::from_str::<tool::ToolResult>(&message.content)
                     .unwrap_or_else(|_| tool::ToolResult::from_legacy(message.content.clone()));
-                json!({"sessionUpdate":"tool_call_update","toolCallId":call_id(message.metadata.get("tool_call_id").and_then(Value::as_str).unwrap_or("unknown")),"status":if result.status=="success" {"completed"} else {"failed"},"rawOutput":result})
+                json!({"sessionUpdate":"tool_call_update","toolCallId":message.metadata.get("tool_call_id").and_then(Value::as_str).unwrap_or("unknown"),"status":if result.status=="success" {"completed"} else {"failed"},"rawOutput":result})
             }
             MessageRole::System => {
-                if !tools_only {
-                    let queue = message
-                        .content
-                        .strip_prefix(runtime_core::task_queue::STATE_PREFIX)
-                        .or_else(|| {
-                            message
-                                .content
-                                .strip_prefix(runtime_core::task_queue::ARCHIVE_PREFIX)
-                        })
-                        .and_then(|data| {
-                            serde_json::from_str::<runtime_core::task_queue::TaskQueue>(data).ok()
-                        });
-                    if let Some(queue) = queue {
-                        for child in queue.tasks.iter().filter_map(|task| task.child.as_ref()) {
-                            if !children.insert(child.session_id.clone()) {
-                                continue;
-                            }
-                            let database = child.state_dir.as_ref().map_or_else(
-                                || child.cwd.join(".ax").join("child.sqlite3"),
-                                |state| state.join("child.sqlite3"),
-                            );
-                            // Never create a missing child store while viewing history.
-                            if database.is_file() {
-                                let mut child_store = memory::MemoryStore::open(&database)?;
-                                replay_store(
-                                    out,
-                                    session_id,
-                                    &child.session_id,
-                                    &mut child_store,
-                                    true,
-                                )?;
-                            }
-                        }
-                        continue;
+                if let Some(data) = message.content.strip_prefix(subagents::PREFIX) {
+                    if let Ok(body) = serde_json::from_str::<Value>(data) {
+                        replay.child(body, message.created_at, scope);
                     }
+                    continue;
                 }
-                if tools_only {
+                if let Some(data) = message.content.strip_prefix("[ax-child-outcome]\n") {
+                    if let Some(scope) = scope
+                        && let Ok(result) = serde_json::from_str::<Value>(data)
+                    {
+                        replay.send(subagents::outcome(scope, &result), message.created_at, None);
+                    }
+                    continue;
+                }
+                let queue = message
+                    .content
+                    .strip_prefix(runtime_core::task_queue::STATE_PREFIX)
+                    .or_else(|| {
+                        message
+                            .content
+                            .strip_prefix(runtime_core::task_queue::ARCHIVE_PREFIX)
+                    })
+                    .and_then(|data| {
+                        serde_json::from_str::<runtime_core::task_queue::TaskQueue>(data).ok()
+                    });
+                if let Some(queue) = queue {
+                    for task in &queue.tasks {
+                        if let Some(child) = &task.child
+                            && !indexed.contains(&child.session_id)
+                        {
+                            let status = match task.status {
+                                runtime_core::task_queue::TaskStatus::Completed => "completed",
+                                runtime_core::task_queue::TaskStatus::Failed => "failed",
+                                _ => "running",
+                            };
+                            replay.child(json!({"sessionUpdate":"subagent","agentId":child.session_id,"childSessionId":child.session_id,"task":task.task_input(),"title":task.title,"status":status,"run":child,"summary":task.outcome,"error":task.failure_reason}), message.created_at, scope);
+                        }
+                    }
+                    continue;
+                }
+                if scope.is_some() {
                     continue;
                 }
                 let Some(data) = message.content.strip_prefix("[ax-changes]\n") else {
@@ -663,9 +706,8 @@ fn replay_store(
                 json!({"sessionUpdate":"turn_changes","changedFiles":serde_json::from_str::<Value>(data).unwrap_or(Value::Null)})
             }
         };
-        out.send(json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":session_id,"update":stamp(update, message.created_at)}})).ok();
+        replay.send(update, message.created_at, scope);
     }
-    Ok(())
 }
 
 /// Runs the adapter without changing the ordinary AX CLI startup path.
@@ -1421,7 +1463,7 @@ mod tests {
         let mut tasks = Vec::new();
         let mut expected = Vec::new();
         for index in 0..2 {
-            let state_dir = root.join(format!("child-{index}"));
+            let state_dir = root.join(format!("child-{index}")).join("state");
             std::fs::create_dir_all(&state_dir).unwrap();
             let mut store = memory::MemoryStore::open(state_dir.join("child.sqlite3")).unwrap();
             let session = store.create_session("worker").unwrap().id;
@@ -1434,7 +1476,7 @@ mod tests {
             // Cross the replay page boundary; workers deliberately reuse call IDs.
             for call in 0..65 {
                 let id = format!("call-{call}");
-                expected.push(format!("{session}:{id}"));
+                expected.push((session.clone(), id.clone()));
                 store.append_message(&session, memory::NewMessage {
                     role: MessageRole::Assistant, kind: memory::MessageKind::ToolCall,
                     content: "internal narration".into(),
@@ -1480,7 +1522,8 @@ mod tests {
                 .unwrap();
         }
         let (out, mut rx) = mpsc::unbounded_channel();
-        replay_store(&out, &controller, &controller, &mut parent, false).unwrap();
+        let mut replay = subagents::HistoryReplay::new(&out, &controller, &root);
+        replay_store(&mut replay, &controller, &mut parent, None).unwrap();
         let mut updates = Vec::new();
         while let Ok(frame) = rx.try_recv() {
             assert_eq!(frame["params"]["sessionId"], controller);
@@ -1488,19 +1531,29 @@ mod tests {
         }
         let starts: Vec<_> = updates
             .iter()
-            .filter(|u| u["sessionUpdate"] == "tool_call")
-            .map(|u| u["toolCallId"].as_str().unwrap().to_owned())
+            .filter(|u| {
+                u["sessionUpdate"] == "subagent" && u["update"]["sessionUpdate"] == "tool_call"
+            })
+            .map(|u| {
+                (
+                    u["agentId"].as_str().unwrap().to_owned(),
+                    u["update"]["toolCallId"].as_str().unwrap().to_owned(),
+                )
+            })
             .collect();
         assert_eq!(starts, expected);
         let results: Vec<_> = updates
             .iter()
-            .filter(|u| u["sessionUpdate"] == "tool_call_update")
+            .filter(|u| {
+                u["sessionUpdate"] == "subagent"
+                    && u["update"]["sessionUpdate"] == "tool_call_update"
+            })
             .collect();
         assert_eq!(results.len(), 128);
         assert!(
             results
                 .iter()
-                .all(|u| u["rawOutput"]["raw_output"] == "kept output")
+                .all(|u| u["update"]["rawOutput"]["raw_output"] == "kept output")
         );
         assert_eq!(
             updates

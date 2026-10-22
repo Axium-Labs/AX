@@ -11,7 +11,8 @@ with `execution="children"` automatically enters the kernel's
 resources serialize requested sequential tasks; independent children may overlap.
 Controller text streams immediately; only the shared kernel emits turn completion. Child failures advance
 independent tasks. `--child-timeout-secs` applies independently of the controller
-turn timeout in Crew/ACP too. Child tool updates retain session-prefixed call IDs.
+turn timeout in Crew/ACP too. Child activity retains each child's identity and
+original tool-call IDs inside its own envelope.
 
 Prompt lists never imply executable tasks. After reading a dataset, the model can
 call `task_queue start` with actual instances and complete `{title,input}` task
@@ -35,6 +36,43 @@ Crew supplies optional `_ax` session metadata. `skills` is an allowlist of local
 The corresponding Crew backend and its API are in the sibling `axcrew` project. Crew stores orchestration metadata and final task outputs, while AX keeps message history, context snapshots, memory, tool results, and provider credentials. Live Crew WebSocket events can include message deltas and permission requests; its SQLite event index stores only redacted event metadata.
 
 ## Workspace identity and confinement
+
+### Delegated agent activity
+
+Ordinary `subagent` / `subagent_fork` runs and task-queue children emit additive
+`sessionUpdate: "subagent"` updates on the bound parent ACP session. Each update
+carries a stable `agentId`, `task`, `title`, `status` (`running`, `completed`,
+`failed`, or `cancelled`), and optional `parentAgentId`, `childSessionId`,
+`summary`, and `error`. Nested children retain their own identity and name their
+immediate parent. Execution IDs remain stable across history reloads; ordinary
+delegation IDs are unique across turns, independently of the runtime's compact
+`subagent-N` handles.
+
+An optional `update` contains a normal ACP `agent_message_chunk`, `tool_call`,
+`tool_call_update`, or `model_connection`. Child prose, tool inputs, tool results,
+and model status use this envelope exclusively, so they cannot be confused with
+the controller's output or a sibling reusing the same tool-call ID. Child
+reasoning and internal lifecycle/control events are excluded. Permission and
+execution policy remain owned by the existing kernel.
+
+ACP stores compact `[ax-subagent]` system/agent-state indices in the parent's AX
+history before publishing each start and terminal activity. Their private `run`
+locator identifies the durable child store and is removed from client updates.
+Raw child messages stay in the child store; they are not copied into the parent
+conversation or supplied to its model. Indices are excluded from restored model
+context and its token budget, including after an effective-context snapshot.
+
+`session/load` uses those saved indices to replay child prose and tools from
+authoritative child JSONL, with the same envelope and IDs. Legacy queue
+checkpoints can also identify children. Replay validates the child session UUID
+and canonical paths beneath this AX installation/project store's `child-runs`
+root, never accepts a client-supplied child path, and reads child files without
+opening or repairing their SQLite index. Repeated checkpoints and cycles do not
+replay a child twice. A reload expands at most 256 stores, 32 MiB of child JSONL
+and 20,000 child content/tool updates; `historyTruncated: true` signals an
+incomplete expansion. Missing or unreadable child stores retain their saved
+lifecycle/summary. Only already checkpointed messages can survive interruption;
+an unfinished streamed fragment may be available only to the live client.
 
 ### Model connection feedback
 

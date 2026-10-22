@@ -16,9 +16,71 @@ pub enum ModelConnectionStatus {
     Failed,
 }
 
+/// A delegated run's public activity, kept separate from controller output.
+/// The host's run descriptor is for trusted history recovery, not model context.
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct SubagentActivity {
+    pub id: String,
+    pub parent_id: Option<String>,
+    pub task: String,
+    pub status: String,
+    pub run: Option<crate::ChildRun>,
+    pub summary: Option<String>,
+    pub error: Option<String>,
+    pub event: Option<Box<AgentEvent>>,
+}
+
+impl SubagentActivity {
+    #[must_use]
+    pub fn running(id: String, task: String, run: Option<crate::ChildRun>) -> Self {
+        Self {
+            id,
+            parent_id: None,
+            task,
+            status: "running".into(),
+            run,
+            summary: None,
+            error: None,
+            event: None,
+        }
+    }
+
+    /// Descendants retain their own identity and acquire only a missing parent.
+    #[must_use]
+    pub fn observe(&self, event: AgentEvent) -> Option<AgentEvent> {
+        match event {
+            AgentEvent::SubagentActivity { mut activity } => {
+                activity.parent_id.get_or_insert_with(|| self.id.clone());
+                Some(AgentEvent::SubagentActivity { activity })
+            }
+            event @ (AgentEvent::ContentDelta { .. }
+            | AgentEvent::ToolStarted { .. }
+            | AgentEvent::ToolFinished { .. }
+            | AgentEvent::ModelConnection { .. }) => {
+                let mut activity = self.clone();
+                activity.event = Some(Box::new(event));
+                Some(AgentEvent::SubagentActivity {
+                    activity: Box::new(activity),
+                })
+            }
+            _ => None,
+        }
+    }
+
+    #[must_use]
+    pub fn into_event(self) -> AgentEvent {
+        AgentEvent::SubagentActivity {
+            activity: Box::new(self),
+        }
+    }
+}
+
 #[derive(Clone, Debug, serde::Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AgentEvent {
+    SubagentActivity {
+        activity: Box<SubagentActivity>,
+    },
     SessionRotated {
         goal_id: String,
         previous_session: String,

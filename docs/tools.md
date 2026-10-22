@@ -657,8 +657,11 @@ limitations belong in the reply to the delegating agent.
 Each tool returns `{status, summary, artifacts, error}`. Status is `completed`,
 `failed` or `cancelled`; artifacts identify the durable child state directory,
 when supplied by the host. Disposable workspace changes are not merged into the
-parent. Only the final receipt is returned; raw history remains in the child
-store. Runtime events are `subagent_started`, `subagent_progress`,
+parent. The controller model receives only the final receipt; raw history remains
+in the child store. ACP clients can separately display scoped child prose, tool
+activity and lifecycle through the additive `SubagentActivity` event and saved
+parent-owned activity indices. See [ACP delegated activity](acp-crew.md#delegated-agent-activity).
+Runtime lifecycle events are `subagent_started`, `subagent_progress`,
 `subagent_completed`, `subagent_failed` and `subagent_cancelled`. TUI renders
 brief lifecycle notices without child text, tool inputs or reasoning.
 Cancellation and timeouts stop the existing child loop, cancel descendants and

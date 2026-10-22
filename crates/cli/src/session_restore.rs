@@ -15,11 +15,16 @@ pub(crate) fn recent_history(
     let mut tokens = 0;
     let mut has_user = false;
     loop {
-        let page = store.load_context_page(session, before, HISTORY_PAGE_SIZE)?;
+        let mut page = store.load_context_page(session, before, HISTORY_PAGE_SIZE)?;
         if page.is_empty() {
             break;
         }
         before = page.first().map(|message| message.id);
+        page.retain(|message| {
+            !message
+                .content
+                .starts_with(runtime_core::subagent::ACTIVITY_PREFIX)
+        });
         tokens += page
             .iter()
             .map(|message| runtime_core::estimate_tokens(&[crate::repl::restore_message(message)]))

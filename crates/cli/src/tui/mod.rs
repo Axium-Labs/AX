@@ -411,6 +411,7 @@ impl App {
             | AgentEvent::Completion { .. }
             | AgentEvent::GoalEvaluated { .. }
             | AgentEvent::SubagentProgress { .. }
+            | AgentEvent::SubagentActivity { .. }
             | AgentEvent::ThinkingDelta { delta: _ } => {}
             AgentEvent::TurnFinished => {
                 self.transcript.streaming = false;

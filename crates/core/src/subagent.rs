@@ -14,6 +14,9 @@ use std::sync::{
 use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore, mpsc};
 use tool::{Capability, ResourceAccess, SafetyLevel, Tool, ToolError};
 
+/// Parent-owned UI history index. It is never model conversation context.
+pub const ACTIVITY_PREFIX: &str = "[ax-subagent]\n";
+
 /// Metadata for an enabled named agent. Bodies remain on disk until invocation.
 #[derive(Clone, Debug)]
 pub struct AgentTemplate {
@@ -68,6 +71,7 @@ impl SubagentResult {
     }
 }
 struct Pending {
+    activity_id: String,
     input: String,
     options: SpawnOptions,
     cancelled: AtomicBool,
@@ -269,6 +273,7 @@ impl SubagentManager {
         entries.insert(
             id.clone(),
             Arc::new(Pending {
+                activity_id: uuid::Uuid::new_v4().to_string(),
                 input,
                 options,
                 cancelled: AtomicBool::new(false),
@@ -381,6 +386,12 @@ impl SubagentManager {
             finished: false,
         };
         let child = &mut guard.child;
+        let activity = crate::SubagentActivity::running(
+            pending.activity_id.clone(),
+            pending.input.clone(),
+            Some(child.run.clone()),
+        );
+        self.event(activity.clone().into_event());
         let policy = &pending.options.policy;
         if policy.permissions == crate::child_policy::PermissionInheritance::Custom {
             child
@@ -558,6 +569,9 @@ impl SubagentManager {
                 &mut child.kernel,
                 &pending.input,
                 Box::new(|event| {
+                    if let Some(event) = activity.observe(event.clone()) {
+                        self.event(event);
+                    }
                     if matches!(
                         &event,
                         AgentEvent::SubagentStarted { .. }
@@ -641,6 +655,15 @@ impl SubagentManager {
                 Err(_) => SubagentResult::failed("failed", "subagent worker panicked"),
             },
         };
+        let mut activity = crate::SubagentActivity::running(
+            pending.activity_id.clone(),
+            pending.input.clone(),
+            None,
+        );
+        activity.status.clone_from(&result.status);
+        activity.summary = Some(result.summary.clone());
+        activity.error.clone_from(&result.error);
+        self.event(activity.into_event());
         self.event(match result.status.as_str() {
             "completed" => AgentEvent::SubagentCompleted { id: id.into() },
             "cancelled" => AgentEvent::SubagentCancelled { id: id.into() },
