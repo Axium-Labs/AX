@@ -68,6 +68,9 @@ impl AgentKernel {
         let before = self.estimated_context_tokens();
         let original = self.messages.clone();
         let budget = self.context_budget();
+        budget
+            .validate_capacity(crate::context::minimum_runtime_tokens(&self.messages))
+            .map_err(AgentError::Budget)?;
         if !force && !budget.needs_compaction(before, self.pending_request_growth(budget)) {
             return Ok(None);
         }

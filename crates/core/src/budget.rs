@@ -45,6 +45,37 @@ impl ContextBudget {
             .saturating_sub(self.tool_schema_tokens)
     }
 
+    /// Check that fixed reservations and mandatory input can fit before trying
+    /// compaction or a Session handoff. Neither can reclaim these tokens.
+    /// # Errors
+    /// Returns a capacity diagnostic without changing the configured window.
+    pub fn validate_capacity(&self, minimum_input_tokens: usize) -> Result<(), String> {
+        let required = self
+            .reserved_output
+            .checked_add(self.tool_schema_tokens)
+            .and_then(|n| n.checked_add(self.pool.next_request_reserve))
+            .and_then(|n| n.checked_add(minimum_input_tokens));
+        if required.is_some_and(|required| required <= self.context_window) {
+            return Ok(());
+        }
+        let required = required.map_or_else(
+            || "more than the addressable token count".to_owned(),
+            |n| n.to_string(),
+        );
+        Err(format!(
+            "context window too small: window={} tokens; output reserve={}; tool schemas={}; \
+             next-request reserve={}; minimum input={}; minimum required={}. \
+             Increase --context-window or select a model/tool configuration that fits. \
+             Compression and session rotation cannot reclaim these reservations.",
+            self.context_window,
+            self.reserved_output,
+            self.tool_schema_tokens,
+            self.pool.next_request_reserve,
+            minimum_input_tokens,
+            required,
+        ))
+    }
+
     /// Share of history reserved for one tool's compact projection.
     #[must_use]
     pub fn tool_result_chars(&self) -> usize {

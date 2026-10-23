@@ -35,10 +35,12 @@ accessors return maxima against this same pool; they are not additive
 allocations. `ContextDemand { demand, minimum, maximum }` expresses actual
 request needs. `allocate()` honors every hard minimum, rejects impossible
 minima, then distributes the remaining pool in caller priority order.
-The latest complete user turn and runtime progress are hard minima; selected
-skills and relevant memory compete before older optional history. Whole
-conversation turns remain intact. Summary/system context consumes only space
-left after selected recent conversation.
+Runtime, capability, harness, environment and project instructions, together
+with runtime progress, are hard minima; selected skills and relevant memory
+compete before older optional history. Request selection retains complete
+conversation turns, including the latest user turn. Historical summaries and
+other optional system context consume only space left after selected recent
+conversation.
 
 `context_pool` in `.ax/config.json` centrally defines operational maxima and
 the next-request reserve:
@@ -48,6 +50,45 @@ the next-request reserve:
                   "tool_result_maximum": 4096, "recent_raw_maximum": 4096,
                   "memory_maximum": 8192, "skill_metadata_maximum": 4096 }
 ```
+
+### Minimum window capacity
+
+The shared `ContextBudget::validate_capacity` checks capacity against the input
+required at each stage:
+
+```text
+minimum context window
+  = output reserve
+  + actual tool schema estimate
+  + next-request reserve
+  + minimum required input
+```
+
+Before a model step, compaction or Session rotation, the capacity preflight
+counts only runtime, capability, harness, environment and project instructions
+that every retention policy must preserve. It does not treat stale progress or
+user guidance as irreducible: progress is refreshed, and handoff may omit user
+guidance when `retain_user_guidance` is false. Reducible tool output is also
+excluded from this fixed minimum.
+
+Request assembly then validates mandatory runtime messages, current progress
+and the latest user message before selecting context. Handoff validates the
+entire constructed successor context, including material retained by its
+policy. Passing the preflight therefore does not guarantee that a particular
+request or handoff will fit. The minimum depends on the selected model, enabled
+tools, instructions and input; there is no universal supported minimum for
+`--context-window`.
+
+If a stage's required cost exceeds the configured window, AX returns
+`context window too small` before sending that input to a provider or activating
+a successor Session. An impossible fixed capacity fails at preflight, before
+compaction or handoff construction. The diagnostic lists the window, output
+reserve, tool schemas, next-request reserve, minimum
+input and minimum required total. Increase `--context-window` or select a
+model/tool configuration that fits. AX does not silently enlarge the window or
+drop required instructions; neither compaction nor rotation can reclaim the
+fixed minimum. A capacity error does not establish that a rotation was attempted
+or completed.
 
 Before a request, compaction projects the growth that request will actually
 carry: the queue summary context appended after the pressure check, capped by
@@ -321,6 +362,8 @@ Pressure and compaction gain derive from ContextBudget, never fixed message coun
 The old raw stream, Goal/queue identity, budgets, permissions and completed receipts
 remain intact. Latest-round `tool_output` data is checkpointed as optional agent
 state; older evidence is retrieved from existing Session storage on demand.
-Required handoff context that cannot fit pauses instead of being silently removed.
+An impossible window is rejected by the shared capacity check before handoff;
+required handoff context that still cannot fit pauses instead of being silently
+removed.
 See [Long Project](long-project.md). The default ordinary loop has no document,
 rotation host or extra model request.

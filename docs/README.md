@@ -1,8 +1,8 @@
-# AX Documentation
+# AX documentation
 
-Documentation for the AX terminal agent. Each topic has one focused document;
-design decisions that shaped the code are recorded as ADRs in
-[adr/](adr/README.md).
+This directory documents current AX behavior, architecture and development.
+Version-specific changes are recorded under [release notes](release-notes/).
+Long-lived design decisions are recorded as [ADRs](adr/README.md).
 
 ## Documentation map
 
@@ -18,13 +18,11 @@ are documented in [host-permissions.md](host-permissions.md).
 |---|---|
 | [agent-runtime.md](agent-runtime.md) | The runtime contract: request/context/capability boundary, turn flow, trigger conditions |
 | [coding-harness.md](coding-harness.md) | Execution policy, bounded error-driven handoff review, concrete work, workspace specs and durable artifacts |
-| [coding-harness-validation.md](coding-harness-validation.md) | Root causes, regression coverage and original testax whole-prompt acceptance evidence |
 | [long-project.md](long-project.md) | Optional durable working context, scoped templates, safe Session handoff and recovery |
 | [goal.md](goal.md) | Optional target execution, validation, lifecycle, budgets and recovery |
 | [agent-loop.md](agent-loop.md) | Continuation state, streaming completion, error-driven handoff feedback and optional Goal |
 | [architecture.md](architecture.md) | System architecture: crate responsibilities, agent loop, cold-start path |
 | [distributed-collaboration.md](distributed-collaboration.md) | Optional durable cross-Host Tasks, Events, Artifacts, Workflow State and AX worker |
-| [release-notes/0.3.8.md](release-notes/0.3.8.md) | AX 0.3.8 remote SSH execution and provider reasoning effort |
 | [acp-crew.md](acp-crew.md) | ACP adapter and AX Crew device bridge |
 | [memory.md](memory.md) | Memory: scopes, project identity, retrieval, persistence |
 | [context.md](context.md) | Context budgeting, compression, session resume |
@@ -32,7 +30,6 @@ are documented in [host-permissions.md](host-permissions.md).
 | [backup.md](backup.md) | Versioned axpack export/import, data boundaries and project remapping |
 | [tools.md](tools.md) | Tools, permissions, safety |
 | [security.md](security.md) | Runtime Workspace Sandbox, OS enforcement and escape tests |
-| [web-latency.md](web-latency.md) | Reproducible web scheduling latency benchmark |
 | [web-search-architecture.md](web-search-architecture.md) | Web search: two-tier native-first routing, provider capabilities, configuration |
 | [mcp.md](mcp.md) | MCP integration: configuration, transports, lazy connection |
 | [skills.md](skills.md) | Skills: package format, routing, enable/disable |
@@ -41,70 +38,12 @@ are documented in [host-permissions.md](host-permissions.md).
 | [evolution.md](evolution.md) | Low-frequency Experience learning and evolved Skill lifecycle |
 | [providers.md](providers.md) | Models, providers, authentication |
 | [development.md](development.md) | Building, testing, extending and releasing AX |
-| [release-notes/0.3.7.md](release-notes/0.3.7.md) | AX 0.3.7 optional durable distributed worker and collaboration |
-| [release-notes/0.3.4.md](release-notes/0.3.4.md) | AX 0.3.4 coding harness and workspace artifacts |
-| [release-notes/0.3.1.md](release-notes/0.3.1.md) | AX 0.3.1 liveness fix and validation |
-| [release-notes/0.3.2.md](release-notes/0.3.2.md) | AX 0.3.2 frontend child parity and explicit task inputs |
-| [releases/0.2.5.md](releases/0.2.5.md) | AX 0.2.5 release snapshot |
+| [release-notes/0.3.15.md](release-notes/0.3.15.md) | Current release |
 | [adr/README.md](adr/README.md) | Architecture Decision Records (index) |
 
-## TUI features
-
-- **System resources** — `/system` takes a fresh local CPU/memory snapshot
-  and shows each supported NVIDIA GPU's name, usage and used/total VRAM.
-  Capacities use GiB; unavailable fields remain explicit. See
-  [architecture.md](architecture.md#local-system-resources).
-- **Active guidance** — Enter sends additional instructions to the current
-  task while it works, preserving its goal and tool results. Stop remains
-  separate. See [agent-runtime.md](agent-runtime.md).
-- **Project file references** — Type `@README` to fuzzy-search project files.
-  Select one with Enter to include its text in the model context when sending
-  the message. See [context.md](context.md).
-- **Tool execution timeline** — Shows what a running tool is searching,
-  reading, editing, or executing, then collapses to a result row. See
-  [tools.md](tools.md).
-- **Session picker** — `/resume` searches sessions across registered projects.
-  Type to filter titles; use Ctrl+P to switch projects, Ctrl+R to rename,
-  Ctrl+D to delete, and Ctrl+N to start a new session. See
-  [context.md](context.md).
-- **Automatic session titles** — New sessions get a short title from the first
-  task. Titles can be changed in `/resume`. See [context.md](context.md).
-
-## TUI interaction feedback
-
-Streaming replies show new text promptly while combining dense updates into
-short redraw frames. Completed Markdown blocks and messages are cached at the
-current terminal width; only the active tail is re-rendered. The active reply
-has a cursor until it ends. When reading earlier transcript lines, the footer
-reports new output and End returns to the latest text. Tool details remain
-visible briefly after completion before they
-collapse. Pickers reveal their contents quickly, file and slash suggestions
-highlight keyboard movement, and session restoration displays a loading state
-while it reads history. Slash command hints, descriptions, and selected text use
-fixed high-contrast colors so they remain legible across terminal themes; the
-slash popup keeps its navigation hint visible while scrolling.
-
-Window resizing clears the live inline region before repositioning it, so
-temporary streaming text and the composer do not enter terminal scrollback as
-duplicate history. Completed overflow is inserted only after the viewport has
-been synchronized to the current terminal dimensions. Conversation state and
-unsent input remain in memory and are redrawn at the new width.
-
-A fresh launch clears the visible screen before drawing the startup card;
-older native scrollback is retained. Windows cursor queries account for both
-offsets of the visible console window. The Windows input hint uses ASCII dots
-to avoid ambiguous ellipsis widths and remnants when Chinese input replaces it.
-
-Mouse capture is disabled: left-click and drag select text using the terminal's
-native selection, then use its Copy action or keyboard shortcut. The mouse
-wheel scrolls native terminal history; PgUp/PgDn scroll the in-memory transcript
-(including active replies), and End returns to the latest output. On Windows,
-AX enables Quick Edit and restores the original console input mode on exit.
-
-The terminal palette uses a black canvas with quiet slate surfaces, teal for
-focus, and separate green, amber, and coral status colors. Text colors remain
-explicit so terminal theme defaults cannot make command hints or tool output
-disappear.
+Older AX release notes are kept by version in the same `release-notes/`
+directory. The local [Web Search scheduling benchmark](web-latency.md) is a
+maintainer reference, not part of the product feature guide.
 
 ## How to read
 
@@ -115,15 +54,19 @@ disappear.
 - **Contributors** — read [architecture.md](architecture.md) first, then the
   topic document for the area you touch, then [development.md](development.md)
   for build/test conventions.
-- **Deep dives** — [storage.md](storage.md) and [adr/](adr/README.md) contain
-  the storage and memory design rationale.
+- **Deep dives** — [storage.md](storage.md), the Web Search audit and
+  [adr/](adr/README.md) contain implementation and design references.
 
-## Writing docs
+## Documentation conventions
 
 - One topic per file; cross-reference instead of duplicating.
 - Keep language consistent with the repository (English).
 - Record decisions with lasting consequences as ADRs — see
   [adr/README.md](adr/README.md).
 - Update this map when adding or renaming a document.
-
-- [Web Search audit](web-search-audit.md) — complete provider capability matrix, production path, live evidence and remaining limits.
+- Keep test results, machine-specific paths and task progress in `logs/`, not in
+  current feature documentation. Record only reproducible, user-relevant limits
+  in feature documents.
+- Web Search implementation details and validation limits are in
+  [web-search-architecture.md](web-search-architecture.md) and
+  [web-search-audit.md](web-search-audit.md).

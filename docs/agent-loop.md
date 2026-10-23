@@ -1,4 +1,9 @@
-# Continuation-driven completion
+# Agent loop
+
+This document describes how AX continues and ends a model turn. The broader
+request and capability contract is in [agent-runtime.md](agent-runtime.md);
+task queues, workspaces and recovery are in
+[coding-harness.md](coding-harness.md).
 
 The shared kernel runs `model → execute tools/tasks/children → append results →
 model`. A final response with no continuation ends the turn. It does not inspect

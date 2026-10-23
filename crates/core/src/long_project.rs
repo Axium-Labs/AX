@@ -310,6 +310,9 @@ impl AgentKernel {
             return Ok(());
         }
         let budget = self.context_budget();
+        budget
+            .validate_capacity(crate::context::minimum_runtime_tokens(&self.messages))
+            .map_err(AgentError::Budget)?;
         let projected = self
             .estimated_context_tokens()
             .saturating_add(self.pending_request_growth(budget));
@@ -464,15 +467,14 @@ impl AgentKernel {
             }
         }
         context.push(Message::system(format!("[ax-recent-receipts]\nCompleted round call IDs: {}. Raw output remains available through tool_output; retrieve results rather than executing these operations again.", recent_ids.join(", "))));
-        if crate::estimate_tokens(&context).saturating_add(budget.pool.next_request_reserve)
-            >= budget.usable()
-        {
-            return Err(AgentError::GoalStopped {
+        budget
+            .validate_capacity(crate::estimate_tokens(&context))
+            .map_err(|reason| AgentError::GoalStopped {
                 state: crate::GoalState::Paused,
-                reason: "Required handoff context exceeds ContextBudget; original Session retained"
-                    .into(),
-            });
-        }
+                reason: format!(
+                    "Required handoff context exceeds ContextBudget; original Session retained: {reason}"
+                ),
+            })?;
         let after = crate::estimate_tokens(&context);
         let before = self.estimated_context_tokens();
         if !self.rotation_requested

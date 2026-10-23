@@ -36,6 +36,9 @@ impl AgentKernel {
         F: FnMut(AgentEvent) + Send,
         H: FnMut(&[Message]) -> Result<(), AgentError> + Send,
     {
+        self.context_budget()
+            .validate_capacity(crate::context::minimum_runtime_tokens(&self.messages))
+            .map_err(AgentError::Budget)?;
         // Bound tool results before pressure checks. Keep verbatim declarations
         // in the effective transcript for later cleanup and request projection.
         let chars = self.context_budget().tool_result_chars();

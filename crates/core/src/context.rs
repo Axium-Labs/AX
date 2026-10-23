@@ -71,6 +71,19 @@ enum RequestPool {
     History,
 }
 
+fn runtime_instruction(message: &Message) -> bool {
+    message.role == Role::System
+        && [
+            crate::runtime_core::CORE_PREFIX,
+            crate::runtime_core::CAPABILITY_PREFIX,
+            "[ax-coding-harness]\n",
+            "[ax-environment]\n",
+            crate::instructions::CONTEXT_PREFIX,
+        ]
+        .iter()
+        .any(|prefix| message.content.starts_with(prefix))
+}
+
 fn request_pool(message: &Message) -> RequestPool {
     if message.role != Role::System {
         return RequestPool::History;
@@ -85,7 +98,8 @@ fn request_pool(message: &Message) -> RequestPool {
     if content.starts_with("[ax-changes]\n") || content.starts_with(execution::STATE_PREFIX) {
         return RequestPool::Drop;
     }
-    if content.starts_with(crate::long_project::CONTEXT_PREFIX)
+    if runtime_instruction(message)
+        || content.starts_with(crate::long_project::CONTEXT_PREFIX)
         || content.starts_with("[ax-goal-context]")
         || content.starts_with(execution::CONTEXT_PREFIX)
         || content.starts_with(task_queue::PROGRESS_PREFIX)
@@ -103,6 +117,34 @@ fn request_pool(message: &Message) -> RequestPool {
     RequestPool::History
 }
 
+/// Instructions that survive every compaction and Session retention policy.
+/// Progress is refreshed, and a handoff may omit user guidance by policy.
+pub(crate) fn minimum_runtime_tokens(messages: &[Message]) -> usize {
+    messages
+        .iter()
+        .filter(|message| runtime_instruction(message))
+        .fold(0usize, |tokens, message| {
+            tokens.saturating_add(estimate_tokens(std::slice::from_ref(message)))
+        })
+}
+
+/// Irreducible input only: required runtime context and the latest user text.
+/// Tool bodies and older history must remain eligible for cleanup/handoff.
+pub(crate) fn minimum_request_tokens(messages: &[Message]) -> usize {
+    let required = messages
+        .iter()
+        .filter(|message| matches!(request_pool(message), RequestPool::Progress))
+        .fold(0usize, |tokens, message| {
+            tokens.saturating_add(estimate_tokens(std::slice::from_ref(message)))
+        });
+    required.saturating_add(
+        messages
+            .iter()
+            .rfind(|message| message.role == Role::User)
+            .map_or(0, |message| estimate_tokens(std::slice::from_ref(message))),
+    )
+}
+
 /// Selects request context without changing the effective in-memory transcript.
 /// Old turns are removed first; optional retrieved context follows only when
 /// it fits the same budget used to decide whether to compact.
@@ -110,6 +152,9 @@ pub(crate) fn request_context(
     messages: &[Message],
     budget: ContextBudget,
 ) -> Result<Vec<Message>, AgentError> {
+    budget
+        .validate_capacity(minimum_request_tokens(messages))
+        .map_err(AgentError::Budget)?;
     let mut history = Vec::new();
     let mut memory = Vec::new();
     let mut skills = Vec::new();

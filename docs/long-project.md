@@ -177,17 +177,34 @@ schema reserves excluded). It never uses message count as its sole trigger.
 
 Automatic handoffs must also free the configured minimum share of context.
 This avoids repeated empty rotations when persistent instructions dominate the
-window. Oversize required handoff context pauses safely instead of discarding
-instructions to fit. A manual request can rotate without the automatic gain
-requirement. Tools, approvals, retries, user questions, running children and
-in-flight validation/reservations defer handoff; no running work is interrupted.
+window. Before compaction or handoff, the shared `ContextBudget` preflight
+requires enough room for the output reserve, actual tool schemas, next-request
+reserve and persistent runtime/capability/harness/environment/project
+instructions. It excludes progress that will be refreshed, user guidance that
+handoff policy may omit, and reducible tool output. A window below this fixed
+minimum fails with `context window too small` and a breakdown of those costs
+before compaction or handoff construction. Increase `--context-window` or
+select a model/tool configuration that fits; AX cannot reclaim required
+instructions and does not silently raise the window. See
+[ContextBudget](context.md#minimum-window-capacity).
+
+Passing preflight does not guarantee that the full handoff fits. The runtime
+validates the entire successor context after applying retention policy, which
+may omit user guidance when `retain_user_guidance` is false. If this context still
+cannot fit, the run pauses safely and retains the original Session. Request
+assembly separately validates required runtime messages, current progress and
+the latest user message before selecting context for a provider. A manual
+request can rotate without the automatic gain requirement. Tools, approvals,
+retries, user questions, running children and in-flight validation/reservations
+defer handoff; no running work is interrupted.
 
 The save/activate order is:
 
 1. Flush old raw messages, current Goal/queue checkpoint and the working document.
 2. Build bounded context: runtime/permission instructions, Goal definition,
-   working notes, current queue, necessary Memory, user guidance, explicitly
-   unverified historical summary, and the latest completed tool round.
+   working notes, current queue and necessary Memory; user guidance, explicitly
+   unverified historical summary and the latest completed tool round follow
+   the retention policy.
 3. Check the complete context against ContextBudget. Large tool outputs are
    projected while retaining call/result pairs; raw latest-round results use the
    existing optional agent-state checkpoint for the `tool_output` reader.

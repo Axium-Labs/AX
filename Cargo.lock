@@ -728,7 +728,7 @@ checksum = "1c133bc6a41be0d194c306b5506d15e6feeea7b1d6604bd3f8310dfb2ca96486"
 
 [[package]]
 name = "cli"
-version = "0.3.14"
+version = "0.3.15"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1179,7 +1179,7 @@ dependencies = [
 
 [[package]]
 name = "evolution"
-version = "0.3.14"
+version = "0.3.15"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1995,7 +1995,7 @@ dependencies = [
 
 [[package]]
 name = "lexical"
-version = "0.3.14"
+version = "0.3.15"
 dependencies = [
  "serde",
  "unicode-normalization",
@@ -2101,7 +2101,7 @@ dependencies = [
 
 [[package]]
 name = "mcp"
-version = "0.3.14"
+version = "0.3.15"
 dependencies = [
  "async-trait",
  "futures-util",
@@ -2134,7 +2134,7 @@ dependencies = [
 
 [[package]]
 name = "memory"
-version = "0.3.14"
+version = "0.3.15"
 dependencies = [
  "lexical",
  "rusqlite",
@@ -2180,7 +2180,7 @@ dependencies = [
 
 [[package]]
 name = "model"
-version = "0.3.14"
+version = "0.3.15"
 dependencies = [
  "async-trait",
  "aws-config",
@@ -2848,7 +2848,7 @@ dependencies = [
 
 [[package]]
 name = "runtime-core"
-version = "0.3.14"
+version = "0.3.15"
 dependencies = [
  "async-trait",
  "futures-util",
@@ -2990,7 +2990,7 @@ dependencies = [
 
 [[package]]
 name = "sandbox"
-version = "0.3.14"
+version = "0.3.15"
 dependencies = [
  "rustix 1.1.5",
  "serde",
@@ -3012,7 +3012,7 @@ dependencies = [
 
 [[package]]
 name = "scoped"
-version = "0.3.14"
+version = "0.3.15"
 dependencies = [
  "anyhow",
  "serde",
@@ -3241,7 +3241,7 @@ checksum = "8ee5873ec9cce0195efcb7a4e9507a04cd49aec9c83d0389df45b1ef7ba2e649"
 
 [[package]]
 name = "skill"
-version = "0.3.14"
+version = "0.3.15"
 dependencies = [
  "lexical",
  "serde",
@@ -3658,7 +3658,7 @@ checksum = "7d56353a2a665ad0f41a421187180aab746c8c325620617ad883a99a1cbe66d2"
 
 [[package]]
 name = "tool"
-version = "0.3.14"
+version = "0.3.15"
 dependencies = [
  "async-trait",
  "base64",

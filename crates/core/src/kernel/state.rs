@@ -140,13 +140,21 @@ impl AgentKernel {
 
     #[must_use]
     pub fn context_budget(&self) -> ContextBudget {
+        let control_schemas = if self.child_run.is_none() {
+            task_queue::schema_tokens()
+                + crate::user_input::schema_tokens()
+                + if self.child_host.is_some() || !self.child_results.is_empty() {
+                    crate::child_result::schema_tokens()
+                } else {
+                    0
+                }
+        } else {
+            0
+        };
         let mut budget = ContextBudget::new(
             self.provider.context_window(),
             self.provider.max_output_tokens(),
-            estimate_tool_schema_tokens(&self.tools)
-                + task_queue::schema_tokens()
-                + crate::user_input::schema_tokens()
-                + crate::child_result::schema_tokens(),
+            estimate_tool_schema_tokens(&self.tools) + control_schemas,
         );
         budget.pool = self.context_pool;
         budget

@@ -1,12 +1,13 @@
 # Agent runtime: request, execution, capabilities
 
-AX is a **coding execution harness**, in the `DeepSeek Harness` lineage. The
-current user request defines the work, and the runtime drives requested
+AX is a **coding execution harness**. The current user request defines the work,
+and the runtime drives requested
 deliverables to a terminal state: completed, failed with evidence, or waiting
-on a user-exclusive decision. This document states the core contract, the turn
-flow, and how context, tools, tasks, subagents and repetition are handled. It
-is the authoritative statement for every frontend (CLI, TUI, ACP, Crew bridge)
-and every isolated child.
+on a user-exclusive decision. This document defines the runtime-wide contract
+shared by the CLI, TUI, ACP, Crew bridge and isolated children, including the
+request boundary, context and capabilities. [Agent loop](agent-loop.md)
+describes turn continuation; [coding harness](coding-harness.md) describes task
+execution, workspace preparation and recovery.
 
 The ordinary task queue uses a goal ID for identity. That ID does not enable the
 optional [Goal](goal.md) acceptance/continuation policy. Explicit Goal creation
