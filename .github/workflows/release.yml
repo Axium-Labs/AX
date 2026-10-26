@@ -22,6 +22,18 @@ jobs:
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
             asset: ax-x86_64-unknown-linux-gnu.tar.gz
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-22.04
+            asset: ax-x86_64-unknown-linux-musl.tar.gz
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-24.04-arm
+            asset: ax-aarch64-unknown-linux-musl.tar.gz
+          - target: aarch64-apple-darwin
+            os: macos-15
+            asset: ax-aarch64-apple-darwin.tar.gz
+          - target: x86_64-apple-darwin
+            os: macos-15
+            asset: ax-x86_64-apple-darwin.tar.gz
 
     steps:
       - name: Checkout
@@ -32,10 +44,16 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
+      - name: Install musl build tools
+        if: contains(matrix.target, 'linux-musl')
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
       - name: Build
         env:
           GITCODE_AX_REPOSITORY: ${{ vars.GITCODE_AX_REPOSITORY }}
-        run: cargo build --release --target "${{ matrix.target }}"
+          CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
+        run: cargo build --release --locked --target "${{ matrix.target }}"
 
       - name: Package asset (Windows)
         if: runner.os == 'Windows'
@@ -50,8 +68,8 @@ jobs:
           Copy-Item "mcp.example.toml" $package
           Compress-Archive -Path "$package/*" -DestinationPath "$env:RUNNER_TEMP/${{ matrix.asset }}" -Force
 
-      - name: Package asset (Linux)
-        if: runner.os == 'Linux'
+      - name: Package asset (Unix)
+        if: runner.os != 'Windows'
         shell: bash
         run: |
           set -euo pipefail
@@ -74,6 +92,11 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
+      - name: Resolve release notes
+        id: version
+        shell: bash
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
       - name: Download assets
         uses: actions/download-artifact@v4
         with:
@@ -96,3 +119,4 @@ jobs:
             assets/ax-*
             assets/SHA256SUMS
           generate_release_notes: true
+          body_path: docs/releases/${{ steps.version.outputs.version }}.md

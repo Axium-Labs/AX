@@ -133,8 +133,8 @@ git push origin v0.2.0
 
 The workflow:
 
-1. Builds the Windows x64 binary.
-2. Packages a Windows ZIP with the executable, `skills/`
+1. Builds Windows x64, Linux x64 (GNU and musl), Linux ARM64 (musl), and macOS Intel/Apple Silicon binaries.
+2. Packages a Windows ZIP and Unix tar.gz archives with the executable, `skills/`
    and `mcp.example.toml`; generates `SHA256SUMS` and publishes the GitHub Release.
    The release workflow does not run tests.
 
@@ -172,5 +172,6 @@ including lease expiry, fenced takeover and cumulative Goal budget recovery.
 Local integration fixtures and their outputs are maintained outside the published
 build contract.
 
-Current release assets cover Windows x64 only; source support for other
-platforms is unchanged.
+The tag-driven workflow publishes all desktop platform archives together only
+after every build succeeds. Linux musl asset names match the Unix installer
+and `ax --update`; the Linux x64 GNU archive remains available as well.
