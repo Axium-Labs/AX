@@ -151,6 +151,10 @@ keys. Optional Brave/Bocha require explicitly configured user search keys.
 [Parallel's announcement](https://parallel.ai/blog/free-web-search-mcp) and
 [MCP documentation](https://docs.parallel.ai/integrations/mcp/search-mcp)
 authorize anonymous clients at `https://search.parallel.ai/mcp`.
+[Keenable's MCP documentation](https://docs.keenable.ai/mcp-server) serves
+clients without a key on its shared public tier at `https://api.keenable.ai/mcp`;
+AX labels those requests with `X-Keenable-Title: AX` and tries Keenable only
+after Exa and Parallel.
 AX sends no API key, account cookies, paid SKU or spoofed model identity.
 It initializes MCP, negotiates a supported version, discovers the current tool
 schema and calls the advertised search tool. Exa's current required `objective`

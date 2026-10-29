@@ -13,6 +13,7 @@ use std::sync::{
 pub(super) enum RemoteKind {
     Exa,
     Parallel,
+    Keenable,
 }
 
 struct Session {
@@ -43,12 +44,14 @@ impl RemoteSearch {
         match self.kind {
             RemoteKind::Exa => "web_search_exa",
             RemoteKind::Parallel => "web_search",
+            RemoteKind::Keenable => "search_web_pages",
         }
     }
     fn source(&self) -> &'static str {
         match self.kind {
             RemoteKind::Exa => "exa",
             RemoteKind::Parallel => "parallel",
+            RemoteKind::Keenable => "keenable",
         }
     }
     async fn rpc(
@@ -68,6 +71,10 @@ impl RemoteSearch {
             .post(&self.url)
             .header("Accept", "application/json, text/event-stream")
             .json(&body);
+        if matches!(self.kind, RemoteKind::Keenable) {
+            // Documented anonymous client label; no key or account is sent.
+            request = request.header("X-Keenable-Title", "AX");
+        }
         if let Some(session) = session {
             request = request.header("MCP-Protocol-Version", &session.protocol);
             if let Some(id) = &session.id {
@@ -194,6 +201,9 @@ impl SearchProvider for RemoteSearch {
         let mut args = match self.kind {
             RemoteKind::Exa => json!({"query":query,"numResults":limit}),
             RemoteKind::Parallel => json!({"objective":query,"search_queries":[query]}),
+            RemoteKind::Keenable => {
+                json!({"query":query,"max_results":limit,"output_format":"json"})
+            }
         };
         if props.get("objective").is_some() {
             args["objective"] = json!(query);
@@ -298,6 +308,7 @@ fn structured(
         let text = excerpts
             .as_deref()
             .or_else(|| entry["text"].as_str())
+            .or_else(|| entry["snippet"].as_str())
             .unwrap_or_default();
         let mut result = SearchResult::new(
             title,
@@ -332,5 +343,94 @@ fn exa_text(text: &str, results: &mut Vec<SearchResult>) {
             snippet.chars().take(6000).collect::<String>(),
             "exa",
         ));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    async fn read_request(socket: &mut tokio::net::TcpStream) -> (String, Value) {
+        let mut bytes = vec![];
+        let mut chunk = [0; 4096];
+        loop {
+            let count = socket.read(&mut chunk).await.unwrap();
+            assert!(count > 0, "connection closed before the request completed");
+            bytes.extend_from_slice(&chunk[..count]);
+            if let Some(end) = bytes.windows(4).position(|w| w == b"\r\n\r\n") {
+                let head = String::from_utf8_lossy(&bytes[..end]).to_ascii_lowercase();
+                let length = head
+                    .lines()
+                    .find_map(|line| line.strip_prefix("content-length:"))
+                    .map_or(0, |v| v.trim().parse::<usize>().unwrap());
+                if bytes.len() >= end + 4 + length {
+                    let body = serde_json::from_slice(&bytes[end + 4..end + 4 + length]).unwrap();
+                    return (head, body);
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn keenable_search_labels_requests_and_maps_snippets() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/mcp", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let mut seen = vec![];
+            for _ in 0..4 {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let (head, body) = read_request(&mut socket).await;
+                let result = match body["method"].as_str().unwrap() {
+                    "initialize" => {
+                        json!({"protocolVersion":"2025-03-26","capabilities":{"tools":{}}})
+                    }
+                    "tools/list" => json!({"tools":[{"name":"search_web_pages","inputSchema":{
+                        "type":"object",
+                        "properties":{"query":{},"max_results":{},"session_id":{},"output_format":{}},
+                        "required":["query"]}}]}),
+                    "tools/call" => json!({"content":[{"type":"text","text":json!({"results":[
+                        {"title":"Ownership","url":"https://doc.rust-lang.org/book/ch04-01-what-is-ownership.html","description":"","snippet":"Ownership is a set of rules."},
+                        {"title":"Not a web page","url":"ftp://example.com/file","description":"","snippet":"skipped"}
+                    ]}).to_string()}]}),
+                    _ => Value::Null,
+                };
+                let response = if result.is_null() {
+                    "HTTP/1.1 202 Accepted\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                        .to_owned()
+                } else {
+                    let text = json!({"jsonrpc":"2.0","id":body["id"],"result":result}).to_string();
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{text}",
+                        text.len()
+                    )
+                };
+                socket.write_all(response.as_bytes()).await.unwrap();
+                seen.push((head, body));
+            }
+            seen
+        });
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let search = RemoteSearch::new(client, url, RemoteKind::Keenable);
+        let results = search.search("rust ownership", 5).await.unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].source, "keenable");
+        assert_eq!(results[0].title, "Ownership");
+        assert_eq!(results[0].snippet, "Ownership is a set of rules.");
+        let seen = tokio::time::timeout(std::time::Duration::from_secs(5), server)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            seen.iter()
+                .all(|(head, _)| head.contains("x-keenable-title: ax"))
+        );
+        assert!(seen.iter().all(|(head, _)| !head.contains("x-api-key")));
+        let call = &seen[3].1["params"];
+        assert_eq!(call["name"], "search_web_pages");
+        assert_eq!(call["arguments"]["query"], "rust ownership");
+        assert_eq!(call["arguments"]["max_results"], 5);
+        assert_eq!(call["arguments"]["output_format"], "json");
+        assert!(call["arguments"]["session_id"].is_string());
     }
 }

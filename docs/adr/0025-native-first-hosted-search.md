@@ -24,3 +24,10 @@ provenance. Domain-constrained server search fails closed. Anonymous service
 availability and semantic prompt-injection resistance are not guaranteed.
 
 See [audit](../web-search-audit.md) and [architecture](../web-search-architecture.md).
+
+Amendment, 2026-10-29: anonymous Keenable MCP (`https://api.keenable.ai/mcp`)
+is a third vendor-authorized Remote. It is a router fallback candidate, so it
+is tried only when Exa and Parallel fail, return too few results or are cooling
+down; lower observed latency never ranks it ahead of them. Requests carry the
+documented `X-Keenable-Title: AX` client label and no key. Endpoint `None`
+disables it like the other remotes.
