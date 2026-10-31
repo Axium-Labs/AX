@@ -10,7 +10,7 @@ The production path is:
 ```
 Agent Loop -> permission check -> WebTool::search_many
   -> NativeFirst -> ModelProvider native API/auth/server tools
-  -> on unsupported/error/timeout: SearchRouter -> Exa / Parallel MCP
+  -> on unsupported/error/timeout: SearchRouter -> Exa / Parallel MCP (Keenable MCP last)
   -> citations/evidence in Tool result -> ordinary Agent model generation
 ```
 
@@ -23,7 +23,8 @@ protocol evidence, including APIs that do not support their vendor's other
 product search features.
 
 Remote defaults are vendor-authorized anonymous Exa and Parallel MCP, initialized
-lazily with discovered schemas. No extra search key is required. Optional
+lazily with discovered schemas. Anonymous Keenable MCP is a fallback candidate
+that always ranks after them. No extra search key is required. Optional
 Brave/Bocha only enter routing when the user supplies their search key. The
 shared scheduler ranks independently by failure history and observed latency,
 limits hedging to two requests, honors Retry-After, and recovers after cooldown.

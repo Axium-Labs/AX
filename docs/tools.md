@@ -292,7 +292,8 @@ normalized into the same lists, so a single-request call keeps working.
 Search binds the selected actual model adapter through the ordinary kernel and
 child composition. `NativeFirst` calls official server search when its concrete
 protocol is eligible; unsupported/rejected/incomplete/timeout requests fall back
-to `SearchRouter` and anonymous Exa/Parallel MCP. Optional user-key Brave/Bocha
+to `SearchRouter` and anonymous Exa/Parallel MCP, then anonymous Keenable MCP as
+the last fallback. Optional user-key Brave/Bocha
 remain available. Native model-account usage can incur normal search/inference
 charges; anonymous Remote requires no extra search key. Gateway compatibility
 and model names never imply native support. See the exhaustive
@@ -326,8 +327,9 @@ normal behavior; search redirects are rejected and response bodies are bounded.
 
 Positive millisecond environment settings are
 `AX_SEARCH_NATIVE_TIMEOUT_MS`, `AX_SEARCH_TASK_TIMEOUT_MS`, and
-`AX_SEARCH_<EXA|PARALLEL|BRAVE|BOCHA>_{CONNECT_TIMEOUT_MS,READ_TIMEOUT_MS,TIMEOUT_MS}`.
-Remote endpoints use `AX_SEARCH_EXA_URL` and `AX_SEARCH_PARALLEL_URL`. Embedders
+`AX_SEARCH_<EXA|PARALLEL|KEENABLE|BRAVE|BOCHA>_{CONNECT_TIMEOUT_MS,READ_TIMEOUT_MS,TIMEOUT_MS}`.
+Remote endpoints use `AX_SEARCH_EXA_URL`, `AX_SEARCH_PARALLEL_URL` and
+`AX_SEARCH_KEENABLE_URL`. Embedders
 retain `with_search_provider`, `with_client`, and `SearchConfig`; endpoint `None`
 disables that remote candidate. A lazy shared router preserves reachability and
 EWMA latency statistics; `SearchRouter::stats()` exposes them. No page-engine

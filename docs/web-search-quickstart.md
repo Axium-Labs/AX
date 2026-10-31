@@ -2,7 +2,8 @@
 
 Use any configured AX Agent model and request web research. AX calls the selected
 provider's actual native protocol when available, otherwise anonymous Exa or
-Parallel MCP. No extra search key is needed. Model inference still needs its
+Parallel MCP, with anonymous Keenable MCP as the last fallback. No extra search
+key is needed. Model inference still needs its
 normal credentials, and native search may consume that model account's paid
 inference/search allowance. Remote anonymous access is subject to service limits
 and network availability; AX includes no private keys.
@@ -24,8 +25,9 @@ The `results` structure retains title/url/snippet/source/matched_queries and add
 Optional environment configuration (positive milliseconds):
 
 - `AX_SEARCH_NATIVE_TIMEOUT_MS` (12000), `AX_SEARCH_TASK_TIMEOUT_MS` (30000).
-- `AX_SEARCH_EXA_URL`, `AX_SEARCH_PARALLEL_URL`: explicitly selected MCP endpoints.
-- `AX_SEARCH_<EXA|PARALLEL|BRAVE|BOCHA>_CONNECT_TIMEOUT_MS` (5000),
+- `AX_SEARCH_EXA_URL`, `AX_SEARCH_PARALLEL_URL`, `AX_SEARCH_KEENABLE_URL`:
+  explicitly selected MCP endpoints.
+- `AX_SEARCH_<EXA|PARALLEL|KEENABLE|BRAVE|BOCHA>_CONNECT_TIMEOUT_MS` (5000),
   `_READ_TIMEOUT_MS` (10000), `_TIMEOUT_MS` (15000).
 - `BRAVE_SEARCH_API_KEY` / `BOCHA_SEARCH_API_KEY`: optional user-paid services;
   supplying a key explicitly enables that service under its normal billing.

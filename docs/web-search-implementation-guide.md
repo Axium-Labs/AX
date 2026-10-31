@@ -13,7 +13,7 @@ The canonical [architecture](web-search-architecture.md) and
   Its binding/fork hooks preserve selected model and remote state.
 - `tool::web::NativeFirst` owns native eligibility/probe cooldown and task budget.
 - `tool::web::remote` owns anonymous MCP protocol, negotiated sessions, advertised
-  input schemas and actual Exa/Parallel result formats.
+  input schemas and actual Exa/Parallel/Keenable result formats.
 - `SearchRouter` owns independent remote health, cooldown, latency, hedging and
   future cancellation. Injected providers/clients remain supported.
 - Kernel construction and child model override bind the actual provider; Mods

@@ -115,6 +115,19 @@ impl SearchRouter {
                 );
             }
         }
+        // Appended as a fallback candidate, so it always ranks after Exa and Parallel.
+        if let Some(url) = &config.keenable_url {
+            add(
+                "keenable",
+                Arc::new(RemoteSearch::new(
+                    client(&config.keenable_timeout),
+                    url.clone(),
+                    RemoteKind::Keenable,
+                )),
+                &config.keenable_timeout,
+                true,
+            );
+        }
         Self::new(
             candidates,
             config.hedge_delay,
@@ -326,5 +339,32 @@ impl SearchProvider for SearchRouter {
         Err(ToolError::Execution(format!(
             "search providers unavailable (circuits may be open): {errors}. Report provider errors and prefer fixing configuration or retrying later. Do not automatically bypass search providers with shell/Python scraping. User-requested alternative search or network diagnostics are allowed subject to tool permissions. Use web fetch for known URLs."
         )))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn keenable_is_appended_after_exa_and_parallel_as_fallback() {
+        let router = SearchRouter::configured(&SearchConfig::default(), None);
+        let names: Vec<_> = router.stats().into_iter().map(|(name, _)| name).collect();
+        assert_eq!(names, ["exa", "parallel", "keenable"]);
+        assert!(!router.candidates[0].fallback && !router.candidates[1].fallback);
+        assert!(router.candidates[2].fallback);
+        {
+            // Lower observed latency never moves a fallback ahead of Exa or Parallel.
+            let mut stats = router.stats.lock().unwrap();
+            stats[0].latency = Some(Duration::from_secs(9));
+            stats[1].latency = Some(Duration::from_secs(9));
+            stats[2].latency = Some(Duration::from_millis(1));
+        }
+        assert_eq!(router.order(), [0, 1, 2]);
+        let disabled = SearchConfig {
+            keenable_url: None,
+            ..SearchConfig::default()
+        };
+        assert_eq!(SearchRouter::configured(&disabled, None).stats().len(), 2);
     }
 }
