@@ -59,6 +59,9 @@ maintainer reference, not part of the product feature guide.
 
 ## Documentation conventions
 
+Runtime performance: [runtime-benchmarks.md](runtime-benchmarks.md) describes
+AX-Bench Phase 1 and its offline measurement boundaries.
+
 - One topic per file; cross-reference instead of duplicating.
 - Keep language consistent with the repository (English).
 - Record decisions with lasting consequences as ADRs — see

@@ -1,0 +1,12 @@
+{
+  "raw.json": "be23cf63d834c40e8b36d6804c6b95fc547d42a94cc817b188ae254ff5af2f81",
+  "report.md": "01b073cfec7ac9ac6aa95eabb4e0314350a3585b79339ca0c98ea5aa2cb2e67f",
+  "samples.csv": "285f5562dc1b7bd35d61af4ab9618e6e56ccd7f61b73574e0b6cf6746c6e118a",
+  "summary.json": "dd379feb1afaf4005764d0fa58f32317977ff1c2f5faa71628932bf384430d1d",
+  "startup-comparison/comparison.png": "c97b2e91b2774dd810a86d314dc9ffc8685da966bc9ba9c3490227c83d6ba305",
+  "startup-comparison/raw.json": "726ed45f4f13c7158f8ec123e0a4cf0cf15bfeb8fe3f378b81910a4e09608ae9",
+  "startup-comparison/report.md": "2218a9c54460a90f39eb8cfc2eb466c34397b6063c58a439da0ef7ecee5f87c6",
+  "startup-comparison/runner.py": "45573377f4ff90c080348008b5033ce743b3451848dfb12c4edb578656495666",
+  "startup-comparison/samples.csv": "cadd097cca16fd88371183e2145c3b25884a8aade86fbe6af9b57c2e0c0d4c38",
+  "startup-comparison/summary.json": "2c6a620feaa905d89279d5b749055c60fd0edf6de7313580f0ab8a776e8051e1"
+}

@@ -1,0 +1,87 @@
+[
+  {
+    "name": "AX",
+    "version": "ax 0.3.16",
+    "mean_ns": 12427006.666666666,
+    "median_ns": 12382750.0,
+    "p95_ns": 13414600,
+    "min_ns": 11304800,
+    "max_ns": 15393300,
+    "throughput_ops_s": 80.46990130634838,
+    "sample_count": 60,
+    "peak_working_set_mib": 11.625,
+    "rounds_mean_ms": [
+      12.840965,
+      12.48222,
+      11.957835
+    ]
+  },
+  {
+    "name": "Codex native",
+    "version": "codex-cli 0.153.4",
+    "mean_ns": 17785191.666666668,
+    "median_ns": 17654750.0,
+    "p95_ns": 19270700,
+    "min_ns": 16228700,
+    "max_ns": 20652300,
+    "throughput_ops_s": 56.22655177083182,
+    "sample_count": 60,
+    "peak_working_set_mib": 13.6171875,
+    "rounds_mean_ms": [
+      17.274865,
+      18.54158,
+      17.53913
+    ]
+  },
+  {
+    "name": "OpenCode",
+    "version": "opencode v2.0.26",
+    "mean_ns": 88871891.66666667,
+    "median_ns": 88948900.0,
+    "p95_ns": 91787500,
+    "min_ns": 85595700,
+    "max_ns": 95828400,
+    "throughput_ops_s": 11.25215162236804,
+    "sample_count": 60,
+    "peak_working_set_mib": 86.953125,
+    "rounds_mean_ms": [
+      87.942965,
+      89.673435,
+      88.999275
+    ]
+  },
+  {
+    "name": "Pi",
+    "version": "1.2.0",
+    "mean_ns": 202591493.33333334,
+    "median_ns": 202177200.0,
+    "p95_ns": 210004200,
+    "min_ns": 195993600,
+    "max_ns": 211777700,
+    "throughput_ops_s": 4.9360414079906745,
+    "sample_count": 60,
+    "peak_working_set_mib": 79.06640625,
+    "rounds_mean_ms": [
+      202.973705,
+      202.56555,
+      202.235225
+    ]
+  },
+  {
+    "name": "Codex npm launcher",
+    "version": "codex-cli 0.153.4",
+    "mean_ns": 65015415,
+    "median_ns": 64663850.0,
+    "p95_ns": 69496200,
+    "min_ns": 60275900,
+    "max_ns": 75097600,
+    "throughput_ops_s": 15.380967728960893,
+    "sample_count": 60,
+    "peak_working_set_mib": null,
+    "rounds_mean_ms": [
+      65.496315,
+      65.583825,
+      63.966105
+    ]
+  }
+]
