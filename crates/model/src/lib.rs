@@ -137,7 +137,7 @@ pub enum Role {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Message {
-    /// Native signed thinking/tool blocks, persisted for protocol-correct replay.
+    /// Provider-scoped thinking/tool metadata, persisted for protocol-correct replay.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_metadata: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -54,7 +54,16 @@ pub fn estimate_tokens(messages: &[Message]) -> usize {
                 .as_ref()
                 .and_then(|data| data.get("content"))
                 .map_or(0, |content| estimate_text_tokens(&content.to_string()));
+            // Chat Completions reasoning is replayed alongside visible text
+            // and tool calls, unlike native blocks which replace that content.
+            let reasoning = message
+                .provider_metadata
+                .as_ref()
+                .and_then(|data| data.get("reasoning_content"))
+                .and_then(serde_json::Value::as_str)
+                .map_or(0, estimate_text_tokens);
             visible.max(native)
+                + reasoning
                 + message
                     .tool_call_id
                     .as_ref()

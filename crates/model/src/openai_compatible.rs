@@ -85,7 +85,7 @@ impl OpenAiCompatibleProvider {
                 )
                 .json(&ChatRequest {
                     model: &self.config.model,
-                    messages: chat_messages(&request.messages),
+                    messages: self.chat_messages(&request.messages),
                     tools: &request.tools,
                     stream: false,
                     stream_options: None,
@@ -102,7 +102,7 @@ impl OpenAiCompatibleProvider {
             ModelError::InvalidResponse("response contains no choices".to_owned())
         })?;
         Ok(ModelResponse {
-            provider_metadata: None,
+            provider_metadata: self.reasoning_metadata(choice.message.reasoning_content),
             usage: response.usage,
             content: choice.message.content.unwrap_or_default(),
             tool_calls: choice.message.tool_calls,
@@ -126,7 +126,7 @@ impl OpenAiCompatibleProvider {
                 )
                 .json(&ChatRequest {
                     model: &self.config.model,
-                    messages: chat_messages(&request.messages),
+                    messages: self.chat_messages(&request.messages),
                     tools: &request.tools,
                     stream: true,
                     stream_options: include_usage.then(|| json!({"include_usage":true})),
@@ -177,7 +177,9 @@ impl OpenAiCompatibleProvider {
         // or tool call. Reasoning flows through the callback; text and tool
         // deltas are checked after each event.
         let first_delta = AtomicBool::new(false);
+        let mut reasoning_content = None::<String>;
         let mut on_thinking = |text: String| {
+            reasoning_content.get_or_insert_default().push_str(&text);
             if !text.is_empty() && !first_delta.swap(true, Ordering::SeqCst) {
                 stats::record_ttft(
                     &self.config.provider_id,
@@ -227,7 +229,7 @@ impl OpenAiCompatibleProvider {
             self.note_first_delta(&first_delta, &content, &tool_calls, started);
         }
         Ok(ModelResponse {
-            provider_metadata: None,
+            provider_metadata: self.reasoning_metadata(reasoning_content),
             usage,
             content,
             tool_calls: tool_calls
@@ -243,6 +245,33 @@ impl OpenAiCompatibleProvider {
                 .collect(),
             finish_reason,
         })
+    }
+
+    fn reasoning_metadata(&self, reasoning: Option<String>) -> Option<Value> {
+        reasoning.map(|content| {
+            json!({"provider": self.config.provider_id, "model": self.config.model,
+                "reasoning_content": content})
+        })
+    }
+
+    fn chat_messages(&self, messages: &[Message]) -> Vec<Value> {
+        let mut values = chat_messages(messages);
+        for (message, value) in messages.iter().zip(&mut values) {
+            if message.role != crate::Role::Assistant {
+                continue;
+            }
+            if let Some(data) = &message.provider_metadata {
+                // Replay only this adapter's own fields and model history;
+                // native signed blocks and other providers' metadata stay local.
+                if data["provider"] == self.config.provider_id
+                    && data["model"] == self.config.model
+                    && let Some(reasoning) = data.get("reasoning_content").and_then(Value::as_str)
+                {
+                    value["reasoning_content"] = json!(reasoning);
+                }
+            }
+        }
+        values
     }
 }
 
@@ -332,6 +361,8 @@ struct Choice {
 struct ResponseMessage {
     #[serde(default)]
     content: Option<String>,
+    #[serde(default)]
+    reasoning_content: Option<String>,
     #[serde(default)]
     tool_calls: Vec<ToolCall>,
 }

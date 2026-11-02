@@ -37,6 +37,16 @@ Kimi use the shared `OpenAiCompatibleProvider` Chat Completions adapter.
 context window; DeepSeek-specific endpoint and fallback defaults live in
 provider metadata. OpenAI Responses and Codex retain their existing adapter.
 
+Chat Completions `reasoning_content` is retained from both streaming and
+non-streaming responses in provider/model-scoped message metadata. Subsequent
+requests to the same provider and model replay it on assistant messages,
+including final answers without tool calls and Goal verification history.
+Only that protocol field is forwarded, not arbitrary metadata. Context token
+estimates include reasoning in addition to visible text and tool arguments.
+This follows [DeepSeek's thinking/tool-call contract](https://api-docs.deepseek.com/guides/thinking_mode/).
+Older saved messages without this metadata cannot recover previously discarded
+reasoning; start a new Session if the provider rejects that older history.
+
 | Provider | Endpoint | Credential |
 |---|---|---|
 | DeepSeek | Chat Completions | API key (`DEEPSEEK_API_KEY`) |
