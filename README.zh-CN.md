@@ -2,7 +2,7 @@
 
 用 Rust 构建的快速、轻量终端 AI Agent。
 
-[![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue)](Cargo.toml)
+[![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue)](Cargo.toml)
 [![Rust 1.92+](https://img.shields.io/badge/rust-1.92+-orange)](https://www.rust-lang.org)
 
 [English](README.md) | **简体中文**
@@ -188,7 +188,7 @@ AX 刻意不一次性加载所有东西。技能、MCP 服务器、供应商与�
 
 ## 许可证
 
-MIT 或 Apache-2.0。
+Apache-2.0。
 
 ### 导入技能与 MCP
 
