@@ -54,7 +54,24 @@ pub fn estimate_tokens(messages: &[Message]) -> usize {
                 .as_ref()
                 .and_then(|data| data.get("content"))
                 .map_or(0, |content| estimate_text_tokens(&content.to_string()));
+            // Compatible APIs can expose the same reasoning as text aliases
+            // and structured (possibly encrypted/signed) details. Budget the
+            // largest representation alongside visible content, not each alias.
+            let reasoning = message.provider_metadata.as_ref().map_or(0, |data| {
+                let text = ["reasoning_content", "reasoning"]
+                    .iter()
+                    .filter_map(|key| data.get(key).and_then(serde_json::Value::as_str))
+                    .map(estimate_text_tokens)
+                    .max()
+                    .unwrap_or(0);
+                let details = data
+                    .get("reasoning_details")
+                    .filter(|value| value.is_array())
+                    .map_or(0, |value| estimate_text_tokens(&value.to_string()));
+                text.max(details)
+            });
             visible.max(native)
+                + reasoning
                 + message
                     .tool_call_id
                     .as_ref()

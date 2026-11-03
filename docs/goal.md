@@ -6,6 +6,11 @@ use in ordinary tasks defaults off. Harness still owns reliable execution, Task
 Queue owns task identity and children, Goal owns acceptance policy, and Runtime enforces execution
 constraints using its existing budgets and usage statistics.
 
+Model-mode acceptance uses the same provider transport as task execution.
+Chat Completions reasoning metadata is retained in execution evidence and
+replayed for the same provider/model during acceptance; see
+[provider replay and older Session limits](providers.md#provider-abstraction).
+
 ## Use
 
 - `/goal <target>` starts and executes a natural-language target (model mode when

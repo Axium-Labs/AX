@@ -1,0 +1,49 @@
+name: Bug report
+description: Report a reproducible problem in AX.
+title: "[Bug]: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Search existing issues and PRs first. See [contribution guidelines](https://github.com/Axium-Labs/AX/blob/main/CONTRIBUTING.md).
+        Remove credentials, private prompts, memory and session data from examples and logs.
+        For a suspected exploitable vulnerability, use private reporting if available, or ask for a private maintainer contact without publishing exploit details.
+  - type: input
+    id: version
+    attributes:
+      label: AX version or commit
+      description: Output of ax --version, or the source commit you built.
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: OS/version, CPU architecture, Rust version for source builds, interface (CLI/TUI/ACP), provider/protocol, sandbox mode and relevant configuration. Omit secrets; mark unknown fields as unknown.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Minimal reproduction
+      description: Steps, commands and synthetic inputs in an isolated workspace. If intermittent, include frequency and what you have tried.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: Include the error or incorrect result and its impact.
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Sanitized diagnostics and related reports
+      description: Relevant log excerpts, affected versions, related issues, possible regression commit or workaround. Do not attach live databases or auth files.

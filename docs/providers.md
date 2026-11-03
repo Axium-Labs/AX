@@ -37,6 +37,40 @@ Kimi use the shared `OpenAiCompatibleProvider` Chat Completions adapter.
 context window; DeepSeek-specific endpoint and fallback defaults live in
 provider metadata. OpenAI Responses and Codex retain their existing adapter.
 
+Chat Completions `reasoning_content`, `reasoning` and structured
+`reasoning_details` are retained from both streaming and non-streaming responses
+in provider/model-scoped message metadata. Subsequent
+requests to the same provider and model replay it on assistant messages,
+including final answers without tool calls and Goal verification history.
+Only those protocol fields are forwarded, not arbitrary metadata. Structured
+reasoning details retain opaque data and signatures for compatible gateways
+such as OpenRouter. Context token estimates budget the largest reasoning
+representation in addition to visible text and tool arguments.
+This follows [DeepSeek's thinking/tool-call contract](https://api-docs.deepseek.com/guides/thinking_mode/).
+Older saved messages without this metadata cannot recover previously discarded
+reasoning; start a new Session if the provider rejects that older history.
+
+Responses adapters (OpenAI, Codex and Azure Responses) preserve ordered output
+items, including reasoning state, assistant messages and function calls, in
+the same durable metadata contract. Requests use `store: false` and replay
+those items only for the matching provider/model and Responses protocol.
+Encrypted reasoning is opaque state; AX does not decrypt or replace it with
+displayed summaries. The retained output representation participates in context
+budgeting. See [OpenAI's reasoning-state guidance](https://developers.openai.com/api/docs/guides/reasoning).
+
+Both adapters reject explicit stream errors and EOF without a valid completion
+boundary. Responses `failed` or filtered/unspecified incomplete outcomes fail.
+A declared output-token limit may request continuation through the existing
+Runtime; unfinished function calls are withheld from tool execution. Partial
+output errors do not become successful tool results, and existing retry rules
+still prevent replay after emitted text or thinking.
+
+Native adapters also fail explicitly when a token-limited response contains tool
+calls: incomplete signed tool blocks cannot safely be executed or rewritten for
+replay. Text/reasoning-only token limits retain their native state for the
+existing continuation path. Gemini `MAX_TOKENS` maps to that shared continuation
+state rather than being mistaken for normal completion.
+
 | Provider | Endpoint | Credential |
 |---|---|---|
 | DeepSeek | Chat Completions | API key (`DEEPSEEK_API_KEY`) |

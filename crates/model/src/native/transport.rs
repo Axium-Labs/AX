@@ -73,8 +73,17 @@ fn parse(
     }
     let value: Value = serde_json::from_str(&data)
         .map_err(|e| ModelError::InvalidResponse(format!("invalid SSE JSON: {e}")))?;
-    if value.get("error").is_some() || value["type"] == "error" {
-        let error = value.get("error").unwrap_or(&value);
+    if let Some(error) = stream_error(&value) {
+        return Err(error);
+    }
+    event(value)
+}
+
+/// Shared by native and Chat Completions SSE transports: an HTTP 200 body can
+/// still carry a provider failure instead of a successful completion.
+pub(crate) fn stream_error(value: &Value) -> Option<ModelError> {
+    if value.get("error").is_some_and(|error| !error.is_null()) || value["type"] == "error" {
+        let error = value.get("error").unwrap_or(value);
         let status = error["code"]
             .as_u64()
             .filter(|c| (400..600).contains(c))
@@ -86,7 +95,7 @@ fn parse(
                 _ => None,
             });
         let message = format!("provider stream error: {error}");
-        return Err(match status {
+        return Some(match status {
             Some(status) => ModelError::HttpResponse {
                 status,
                 message,
@@ -95,5 +104,5 @@ fn parse(
             None => ModelError::InvalidResponse(message),
         });
     }
-    event(value)
+    None
 }

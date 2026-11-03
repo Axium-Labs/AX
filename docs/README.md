@@ -37,6 +37,7 @@ are documented in [host-permissions.md](host-permissions.md).
 | [mods.md](mods.md) | Executable JavaScript Mods, loading, hooks, commands, tools and compatibility |
 | [evolution.md](evolution.md) | Low-frequency Experience learning and evolved Skill lifecycle |
 | [providers.md](providers.md) | Models, providers, authentication |
+| [contributing/README.md](contributing/README.md) | Contribution workflow, issues, PRs and review policy |
 | [development.md](development.md) | Building, testing, extending and releasing AX |
 | [release-notes/0.3.15.md](release-notes/0.3.15.md) | Current release |
 | [adr/README.md](adr/README.md) | Architecture Decision Records (index) |
@@ -51,13 +52,19 @@ maintainer reference, not part of the product feature guide.
   install, first session, providers.
 - **Codex / AI agents** — start at [AGENTS.md](../AGENTS.md); it routes to
   the right documents for a task.
-- **Contributors** — read [architecture.md](architecture.md) first, then the
-  topic document for the area you touch, then [development.md](development.md)
-  for build/test conventions.
+- **Contributors** — start at [CONTRIBUTING.md](../CONTRIBUTING.md) for issue,
+  implementation and review workflow; follow [development.md](development.md)
+  for technical standards.
 - **Deep dives** — [storage.md](storage.md), the Web Search audit and
   [adr/](adr/README.md) contain implementation and design references.
 
 ## Documentation conventions
+
+Runtime performance: [runtime-benchmarks.md](runtime-benchmarks.md) describes
+AX-Bench Phase 1 and its offline measurement boundaries.
+
+Agent capability and advanced execution: [agent-benchmarks.md](agent-benchmarks.md)
+describes the production CLI task suite, Crew adapter and unimplemented boundaries.
 
 - One topic per file; cross-reference instead of duplicating.
 - Keep language consistent with the repository (English).

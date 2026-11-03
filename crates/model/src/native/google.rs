@@ -460,7 +460,11 @@ pub(super) async fn stream(
                         "Google generation stopped: {reason}"
                     )));
                 }
-                output.finish_reason = Some(reason.into());
+                output.finish_reason = Some(if reason == "MAX_TOKENS" {
+                    "max_tokens".into()
+                } else {
+                    reason.into()
+                });
             }
             if let Some(parts) = candidate["content"]["parts"].as_array() {
                 for part in parts {

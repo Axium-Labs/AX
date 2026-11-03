@@ -62,6 +62,7 @@ fn merge(info: &mut Value, found: &Value) {
 #[cfg(any(windows, target_os = "macos"))]
 async fn output(program: &str, args: &[&str]) -> anyhow::Result<String> {
     let mut command = Command::new(program);
+    sandbox::strip_browser_bridge_env(&mut command);
     command.args(args).kill_on_drop(true);
     #[cfg(windows)]
     command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW

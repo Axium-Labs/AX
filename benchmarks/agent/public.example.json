@@ -1,0 +1,46 @@
+{
+  "manifest": "C:/datasets/terminal-manifest.json",
+  "ax_binary": "C:/private/ax-linux-musl",
+  "ax_binary_commit": null,
+  "sandbox_probe_binary": "C:/private/ax-bench-sandbox-probe-linux",
+  "profiles": [{"id":"selected-model","provider":"REPLACE_PROVIDER","model":"REPLACE_MODEL","model_revision":null,"home_template":"C:/private/dedicated-linux-ax-home","env_from":[]}],
+  "environments": {
+    "REPLACE_TASK_ID": {
+      "image": "sha256:REPLACE_WITH_64_HEX_LOCAL_IMAGE_ID",
+      "workspace": "/app",
+      "evaluation_image": "sha256:REPLACE_WITH_64_HEX_SWE_OFFICIAL_IMAGE_ID",
+      "reward_key": null,
+      "success_threshold": 1.0
+    }
+  },
+  "rounds": 3,
+  "task_seconds": 300,
+  "verifier_seconds": 600,
+  "max_steps": 20,
+  "max_tool_calls": 80,
+  "allow_dangerous": true,
+  "task_tokens": 60000,
+  "task_cost_microusd": 0,
+  "global_seconds": 3600,
+  "global_tokens": 0,
+  "global_cost_microusd": 0,
+  "cpus": 2,
+  "memory_mb": 4096,
+  "pids_limit": 256,
+  "agent_network": "bridge",
+  "verifier_network": "none",
+  "retain_failed_containers": true,
+  "swe_evaluator": {
+    "source_dir": "C:/datasets/pinned-swe-bench-source",
+    "commit": "REPLACE_WITH_FULL_GIT_COMMIT",
+    "python": "C:/private/swe-env/python.exe",
+    "dataset_file": "C:/datasets/verified.jsonl",
+    "prepared_dataset_file": "C:/datasets/prepared-official-tasks.jsonl",
+    "prepared_dataset_sha256": "REPLACE_WITH_SHA256"
+  },
+  "terminal_evaluator": {
+    "source_dir": "C:/datasets/pinned-terminal-bench-source",
+    "commit": "REPLACE_WITH_FULL_GIT_COMMIT",
+    "python": "C:/private/terminal-env/python.exe"
+  }
+}

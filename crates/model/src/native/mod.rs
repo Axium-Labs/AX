@@ -116,13 +116,26 @@ impl NativeProvider {
         delta: &mut (dyn FnMut(String) + Send),
         thinking: &mut (dyn FnMut(String) + Send),
     ) -> Result<ModelResponse, ModelError> {
-        match self.name() {
+        let response = match self.name() {
             "anthropic" => anthropic::stream(self, request, delta, thinking).await,
             "google" | "google-vertex" => google::stream(self, request, delta, thinking).await,
             "amazon-bedrock" => bedrock::stream(self, request, delta, thinking).await,
             "radius" => radius::stream(self, request, delta, thinking).await,
             _ => unreachable!(),
+        }?;
+        // Native signatures cover complete protocol blocks. Rewriting a
+        // token-truncated tool block would invalidate that state; returning it
+        // would execute an uncommitted call. Fail explicitly instead.
+        if matches!(
+            response.finish_reason.as_deref(),
+            Some("max_tokens" | "length")
+        ) && !response.tool_calls.is_empty()
+        {
+            return Err(ModelError::InvalidResponse(
+                "Native generation reached the token limit before committing tool calls".into(),
+            ));
         }
+        Ok(response)
     }
 
     fn metadata(&self, content: Value) -> Value {

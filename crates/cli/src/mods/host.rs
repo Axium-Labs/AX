@@ -195,6 +195,7 @@ impl ModHost {
             .kill_on_drop(true);
         #[cfg(windows)]
         command.creation_flags(0x0800_0000);
+        sandbox::strip_browser_bridge_env(&mut command);
         let mut child = command
             .spawn()
             .context("Mods require Node.js 20.6+ on PATH (or AX_MOD_NODE)")?;

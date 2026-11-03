@@ -101,7 +101,9 @@ impl Tool for TaskSourceTool {
                         .into(),
                 )
             })?;
-        let output = tokio::process::Command::new(&python.path)
+        let mut command = tokio::process::Command::new(&python.path);
+        sandbox::strip_browser_bridge_env(&mut command);
+        let output = command
             .arg("-X")
             .arg("utf8")
             .arg("-c")

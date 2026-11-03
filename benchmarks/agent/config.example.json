@@ -1,0 +1,26 @@
+{
+  "profiles": [{
+    "id": "selected-model",
+    "provider": "REPLACE_PROVIDER_ID",
+    "model": "REPLACE_MODEL_ID",
+    "model_revision": null,
+    "home_template": "REPLACE_WITH_DEDICATED_AX_HOME",
+    "fault_gateway": {
+      "upstream": "https://REPLACE_PROVIDER_HOST"
+    }
+  }],
+  "task_seconds": 180,
+  "allow_dangerous": true,
+  "max_steps": 12,
+  "max_tool_calls": 40,
+  "task_tokens": 30000,
+  "task_cost_microusd": 0,
+  "global_seconds": 3600,
+  "global_tokens": 0,
+  "global_cost_microusd": 0,
+  "advanced": {
+    "stages": 20,
+    "minimum_seconds": 0
+  },
+  "crew": null
+}

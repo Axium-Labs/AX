@@ -271,6 +271,7 @@ impl LinuxBackend {
             return Err(SandboxViolation("cwd outside workspace".into()));
         }
         let mut cmd = tokio::process::Command::new("/usr/bin/bwrap");
+        super::strip_browser_bridge_env(&mut cmd);
         let mut filter = &self.filter;
         filter.rewind()?;
         cmd.args([
@@ -493,6 +494,8 @@ impl LinuxBackend {
         // program is exclusively spawned by the namespace broker.
         let child =
             tokio::process::Command::new(format!("/proc/self/fd/{}", self.binary.as_raw_fd()))
+                .env_remove("AX_CREW_BROWSER_URL")
+                .env_remove("AX_CREW_BROWSER_TOKEN")
                 .arg("--ax-sandbox-proxy")
                 .arg(self.ipc.path().join("control.sock"))
                 .arg(&path)
@@ -581,6 +584,8 @@ fn prepare_cache(policy: &SandboxPolicy) -> Result<File> {
 fn check_bwrap() -> Result<()> {
     const GUIDANCE: &str = "Install/upgrade bubblewrap with --disable-userns support (for example apt install bubblewrap), or explicitly select ax --sandbox off for unrestricted execution";
     let help = std::process::Command::new("/usr/bin/bwrap")
+        .env_remove("AX_CREW_BROWSER_URL")
+        .env_remove("AX_CREW_BROWSER_TOKEN")
         .arg("--help")
         .output()
         .map_err(|error| {

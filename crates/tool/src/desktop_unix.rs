@@ -45,10 +45,16 @@ async fn exchange(request: &Value) -> Result<Value, ToolError> {
                 "python3".into()
             }
         });
-        let mut child = tokio::process::Command::new(python)
-            .arg("-I").arg(directory.join("worker.py"))
-            .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped())
-            .kill_on_drop(true).spawn().map_err(|error| ToolError::Execution(format!("Cannot start Unix desktop Python runtime: {error}. Install the dependencies documented in computer-use.md or set AX_DESKTOP_PYTHON.")))?;
+        let mut command = tokio::process::Command::new(python);
+        command
+            .arg("-I")
+            .arg(directory.join("worker.py"))
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+        sandbox::strip_browser_bridge_env(&mut command);
+        let mut child = command.spawn().map_err(|error| ToolError::Execution(format!("Cannot start Unix desktop Python runtime: {error}. Install the dependencies documented in computer-use.md or set AX_DESKTOP_PYTHON.")))?;
         let mut input = child
             .stdin
             .take()

@@ -31,9 +31,26 @@ The native desktop worker is a host transport, separately authorized from confin
 
 ## Browser Use
 
-`browser.rs` starts the embedded `browser_worker.mjs` lazily, through Node and Playwright, outside the file/terminal worker. It creates AX-owned, nonpersistent Chromium contexts with the Chromium sandbox enabled and no personal browser profile. Contexts are shared across turns only within the same controller permission scope. Closing the final session closes Chromium; dropping a scope closes the driver's input pipe, allowing normal browser cleanup. A worker deadline closes owned sessions; the Rust exchange has a separate timeout.
+When a local AXCrew desktop starts AX with `AX_CREW_BROWSER_URL` and its launch
+secret, `browser` uses that desktop's authenticated loopback bridge and actual
+sidebar WebViews. CLI defaults remain unchanged. The same HostPermissionStore
+and task policy resolve website access before every operation. The Windows
+embedded transport requires fail-closed, all-source WebView2 request filtering,
+redirect interception and WebSocket blocking; unavailable runtimes/platforms
+return an error without launching another browser. The bridge reuses the user's
+embedded cookie/login profile; tabs are AX-Session scoped, profiles are not.
+First adoption reloads the existing page after protection is installed.
+Snapshot text and CSS targets, click/fill/type and Enter/Tab are supported;
+screenshots and other keys fail explicitly. Controlled views survive switching
+Crew conversations and close through the tab controls or `browser close`.
+Desktop bridge environment credentials are scrubbed from shell, sandbox, MCP and
+Mod children. Only trusted local AX/ACP execution retains the bridge; SSH and
+paired remote Hosts do not inherit it. No credentials are written to settings.
 
-Install the external runtime explicitly (AX does not run package installation from a browser tool call):
+
+Outside that explicit AXCrew desktop transport, `browser.rs` starts the embedded `browser_worker.mjs` lazily, through Node and Playwright, outside the file/terminal worker. It creates AX-owned, nonpersistent Chromium contexts with the Chromium sandbox enabled and no personal browser profile. Contexts are shared across turns only within the same controller permission scope. Closing the final session closes Chromium; dropping a scope closes the driver's input pipe, allowing normal browser cleanup. A worker deadline closes owned sessions; the Rust exchange has a separate timeout.
+
+For this standalone transport, install the external runtime explicitly (AX does not run package installation from a browser tool call):
 
 ```sh
 npm install --prefix "<AX_HOME>/browser" playwright
@@ -50,7 +67,7 @@ Accessibility snapshots have a 32000-character transport cap and titles/URLs are
 
 ## Platform and trust limits
 
-Permission separation does not create a missing OS backend. Real native workspace/strict isolation currently exists only on Linux; explicit confined modes on native Windows/macOS still fail closed, and the platform default remains off there. Native Computer Use has Windows UIA, Linux AT-SPI and macOS Accessibility adapters. Unix needs the documented runtime dependencies; macOS also needs OS privacy grants. Wayland currently allows accessibility actions only. WSL can operate Linux GUI apps but has no IPC bridge to the Windows desktop. SSH contexts do not expose local host UI tools. Browser use needs a supported Node/Playwright/browser installation and was live-tested here on Windows Edge.
+Permission separation does not create a missing OS backend. Real native workspace/strict isolation currently exists only on Linux; explicit confined modes on native Windows/macOS still fail closed, and the platform default remains off there. Native Computer Use has Windows UIA, Linux AT-SPI and macOS Accessibility adapters. Unix needs the documented runtime dependencies; macOS also needs OS privacy grants. Wayland currently allows accessibility actions only. WSL can operate Linux GUI apps but has no IPC bridge to the Windows desktop. SSH contexts do not expose local host UI tools. Standalone browser use needs a supported Node/Playwright/browser installation and was live-tested here on Windows Edge. Local AXCrew embedded Agent control instead needs the documented Windows WebView2 request guard and no external Node/Playwright installation; it fails explicitly on unsupported platforms.
 
 These settings govern AX's trusted tool entry points, not arbitrary programs already running as the same OS user. Unrestricted shell access or controlling a general-purpose terminal/browser application can perform broader actions. Keep the existing OS sandbox wherever supported; application/site permission checks are a separate service boundary, not a substitute for OS confinement. Local native AX extensions remain part of the trusted computing base.
 

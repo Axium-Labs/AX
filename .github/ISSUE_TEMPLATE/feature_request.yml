@@ -1,0 +1,47 @@
+name: Feature request or design proposal
+description: Discuss a user problem and proposed AX change before implementation.
+title: "[Feature]: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Search existing issues and PRs first. See [design discussion](https://github.com/Axium-Labs/AX/blob/main/docs/contributing/issues.md#design-discussion).
+        New features, architecture adjustments and significant core subsystem changes require explicit maintainer design agreement before implementation. Filing this form is not approval.
+  - type: textarea
+    id: problem
+    attributes:
+      label: User problem and use case
+      description: Describe a concrete workflow and what current AX behavior prevents.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior and scope
+      description: Explain the design and affected crates/contracts if known. Implementation knowledge is not required.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives and workarounds
+      description: Include why existing behavior, configuration or extensions are insufficient.
+    validations:
+      required: true
+  - type: textarea
+    id: impact
+    attributes:
+      label: Architecture, compatibility and risks
+      description: Known Runtime/Agent Loop, Memory/Storage, Permission/Sandbox, Provider/MCP, API, dependency or performance implications; link relevant ADRs. Unknown is acceptable.
+  - type: textarea
+    id: validation
+    attributes:
+      label: Acceptance criteria and validation plan
+      description: Observable success criteria, regression cases and relevant platforms. Share initial ideas even if you do not plan to implement it.
+    validations:
+      required: true
+  - type: textarea
+    id: participation
+    attributes:
+      label: Related work and participation
+      description: Link related issues/PRs and say whether you would like to implement the agreed design.

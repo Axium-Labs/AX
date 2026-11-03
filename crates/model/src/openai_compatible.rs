@@ -12,6 +12,9 @@ use crate::{
     ReasoningEffort, ToolCall, ToolSpec, stats,
 };
 
+mod reasoning;
+use reasoning::Reasoning;
+
 #[path = "search/compatible.rs"]
 mod native_search;
 
@@ -85,7 +88,7 @@ impl OpenAiCompatibleProvider {
                 )
                 .json(&ChatRequest {
                     model: &self.config.model,
-                    messages: chat_messages(&request.messages),
+                    messages: self.chat_messages(&request.messages),
                     tools: &request.tools,
                     stream: false,
                     stream_options: None,
@@ -98,11 +101,14 @@ impl OpenAiCompatibleProvider {
         .json::<ChatResponse>()
         .await?;
 
-        let choice = response.choices.into_iter().next().ok_or_else(|| {
+        let mut choice = response.choices.into_iter().next().ok_or_else(|| {
             ModelError::InvalidResponse("response contains no choices".to_owned())
         })?;
+        if validate_finish_reason(choice.finish_reason.as_deref())? {
+            choice.message.tool_calls.clear();
+        }
         Ok(ModelResponse {
-            provider_metadata: None,
+            provider_metadata: self.full_reasoning_metadata(choice.message.reasoning),
             usage: response.usage,
             content: choice.message.content.unwrap_or_default(),
             tool_calls: choice.message.tool_calls,
@@ -126,7 +132,7 @@ impl OpenAiCompatibleProvider {
                 )
                 .json(&ChatRequest {
                     model: &self.config.model,
-                    messages: chat_messages(&request.messages),
+                    messages: self.chat_messages(&request.messages),
                     tools: &request.tools,
                     stream: true,
                     stream_options: include_usage.then(|| json!({"include_usage":true})),
@@ -193,6 +199,7 @@ impl OpenAiCompatibleProvider {
         let mut tool_calls = BTreeMap::<usize, PartialToolCall>::new();
         let mut finish_reason = None;
         let mut usage = None;
+        let mut reasoning = Reasoning::default();
 
         'events: while let Some(chunk) = stream.next().await {
             buffer.extend_from_slice(&chunk?);
@@ -204,7 +211,7 @@ impl OpenAiCompatibleProvider {
                     &mut content,
                     &mut tool_calls,
                     &mut finish_reason,
-                    &mut usage,
+                    (&mut usage, &mut reasoning),
                     on_delta,
                     &mut on_thinking,
                 )? {
@@ -220,14 +227,24 @@ impl OpenAiCompatibleProvider {
                 &mut content,
                 &mut tool_calls,
                 &mut finish_reason,
-                &mut usage,
+                (&mut usage, &mut reasoning),
                 on_delta,
                 &mut on_thinking,
             )?;
             self.note_first_delta(&first_delta, &content, &tool_calls, started);
         }
+        if finish_reason.as_deref().is_none_or(str::is_empty) {
+            return Err(ModelError::InvalidResponse(
+                "Chat Completions stream ended without finish_reason".into(),
+            ));
+        }
+        if validate_finish_reason(finish_reason.as_deref())? {
+            // A token-limit terminal event does not commit pending calls. Keep
+            // its length status so Runtime continues without executing them.
+            tool_calls.clear();
+        }
         Ok(ModelResponse {
-            provider_metadata: None,
+            provider_metadata: self.full_reasoning_metadata(reasoning),
             usage,
             content,
             tool_calls: tool_calls
@@ -243,6 +260,55 @@ impl OpenAiCompatibleProvider {
                 .collect(),
             finish_reason,
         })
+    }
+
+    fn reasoning_metadata(&self, reasoning: Option<String>) -> Option<Value> {
+        reasoning.map(|content| {
+            json!({"provider": self.config.provider_id, "model": self.config.model,
+                "reasoning_content": content})
+        })
+    }
+
+    fn full_reasoning_metadata(&self, reasoning: Reasoning) -> Option<Value> {
+        let mut data = self.reasoning_metadata(reasoning.content).unwrap_or_else(
+            || json!({"provider":self.config.provider_id,"model":self.config.model}),
+        );
+        if let Some(text) = reasoning.text {
+            data["reasoning"] = json!(text);
+        }
+        if let Some(details) = reasoning.details {
+            data["reasoning_details"] = json!(details);
+        }
+        (data.as_object().is_some_and(|data| data.len() > 2)).then_some(data)
+    }
+
+    fn chat_messages(&self, messages: &[Message]) -> Vec<Value> {
+        let mut values = chat_messages(messages);
+        for (message, value) in messages.iter().zip(&mut values) {
+            if message.role != crate::Role::Assistant {
+                continue;
+            }
+            if let Some(data) = &message.provider_metadata {
+                // Replay only this adapter's own fields and model history;
+                // native signed blocks and other providers' metadata stay local.
+                if data["provider"] == self.config.provider_id
+                    && data["model"] == self.config.model
+                    && let Some(reasoning) = data.get("reasoning_content").and_then(Value::as_str)
+                {
+                    value["reasoning_content"] = json!(reasoning);
+                }
+                if data["provider"] == self.config.provider_id && data["model"] == self.config.model
+                {
+                    if let Some(reasoning) = data.get("reasoning").and_then(Value::as_str) {
+                        value["reasoning"] = json!(reasoning);
+                    }
+                    if let Some(details) = data.get("reasoning_details").and_then(Value::as_array) {
+                        value["reasoning_details"] = json!(details);
+                    }
+                }
+            }
+        }
+        values
     }
 }
 
@@ -274,6 +340,17 @@ fn chat_messages(messages: &[Message]) -> Vec<Value> {
         .collect()
 }
 
+fn validate_finish_reason(reason: Option<&str>) -> Result<bool, ModelError> {
+    match reason {
+        // Some older non-streaming compatible endpoints omit this field.
+        None | Some("stop" | "tool_calls" | "function_call") => Ok(false),
+        Some("length") => Ok(true),
+        Some(reason) => Err(ModelError::InvalidResponse(format!(
+            "Chat Completions generation stopped: {reason}"
+        ))),
+    }
+}
+
 #[cfg(test)]
 mod content_tests {
     use super::*;
@@ -285,7 +362,7 @@ mod content_tests {
             &mut String::new(),
             &mut BTreeMap::new(),
             &mut None,
-            &mut usage,
+            (&mut usage, &mut Reasoning::default()),
             &mut |_| {},
             &mut |_| {},
         )
@@ -333,6 +410,9 @@ struct ResponseMessage {
     #[serde(default)]
     content: Option<String>,
     #[serde(default)]
+    #[serde(flatten)]
+    reasoning: Reasoning,
+    #[serde(default)]
     tool_calls: Vec<ToolCall>,
 }
 
@@ -353,8 +433,8 @@ struct StreamChoice {
 #[derive(Default, Deserialize)]
 struct StreamDelta {
     content: Option<String>,
-    /// Compatible reasoning models may stream reasoning content here.
-    reasoning_content: Option<String>,
+    #[serde(flatten)]
+    reasoning: Reasoning,
     #[serde(default)]
     tool_calls: Vec<DeltaToolCall>,
 }
@@ -544,10 +624,11 @@ fn process_event(
     content: &mut String,
     tool_calls: &mut BTreeMap<usize, PartialToolCall>,
     finish_reason: &mut Option<String>,
-    usage: &mut Option<Value>,
+    usage_and_reasoning: (&mut Option<Value>, &mut Reasoning),
     on_delta: &mut (dyn FnMut(String) + Send),
     on_thinking: &mut (dyn FnMut(String) + Send),
 ) -> Result<bool, ModelError> {
+    let (usage, reasoning) = usage_and_reasoning;
     let event = std::str::from_utf8(event)
         .map_err(|error| ModelError::InvalidResponse(error.to_string()))?;
     let Some(data) = event
@@ -567,15 +648,21 @@ fn process_event(
     if data.is_empty() || data.starts_with(':') {
         return Ok(false);
     }
-    let chunk = serde_json::from_str::<StreamChunk>(data)
+    let value = serde_json::from_str::<Value>(data)
+        .map_err(|error| ModelError::InvalidResponse(error.to_string()))?;
+    if let Some(error) = crate::native::transport::stream_error(&value) {
+        return Err(error);
+    }
+    let chunk = serde_json::from_value::<StreamChunk>(value)
         .map_err(|error| ModelError::InvalidResponse(error.to_string()))?;
     if chunk.usage.is_some() {
         *usage = chunk.usage;
     }
     for choice in chunk.choices {
-        if let Some(reasoning) = choice.delta.reasoning_content {
-            on_thinking(reasoning.clone());
+        if let Some(text) = choice.delta.reasoning.display_text() {
+            on_thinking(text);
         }
+        reasoning.append(choice.delta.reasoning)?;
         if let Some(delta) = choice.delta.content {
             on_delta(delta.clone());
             content.push_str(&delta);
@@ -640,7 +727,7 @@ mod tests {
             &mut content,
             &mut calls,
             &mut finish,
-            &mut usage,
+            (&mut usage, &mut Reasoning::default()),
             &mut on_delta,
             &mut on_thinking,
         )
@@ -650,7 +737,7 @@ mod tests {
             &mut content,
             &mut calls,
             &mut finish,
-            &mut usage,
+            (&mut usage, &mut Reasoning::default()),
             &mut on_delta,
             &mut on_thinking,
         )

@@ -1,0 +1,28 @@
+[package]
+name = "ax-runtime-bench"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# Deliberately independent: production targets never depend on this harness.
+[workspace]
+
+[dependencies]
+runtime-core = { path = "../../crates/core" }
+memory = { path = "../../crates/memory" }
+model = { path = "../../crates/model" }
+tool = { path = "../../crates/tool" }
+async-trait = "0.1"
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "time", "sync"] }
+
+[[bench]]
+name = "micro"
+path = "benches/micro.rs"
+harness = false
+
+[profile.release]
+codegen-units = 1
+lto = "thin"
+opt-level = 3
+strip = "symbols"

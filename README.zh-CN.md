@@ -178,6 +178,14 @@ AX 刻意不一次性加载所有东西。技能、MCP 服务器、供应商与�
 
 内部架构——Agent 循环、上下文管理、多 Agent 调度、SQLite schema、模块布局——记录在 [docs/README.md](docs/README.md)。从 [docs/architecture.md](docs/architecture.md) 开始。
 
+## 参与贡献
+
+请阅读 [CONTRIBUTING.md](CONTRIBUTING.md)，了解 Issue 讨论、开发验证、PR 提交和代码审查流程。
+
+## 致谢
+
+- [AtomGit / GitCode](https://gitcode.com/axlab/AX)：感谢为 AX 提供国内代码托管，帮助中国大陆用户更快访问项目与下载 Release。
+
 ## 许可证
 
 MIT 或 Apache-2.0。

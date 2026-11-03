@@ -175,6 +175,7 @@ async fn run_native(request: &Value, home: &std::path::Path) -> Result<String, T
     command.creation_flags(0x0800_0000);
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     command.process_group(0);
+    sandbox::strip_browser_bridge_env(&mut command);
     let mut child = command.spawn()?;
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     let mut worker_group = unix::WorkerGroup(child.id());

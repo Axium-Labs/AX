@@ -97,6 +97,8 @@ async fn execute(mut stream: UnixStream) -> Result<()> {
     let mut child = match tokio::process::Command::new(spec.program)
         .args(spec.args)
         .envs(spec.env)
+        .env_remove("AX_CREW_BROWSER_URL")
+        .env_remove("AX_CREW_BROWSER_TOKEN")
         .current_dir(spec.cwd)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

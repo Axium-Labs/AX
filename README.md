@@ -235,6 +235,15 @@ scheduling, SQLite schema, module layout — is documented in
 [docs/README.md](docs/README.md). Start with
 [docs/architecture.md](docs/architecture.md).
 
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for reporting issues, developing changes,
+submitting PRs and the review process.
+
+## Acknowledgments
+
+- [AtomGit / GitCode](https://gitcode.com/axlab/AX): Thank you for hosting AX in China, helping users in mainland China access the project and download releases faster.
+
 ## License
 
 MIT OR Apache-2.0.

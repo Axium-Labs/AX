@@ -294,6 +294,7 @@ struct ResponsesRequest<'a> {
     tools: Vec<Value>,
     store: bool,
     stream: bool,
+    include: &'static [&'static str],
     #[serde(skip_serializing_if = "Option::is_none")]
     max_output_tokens: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -307,6 +308,10 @@ struct ResponsesResponse {
     #[serde(default)]
     output: Vec<Value>,
     status: Option<String>,
+    #[serde(default)]
+    error: Option<Value>,
+    #[serde(default)]
+    incomplete_details: Option<Value>,
 }
 
 #[async_trait]
@@ -393,9 +398,10 @@ impl ModelProvider for OpenAiProvider {
         on_delta: &mut (dyn FnMut(String) + Send),
         on_thinking: &mut (dyn FnMut(String) + Send),
     ) -> Result<ModelResponse, ModelError> {
-        let _ = on_thinking;
         let started = Instant::now();
-        let result = self.stream_inner(request, on_delta, started).await;
+        let result = self
+            .stream_inner(request, on_delta, on_thinking, started)
+            .await;
         match &result {
             Ok(response) => {
                 let output_chars = response.content.len()
@@ -519,13 +525,14 @@ impl OpenAiProvider {
                 .request_model
                 .as_deref()
                 .unwrap_or(&self.config.model),
-            input: response_input(&request.messages),
+            input: self.request_input(&request.messages),
             tools: response_tools(&request.tools),
             store: false,
             max_output_tokens: (self.name() == "azure-openai-responses")
                 .then_some(self.config.max_output_tokens)
                 .flatten(),
             stream: false,
+            include: &["reasoning.encrypted_content"],
             reasoning: self
                 .config
                 .reasoning_effort
@@ -553,13 +560,14 @@ impl OpenAiProvider {
             });
         }
         let response = response.json::<ResponsesResponse>().await?;
-        parse_response(response)
+        parse_response(response).map(|response| self.scope_response(response))
     }
 
     async fn stream_inner(
         &self,
         request: ModelRequest,
         on_delta: &mut (dyn FnMut(String) + Send),
+        on_thinking: &mut (dyn FnMut(String) + Send),
         started: Instant,
     ) -> Result<ModelResponse, ModelError> {
         let payload = ResponsesRequest {
@@ -568,13 +576,14 @@ impl OpenAiProvider {
                 .request_model
                 .as_deref()
                 .unwrap_or(&self.config.model),
-            input: response_input(&request.messages),
+            input: self.request_input(&request.messages),
             tools: response_tools(&request.tools),
             store: false,
             max_output_tokens: (self.name() == "azure-openai-responses")
                 .then_some(self.config.max_output_tokens)
                 .flatten(),
             stream: true,
+            include: &["reasoning.encrypted_content"],
             reasoning: self
                 .config
                 .reasoning_effort
@@ -601,8 +610,8 @@ impl OpenAiProvider {
                 message: truncate_error(&message),
             });
         }
-        // TTFT = time to the first text delta (the Responses API surfaces no
-        // reasoning or tool-call deltas through the callbacks).
+        // Reasoning summaries are public provider output too; do not treat a
+        // healthy reasoning stream as a silent connection timeout.
         let first_delta = AtomicBool::new(false);
         let provider_name = self.name().to_owned();
         let model = self.config.model.clone();
@@ -612,6 +621,12 @@ impl OpenAiProvider {
             }
             on_delta(text);
         };
+        let mut on_thinking = |text: String| {
+            if !text.is_empty() && !first_delta.swap(true, Ordering::SeqCst) {
+                stats::record_ttft(&provider_name, &model, started.elapsed());
+            }
+            on_thinking(text);
+        };
         let mut stream = response.bytes_stream();
         let mut buffer = Vec::new();
         let mut output = StreamedResponse::default();
@@ -620,13 +635,47 @@ impl OpenAiProvider {
             while let Some((end, delimiter_len)) = find_sse_event_end(&buffer) {
                 let event = buffer.drain(..end).collect::<Vec<_>>();
                 buffer.drain(..delimiter_len);
-                process_response_event(&event, &mut output, &mut on_delta)?;
+                process_response_event_observed(
+                    &event,
+                    &mut output,
+                    &mut on_delta,
+                    &mut on_thinking,
+                )?;
             }
         }
         if !buffer.is_empty() {
-            process_response_event(&buffer, &mut output, &mut on_delta)?;
+            process_response_event_observed(&buffer, &mut output, &mut on_delta, &mut on_thinking)?;
         }
-        output.finish()
+        output
+            .finish()
+            .map(|response| self.scope_response(response))
+    }
+
+    fn scope_response(&self, mut response: ModelResponse) -> ModelResponse {
+        if let Some(data) = response.provider_metadata.as_mut() {
+            data["provider"] = json!(self.name());
+            data["model"] = json!(self.config.model);
+            data["protocol"] = json!("responses");
+        }
+        response
+    }
+
+    fn request_input(&self, messages: &[Message]) -> Vec<Value> {
+        let mut input = Vec::new();
+        for message in messages {
+            let replay = message.provider_metadata.as_ref().filter(|data| {
+                message.role == Role::Assistant
+                    && data["provider"] == self.name()
+                    && data["model"] == self.config.model
+                    && data["protocol"] == "responses"
+            });
+            if let Some(items) = replay.and_then(|data| data["content"].as_array()) {
+                input.extend(items.iter().cloned());
+            } else {
+                input.extend(response_input(std::slice::from_ref(message)));
+            }
+        }
+        input
     }
 
     async fn fetch_models(&self) -> Result<Vec<ModelInfo>, ModelError> {
@@ -741,6 +790,9 @@ struct StreamedResponse {
     content: String,
     calls: BTreeMap<String, StreamedCall>,
     status: Option<String>,
+    items: BTreeMap<usize, Value>,
+    incomplete_details: Option<Value>,
+    authoritative_output: bool,
 }
 
 #[derive(Default)]
@@ -752,29 +804,103 @@ struct StreamedCall {
 
 impl StreamedResponse {
     fn finish(self) -> Result<ModelResponse, ModelError> {
-        if self.content.is_empty() && self.calls.is_empty() {
-            return Err(ModelError::InvalidResponse(
-                "Responses API stream contains no text or function calls".to_owned(),
-            ));
+        validate_response_status(self.status.as_deref(), self.incomplete_details.as_ref())?;
+        if self.authoritative_output || (self.content.is_empty() && self.calls.is_empty()) {
+            // Some gateways emit only completed output items, without deltas.
+            return parse_response(ResponsesResponse {
+                output: self.items.into_values().collect(),
+                usage: self.usage,
+                status: self.status,
+                error: None,
+                incomplete_details: self.incomplete_details,
+            });
         }
-        Ok(ModelResponse {
-            provider_metadata: None,
+        let mut items = self.items.into_values().collect::<Vec<_>>();
+        if !items.iter().any(|item| item["type"] == "message") && !self.content.is_empty() {
+            items.push(json!({"type":"message","role":"assistant","content":[{"type":"output_text","text":self.content}]}));
+        }
+        // Completed output items are authoritative. Older compatible gateways
+        // may provide only call deltas plus a response.completed event.
+        for call in self.calls.into_values() {
+            if !items
+                .iter()
+                .any(|item| item["type"] == "function_call" && item["call_id"] == call.call_id)
+            {
+                items.push(json!({"type":"function_call","call_id":call.call_id,"name":call.name,"arguments":call.arguments}));
+            }
+        }
+        parse_response(ResponsesResponse {
+            output: items,
             usage: self.usage,
-            content: self.content,
-            tool_calls: self
-                .calls
-                .into_values()
-                .map(|call| ToolCall {
-                    id: call.call_id,
-                    kind: "function".to_owned(),
-                    function: FunctionCall {
-                        name: call.name,
-                        arguments: call.arguments,
-                    },
-                })
-                .collect(),
-            finish_reason: self.status,
+            status: self.status,
+            error: None,
+            incomplete_details: self.incomplete_details,
         })
+    }
+
+    fn record_item(&mut self, item: Value, index: Option<usize>) {
+        let index = index
+            .or_else(|| {
+                item.get("id").and_then(|id| {
+                    self.items
+                        .iter()
+                        .find_map(|(index, saved)| (saved.get("id") == Some(id)).then_some(*index))
+                })
+            })
+            .unwrap_or_else(|| {
+                self.items
+                    .last_key_value()
+                    .map_or(0, |(index, _)| index + 1)
+            });
+        self.items.insert(index, item);
+    }
+
+    fn receive_item(&mut self, value: &Value) {
+        let Some(item) = value.get("item") else {
+            return;
+        };
+        if item["type"] == "function_call" {
+            let call = self
+                .calls
+                .entry(item["id"].as_str().unwrap_or_default().into())
+                .or_default();
+            if let Some(id) = item["call_id"].as_str() {
+                id.clone_into(&mut call.call_id);
+            }
+            if let Some(name) = item["name"].as_str() {
+                name.clone_into(&mut call.name);
+            }
+            if let Some(arguments) = item["arguments"].as_str().filter(|text| !text.is_empty()) {
+                arguments.clone_into(&mut call.arguments);
+            }
+        }
+        if value["type"] == "response.output_item.done" {
+            self.record_item(
+                item.clone(),
+                value["output_index"]
+                    .as_u64()
+                    .and_then(|i| usize::try_from(i).ok()),
+            );
+        }
+    }
+
+    fn complete(&mut self, response: &Value) -> Result<(), ModelError> {
+        if let Some(error) = response.get("error").filter(|error| !error.is_null()) {
+            return Err(response_error(error));
+        }
+        self.usage = response.get("usage").filter(|v| !v.is_null()).cloned();
+        self.status = response["status"].as_str().map(str::to_owned);
+        self.incomplete_details = response
+            .get("incomplete_details")
+            .filter(|value| !value.is_null())
+            .cloned();
+        validate_response_status(self.status.as_deref(), self.incomplete_details.as_ref())?;
+        if let Some(items) = response.get("output").and_then(Value::as_array) {
+            self.items = items.iter().cloned().enumerate().collect();
+            self.calls.clear();
+            self.authoritative_output = true;
+        }
+        Ok(())
     }
 }
 
@@ -794,26 +920,46 @@ fn find_sse_event_end(buffer: &[u8]) -> Option<(usize, usize)> {
     }
 }
 
+#[cfg(test)]
 fn process_response_event(
     event: &[u8],
     output: &mut StreamedResponse,
     on_delta: &mut (dyn FnMut(String) + Send),
 ) -> Result<(), ModelError> {
+    process_response_event_observed(event, output, on_delta, &mut |_| {})
+}
+
+fn process_response_event_observed(
+    event: &[u8],
+    output: &mut StreamedResponse,
+    on_delta: &mut (dyn FnMut(String) + Send),
+    on_thinking: &mut (dyn FnMut(String) + Send),
+) -> Result<(), ModelError> {
     let event = std::str::from_utf8(event)
         .map_err(|error| ModelError::InvalidResponse(error.to_string()))?;
-    let Some(data) = event
+    let data = event
         .lines()
-        .find_map(|line| line.trim_end_matches('\r').strip_prefix("data:"))
-        .map(str::trim)
-    else {
-        return Ok(());
-    };
+        .filter_map(|line| {
+            line.trim_end_matches('\r')
+                .strip_prefix("data:")
+                .map(str::trim)
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
     if data.is_empty() || data == "[DONE]" {
         return Ok(());
     }
-    let value = serde_json::from_str::<Value>(data)
+    let value = serde_json::from_str::<Value>(&data)
         .map_err(|error| ModelError::InvalidResponse(error.to_string()))?;
+    if let Some(error) = value.get("error").filter(|error| !error.is_null()) {
+        return Err(response_error(error));
+    }
     match value.get("type").and_then(Value::as_str) {
+        Some("response.reasoning_summary_text.delta" | "response.reasoning_text.delta") => {
+            if let Some(delta) = value["delta"].as_str() {
+                on_thinking(delta.into());
+            }
+        }
         Some("response.output_text.delta") => {
             if let Some(delta) = value.get("delta").and_then(Value::as_str) {
                 output.content.push_str(delta);
@@ -821,27 +967,7 @@ fn process_response_event(
             }
         }
         Some("response.output_item.added" | "response.output_item.done") => {
-            if let Some(item) = value.get("item")
-                && item.get("type").and_then(Value::as_str) == Some("function_call")
-            {
-                let item_id = item
-                    .get("id")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_owned();
-                let call = output.calls.entry(item_id).or_default();
-                if let Some(call_id) = item.get("call_id").and_then(Value::as_str) {
-                    call_id.clone_into(&mut call.call_id);
-                }
-                if let Some(name) = item.get("name").and_then(Value::as_str) {
-                    name.clone_into(&mut call.name);
-                }
-                if let Some(arguments) = item.get("arguments").and_then(Value::as_str)
-                    && !arguments.is_empty()
-                {
-                    arguments.clone_into(&mut call.arguments);
-                }
-            }
+            output.receive_item(&value);
         }
         Some("response.function_call_arguments.delta") => {
             let item_id = value
@@ -858,25 +984,16 @@ fn process_response_event(
                     .push_str(delta);
             }
         }
-        Some("response.completed") => {
-            output.usage = value
-                .pointer("/response/usage")
-                .filter(|v| !v.is_null())
-                .cloned();
-            output.status = value
-                .get("response")
-                .and_then(|response| response.get("status"))
-                .and_then(Value::as_str)
-                .map(str::to_owned);
+        Some("response.completed" | "response.incomplete") => {
+            output.complete(&value["response"])?;
+        }
+        Some("response.failed") => {
+            return Err(response_error(
+                value.pointer("/response/error").unwrap_or(&value),
+            ));
         }
         Some("error") => {
-            return Err(ModelError::InvalidResponse(
-                value
-                    .get("message")
-                    .and_then(Value::as_str)
-                    .unwrap_or("unknown streaming error")
-                    .to_owned(),
-            ));
+            return Err(response_error(value.get("error").unwrap_or(&value)));
         }
         _ => {}
     }
@@ -946,9 +1063,25 @@ fn response_tools(tools: &[ToolSpec]) -> Vec<Value> {
 }
 
 fn parse_response(response: ResponsesResponse) -> Result<ModelResponse, ModelError> {
+    if let Some(error) = response.error.as_ref().filter(|error| !error.is_null()) {
+        return Err(response_error(error));
+    }
+    validate_response_status(
+        response.status.as_deref(),
+        response.incomplete_details.as_ref(),
+    )?;
+    let incomplete = response.status.as_deref() == Some("incomplete");
+    let replay = response
+        .output
+        .into_iter()
+        .filter(|item| {
+            matches!(item["type"].as_str(), Some("reasoning" | "message"))
+                || (!incomplete && item["type"] == "function_call")
+        })
+        .collect::<Vec<_>>();
     let mut content = Vec::new();
     let mut tool_calls = Vec::new();
-    for item in response.output {
+    for item in &replay {
         match item.get("type").and_then(Value::as_str) {
             Some("message") => {
                 if let Some(parts) = item.get("content").and_then(Value::as_array) {
@@ -960,41 +1093,89 @@ fn parse_response(response: ResponsesResponse) -> Result<ModelResponse, ModelErr
                     }));
                 }
             }
-            Some("function_call") => tool_calls.push(ToolCall {
-                id: item
-                    .get("call_id")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_owned(),
-                kind: "function".to_owned(),
-                function: FunctionCall {
-                    name: item
-                        .get("name")
+            Some("function_call") => {
+                let required = |key: &str| {
+                    item.get(key)
                         .and_then(Value::as_str)
-                        .unwrap_or_default()
-                        .to_owned(),
-                    arguments: item
-                        .get("arguments")
-                        .and_then(Value::as_str)
-                        .unwrap_or("{}")
-                        .to_owned(),
-                },
-            }),
+                        .filter(|value| !value.is_empty())
+                        .ok_or_else(|| {
+                            ModelError::InvalidResponse(format!(
+                                "Responses function call missing {key}"
+                            ))
+                        })
+                };
+                let arguments = required("arguments")?;
+                serde_json::from_str::<Value>(arguments).map_err(|error| {
+                    ModelError::InvalidResponse(format!(
+                        "Responses function call has invalid arguments: {error}"
+                    ))
+                })?;
+                tool_calls.push(ToolCall {
+                    id: required("call_id")?.to_owned(),
+                    kind: "function".to_owned(),
+                    function: FunctionCall {
+                        name: required("name")?.to_owned(),
+                        arguments: arguments.to_owned(),
+                    },
+                });
+            }
             _ => {}
         }
     }
-    if content.is_empty() && tool_calls.is_empty() {
+    if content.is_empty() && tool_calls.is_empty() && !incomplete {
         return Err(ModelError::InvalidResponse(
             "Responses API output contains no text or function calls".to_owned(),
         ));
     }
     Ok(ModelResponse {
-        provider_metadata: None,
+        provider_metadata: Some(json!({"content":replay})),
         usage: response.usage,
         content: content.join("\n"),
         tool_calls,
         finish_reason: response.status,
     })
+}
+
+fn validate_response_status(
+    status: Option<&str>,
+    incomplete: Option<&Value>,
+) -> Result<(), ModelError> {
+    match status {
+        Some("completed") => Ok(()),
+        Some("incomplete")
+            if incomplete.is_some_and(|details| details["reason"] == "max_output_tokens") =>
+        {
+            Ok(())
+        }
+        Some("incomplete") => Err(ModelError::InvalidResponse(format!(
+            "Responses generation incomplete: {}",
+            incomplete.map_or_else(|| "unspecified reason".into(), Value::to_string)
+        ))),
+        other => Err(ModelError::InvalidResponse(format!(
+            "Responses ended without successful terminal status: {other:?}"
+        ))),
+    }
+}
+
+fn response_error(error: &Value) -> ModelError {
+    let message = truncate_error(&format!("Responses API error: {error}"));
+    let status = error["code"]
+        .as_u64()
+        .and_then(|value| u16::try_from(value).ok())
+        .filter(|status| (400..600).contains(status))
+        .or_else(|| match error["code"].as_str() {
+            Some("server_error") => Some(500),
+            Some("rate_limit_exceeded") => Some(429),
+            _ => None,
+        });
+    match status {
+        Some(status) => ModelError::HttpResponse {
+            status,
+            message,
+            retry_after: None,
+        },
+        None => ModelError::InvalidResponse(message),
+    }
 }
 
 fn truncate_error(message: &str) -> String {
@@ -1036,6 +1217,8 @@ mod tests {
     fn parses_text_and_function_calls() {
         let response = ResponsesResponse {
             usage: None,
+            error: None,
+            incomplete_details: None,
             output: vec![
                 json!({
                     "type": "message",

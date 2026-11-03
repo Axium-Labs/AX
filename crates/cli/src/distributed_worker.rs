@@ -454,6 +454,8 @@ pub(crate) async fn run(path: &Path) -> Result<()> {
 
 async fn git(root: &Path, args: &[&str]) -> Result<Vec<u8>> {
     let output = Command::new("git")
+        .env_remove("AX_CREW_BROWSER_URL")
+        .env_remove("AX_CREW_BROWSER_TOKEN")
         .args(args)
         .current_dir(root)
         .output()
@@ -514,6 +516,8 @@ async fn prepare(config: &WorkerSettings, task: &Value) -> Result<(PathBuf, bool
     if is_git {
         // A separate clone keeps Git metadata, hooks and index out of the source workspace.
         let output = Command::new("git")
+            .env_remove("AX_CREW_BROWSER_URL")
+            .env_remove("AX_CREW_BROWSER_TOKEN")
             .args(["clone", "--no-hardlinks", "--no-checkout", "--"])
             .arg(command_path(source))
             .arg(command_path(&root))

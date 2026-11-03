@@ -20,6 +20,12 @@ target app/site grants and action approval are enforced separately; unknown host
 access is not covered by `--allow-dangerous`. See [host-permissions.md](host-permissions.md)
 for the CLI, exact target identities, browser runtime and current compatibility limits.
 
+Local AXCrew desktop tasks expose the built-in sidebar browser through this
+same `browser` tool. The tool advertises the active transport and its supported
+operations; it reuses existing Session tabs instead of launching a separate
+browser. The Windows embedded transport and the standalone Playwright transport
+have different screenshot/key support; see [Browser Use](host-permissions.md#browser-use).
+
 `ax environment` shows execution settings. On Windows, `ax environment native`
 runs AX directly; `ax environment wsl` runs Linux AX in the default WSL
 distribution. WSL selection first checks `~/.local/bin/ax --version`; install

@@ -1,0 +1,51 @@
+{
+  "url": "http://127.0.0.1:4317",
+  "token_env": "AX_BENCH_CREW_TOKEN",
+  "dedicated_benchmark_environment": false,
+  "rounds": 3,
+  "timeout_seconds": 300,
+  "poll_seconds": 1,
+  "global_seconds": 3600,
+  "global_tokens": 0,
+  "global_cost_microusd": 0,
+  "task_budget": {"max_rounds":12,"max_seconds":240,"max_tokens":30000,"max_cost_microusd":0},
+  "max_cpu_seconds": 0,
+  "max_rss_bytes": 0,
+  "max_network_bytes": 0,
+  "check_idempotency": true,
+  "check_checkpoint_cas": false,
+  "check_receipt_idempotency": false,
+  "require_fencing": false,
+  "require_cross_machine": false,
+  "crew_commit": null,
+  "ax_commit": null,
+  "model": null,
+  "inventory": {},
+  "nodes": [],
+  "scalability": [{"nodes": [], "concurrency": 4, "copies": 1}],
+  "faults": [],
+  "tasks": [
+    {
+      "id": "produce",
+      "submit": {
+        "title": "Produce a verified ledger artifact",
+        "input": "Create ledger.json containing {\"balance\":385} after verifying sum of squares from 1 through 10 using terminal execution. Preserve ledger.json in the workspace so it is published in the task patch. Return ONLY JSON {\"balance\":385}.",
+        "project_id": "REPLACE_DEDICATED_GIT_BENCHMARK_PROJECT",
+        "max_attempts": 3
+      },
+      "expected_result_json": {"balance":385},
+      "artifact_checks": [{"kind":"patch", "name":"changes.patch"}]
+    },
+    {
+      "id": "consume",
+      "depends_on": ["produce"],
+      "submit": {
+        "title": "Consume the transferred ledger artifact",
+        "input": "Read ledger.json transferred by the dependency patch. Verify balance and compute twice that balance using terminal execution. Return ONLY JSON {\"doubled\":770}. Do not reconstruct ledger.json if missing; report a dependency transfer failure.",
+        "project_id": "REPLACE_DEDICATED_GIT_BENCHMARK_PROJECT",
+        "max_attempts": 3
+      },
+      "expected_result_json": {"doubled":770}
+    }
+  ]
+}

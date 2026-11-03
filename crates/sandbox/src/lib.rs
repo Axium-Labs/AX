@@ -7,6 +7,19 @@ use std::{
 };
 use tokio::process::Child;
 
+/// Desktop browser credentials belong to the built-in tool, never user code,
+/// external MCP servers, Mods, or their descendant processes.
+pub fn strip_browser_bridge_env(command: &mut tokio::process::Command) {
+    strip_browser_bridge_std_env(command.as_std_mut());
+}
+
+/// Synchronous launcher counterpart for runtime probes and external helpers.
+pub fn strip_browser_bridge_std_env(command: &mut std::process::Command) {
+    command
+        .env_remove("AX_CREW_BROWSER_URL")
+        .env_remove("AX_CREW_BROWSER_TOKEN");
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SandboxMode {
@@ -219,7 +232,11 @@ impl SandboxBackend for Sandbox {
             linux: Mutex::new(linux),
         })
     }
-    fn spawn(&self, spec: CommandSpec) -> Result<Child> {
+    fn spawn(&self, mut spec: CommandSpec) -> Result<Child> {
+        spec.env.retain(|key, _| {
+            !key.eq_ignore_ascii_case("AX_CREW_BROWSER_URL")
+                && !key.eq_ignore_ascii_case("AX_CREW_BROWSER_TOKEN")
+        });
         #[cfg(target_os = "linux")]
         if self.policy.mode != SandboxMode::Off {
             let mut backend = self
@@ -252,6 +269,7 @@ impl SandboxBackend for Sandbox {
             spec.cwd
                 .unwrap_or_else(|| self.policy.workspace_root.clone()),
         );
+        strip_browser_bridge_env(&mut command);
         command
             .stdin(spec.stdin)
             .stdout(std::process::Stdio::piped())

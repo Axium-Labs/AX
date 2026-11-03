@@ -1,0 +1,2 @@
+AX runtime fixed fixture v1: session context memory storage tool scheduling.
+固定离线数据：保存会话、检索构建命令、恢复上下文。No network or model execution.

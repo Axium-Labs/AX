@@ -51,6 +51,7 @@ impl SshHost {
     pub fn command(&self) -> Result<Command, ToolError> {
         self.validate()?;
         let mut command = Command::new("ssh");
+        sandbox::strip_browser_bridge_env(&mut command);
         command.args([
             "-T",
             "-o",

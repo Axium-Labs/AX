@@ -76,6 +76,8 @@ fn snapshot_inside(cwd: &Path) -> Result<Snapshot, String> {
     let mut paths = BTreeSet::new();
     // NUL framing handles spaces, Unicode and tabs; no HEAD is needed in new repositories.
     let git = std::process::Command::new("git")
+        .env_remove("AX_CREW_BROWSER_URL")
+        .env_remove("AX_CREW_BROWSER_TOKEN")
         .args([
             "ls-files",
             "-z",
@@ -215,6 +217,8 @@ fn text_diff(path: &str, before: Option<&Vec<u8>>, after: Option<&Vec<u8>>) -> O
         && std::fs::write(temp.0.join("before"), old).is_ok()
         && std::fs::write(temp.0.join("after"), new).is_ok()
         && let Ok(output) = std::process::Command::new("git")
+            .env_remove("AX_CREW_BROWSER_URL")
+            .env_remove("AX_CREW_BROWSER_TOKEN")
             .args([
                 "diff",
                 "--no-index",

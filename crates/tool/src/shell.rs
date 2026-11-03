@@ -428,6 +428,7 @@ async fn execute_shell(
             .env("AX_SESSION_ID", &context.session_id)
             .env("AX_MEMORY_SCOPE", &context.memory_scope);
     }
+    sandbox::strip_browser_bridge_env(&mut command);
     let child = command
         .kill_on_drop(true)
         .stdin(if input.stdin.is_some() {

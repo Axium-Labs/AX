@@ -104,7 +104,9 @@ fn version(path: &Path) -> Option<String> {
     {
         return None;
     }
-    let mut child = Command::new(path)
+    let mut command = Command::new(path);
+    sandbox::strip_browser_bridge_std_env(&mut command);
+    let mut child = command
         .arg("--version")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
