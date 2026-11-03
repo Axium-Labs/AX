@@ -183,7 +183,9 @@ impl OpenAiCompatibleProvider {
         // or tool call. Reasoning flows through the callback; text and tool
         // deltas are checked after each event.
         let first_delta = AtomicBool::new(false);
+        let mut reasoning_content = None::<String>;
         let mut on_thinking = |text: String| {
+            reasoning_content.get_or_insert_default().push_str(&text);
             if !text.is_empty() && !first_delta.swap(true, Ordering::SeqCst) {
                 stats::record_ttft(
                     &self.config.provider_id,

@@ -100,6 +100,10 @@ and power mode. Do not infer version regressions from one noisy result.
 
 ## Outputs and cross-version comparison
 
+Selected owner-approved historical measurements are checked in under
+[`baselines/`](baselines/README.md). They retain their original source identity
+and limitations. New runner output continues to go to ignored `results/`.
+
 `results/<UTC timestamp>/` (ignored by Git) contains:
 
 - `raw.json`: schema/fixture versions, commit and tracked dirty state/diff hash,

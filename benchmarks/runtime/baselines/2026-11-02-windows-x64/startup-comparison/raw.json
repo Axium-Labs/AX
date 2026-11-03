@@ -1,0 +1,4946 @@
+{
+  "timestamp_utc": "2026-11-01T17:19:13.149374+00:00",
+  "os": "Windows-11-10.0.26300-SP0",
+  "protocol": "same Windows host; --version only; 3 independent rounds; 5 warmup + 20 recorded fresh-process launches per tool per round; OS cache not flushed; shell shim excluded; native Codex and npm launcher separated; isolated homes; parent launch/wait included; Win32 whole-process CPU and working set; npm launcher memory excludes its native child and must not be compared",
+  "node_runtime": "v22.20.0 (existing installation, explicitly selected for Pi compatibility)",
+  "commands": {
+    "AX": [
+      "C:\\Users\\14181\\Desktop\\axlab\\ax\\target\\release\\ax.exe",
+      "--version"
+    ],
+    "Codex native": [
+      "C:\\Program Files\\nodejs\\node_cache\\node_modules\\@openai\\codex\\node_modules\\@openai\\codex-win32-x64\\vendor\\x86_64-pc-windows-msvc\\bin\\codex.exe",
+      "--version"
+    ],
+    "OpenCode": [
+      "C:\\Program Files\\nodejs\\node_cache\\node_modules\\@opencode\\cli\\bin\\opencode.exe",
+      "--version"
+    ],
+    "Pi": [
+      "C:\\Users\\14181\\AppData\\Roaming\\nvm\\v22.20.0\\node.exe",
+      "C:\\Program Files\\nodejs\\node_cache\\node_modules\\@earendil-works\\pi-coding-agent\\dist\\bundle\\cli.js",
+      "--version"
+    ],
+    "Codex npm launcher": [
+      "C:\\Users\\14181\\AppData\\Roaming\\nvm\\v22.20.0\\node.exe",
+      "C:\\Program Files\\nodejs\\node_cache\\node_modules\\@openai\\codex\\bin\\codex.js",
+      "--version"
+    ]
+  },
+  "hashes": {
+    "C:\\Users\\14181\\Desktop\\axlab\\ax\\target\\release\\ax.exe": "2a581e2634feb02d99921baa58eeb7b220ffb2004a0e9243386da25cc0a84988",
+    "C:\\Program Files\\nodejs\\node_cache\\node_modules\\@openai\\codex\\node_modules\\@openai\\codex-win32-x64\\vendor\\x86_64-pc-windows-msvc\\bin\\codex.exe": "444a3f0008050605cae73cd9b7a2dcac61294062dfaab56dd20430fd6498518b",
+    "C:\\Program Files\\nodejs\\node_cache\\node_modules\\@opencode\\cli\\bin\\opencode.exe": "78af5a9866f6074a1b88bc6d64eb0035f24ae53f5efa3fdf741ff7a8cb27c5e7",
+    "C:\\Users\\14181\\AppData\\Roaming\\nvm\\v22.20.0\\node.exe": "fdddbf4581e046b8102815d56208d6a248950bb554570b81519a8a5dacfee95d",
+    "C:\\Program Files\\nodejs\\node_cache\\node_modules\\@earendil-works\\pi-coding-agent\\dist\\bundle\\cli.js": "e79626f2dd6f94aa45d30f3fa63cd84319a6eefcd150b353cfaf274366926774",
+    "C:\\Program Files\\nodejs\\node_cache\\node_modules\\@openai\\codex\\bin\\codex.js": "61b0194f3bb6534439c8d26a3ed57d0805f84b884588b761795323eeb92fcf70"
+  },
+  "runs": [
+    {
+      "name": "AX",
+      "round": 1,
+      "version": "ax 0.3.16",
+      "samples": [
+        {
+          "sample": 0,
+          "elapsed_ns": 12477700,
+          "operations": 1,
+          "ns_per_op": 12477700,
+          "resources": {
+            "wall_ns": 12477700,
+            "cpu_seconds": 0.0625,
+            "cpu_percent_one_core": 500.89359417200285,
+            "rss_sampled_max_bytes": 12140544,
+            "peak_rss_bytes": 12148736,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 1,
+          "elapsed_ns": 11597400,
+          "operations": 1,
+          "ns_per_op": 11597400,
+          "resources": {
+            "wall_ns": 11597400,
+            "cpu_seconds": 0.046875,
+            "cpu_percent_one_core": 404.185420870195,
+            "rss_sampled_max_bytes": 2211840,
+            "peak_rss_bytes": 12017664,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 2,
+          "elapsed_ns": 13129600,
+          "operations": 1,
+          "ns_per_op": 13129600,
+          "resources": {
+            "wall_ns": 13129600,
+            "cpu_seconds": 0.015625,
+            "cpu_percent_one_core": 119.00591030952961,
+            "rss_sampled_max_bytes": 12140544,
+            "peak_rss_bytes": 12140544,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 3,
+          "elapsed_ns": 13059800,
+          "operations": 1,
+          "ns_per_op": 13059800,
+          "resources": {
+            "wall_ns": 13059800,
+            "cpu_seconds": 0.0,
+            "cpu_percent_one_core": 0.0,
+            "rss_sampled_max_bytes": 10850304,
+            "peak_rss_bytes": 12124160,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 4,
+          "elapsed_ns": 12279900,
+          "operations": 1,
+          "ns_per_op": 12279900,
+          "resources": {
+            "wall_ns": 12279900,
+            "cpu_seconds": 0.0,
+            "cpu_percent_one_core": 0.0,
+            "rss_sampled_max_bytes": 9801728,
+            "peak_rss_bytes": 12054528,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 5,
+          "elapsed_ns": 12947100,
+          "operations": 1,
+          "ns_per_op": 12947100,
+          "resources": {
+            "wall_ns": 12947100,
+            "cpu_seconds": 0.015625,
+            "cpu_percent_one_core": 120.68339628179284,
+            "rss_sampled_max_bytes": 8396800,
+            "peak_rss_bytes": 12169216,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 6,
+          "elapsed_ns": 12813000,
+          "operations": 1,
+          "ns_per_op": 12813000,
+          "resources": {
+            "wall_ns": 12813000,
+            "cpu_seconds": 0.046875,
+            "cpu_percent_one_core": 365.8393818777804,
+            "rss_sampled_max_bytes": 9338880,
+            "peak_rss_bytes": 12152832,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 7,
+          "elapsed_ns": 13934000,
+          "operations": 1,
+          "ns_per_op": 13934000,
+          "resources": {
+            "wall_ns": 13934000,
+            "cpu_seconds": 0.015625,
+            "cpu_percent_one_core": 112.13578297689106,
+            "rss_sampled_max_bytes": 12029952,
+            "peak_rss_bytes": 12029952,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 8,
+          "elapsed_ns": 13178400,
+          "operations": 1,
+          "ns_per_op": 13178400,
+          "resources": {
+            "wall_ns": 13178400,
+            "cpu_seconds": 0.015625,
+            "cpu_percent_one_core": 118.56522794876466,
+            "rss_sampled_max_bytes": 8105984,
+            "peak_rss_bytes": 12140544,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 9,
+          "elapsed_ns": 12667300,
+          "operations": 1,
+          "ns_per_op": 12667300,
+          "resources": {
+            "wall_ns": 12667300,
+            "cpu_seconds": 0.015625,
+            "cpu_percent_one_core": 123.34909570310958,
+            "rss_sampled_max_bytes": 7045120,
+            "peak_rss_bytes": 12120064,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 10,
+          "elapsed_ns": 13571500,
+          "operations": 1,
+          "ns_per_op": 13571500,
+          "resources": {
+            "wall_ns": 13571500,
+            "cpu_seconds": 0.015625,
+            "cpu_percent_one_core": 115.13097299487897,
+            "rss_sampled_max_bytes": 11005952,
+            "peak_rss_bytes": 12132352,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 11,
+          "elapsed_ns": 12417200,
+          "operations": 1,
+          "ns_per_op": 12417200,
+          "resources": {
+            "wall_ns": 12417200,
+            "cpu_seconds": 0.0,
+            "cpu_percent_one_core": 0.0,
+            "rss_sampled_max_bytes": 11350016,
+            "peak_rss_bytes": 12144640,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 12,
+          "elapsed_ns": 12952600,
+          "operations": 1,
+          "ns_per_op": 12952600,
+          "resources": {
+            "wall_ns": 12952600,
+            "cpu_seconds": 0.0,
+            "cpu_percent_one_core": 0.0,
+            "rss_sampled_max_bytes": 8404992,
+            "peak_rss_bytes": 12046336,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 13,
+          "elapsed_ns": 12585000,
+          "operations": 1,
+          "ns_per_op": 12585000,
+          "resources": {
+            "wall_ns": 12585000,
+            "cpu_seconds": 0.015625,
+            "cpu_percent_one_core": 124.15574096146204,
+            "rss_sampled_max_bytes": 9715712,
+            "peak_rss_bytes": 12025856,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 14,
+          "elapsed_ns": 12582500,
+          "operations": 1,
+          "ns_per_op": 12582500,
+          "resources": {
+            "wall_ns": 12582500,
+            "cpu_seconds": 0.0625,
+            "cpu_percent_one_core": 496.72163719451623,
+            "rss_sampled_max_bytes": 9707520,
+            "peak_rss_bytes": 12132352,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 15,
+          "elapsed_ns": 12945100,
+          "operations": 1,
+          "ns_per_op": 12945100,
+          "resources": {
+            "wall_ns": 12945100,
+            "cpu_seconds": 0.015625,
+            "cpu_percent_one_core": 120.70204169917575,
+            "rss_sampled_max_bytes": 11067392,
+            "peak_rss_bytes": 12062720,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 16,
+          "elapsed_ns": 12845800,
+          "operations": 1,
+          "ns_per_op": 12845800,
+          "resources": {
+            "wall_ns": 12845800,
+            "cpu_seconds": 0.03125,
+            "cpu_percent_one_core": 243.27017390898195,
+            "rss_sampled_max_bytes": 11169792,
+            "peak_rss_bytes": 12173312,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 17,
+          "elapsed_ns": 12603700,
+          "operations": 1,
+          "ns_per_op": 12603700,
+          "resources": {
+            "wall_ns": 12603700,
+            "cpu_seconds": 0.015625,
+            "cpu_percent_one_core": 123.97153216912493,
+            "rss_sampled_max_bytes": 8945664,
+            "peak_rss_bytes": 12050432,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 18,
+          "elapsed_ns": 13160400,
+          "operations": 1,
+          "ns_per_op": 13160400,
+          "resources": {
+            "wall_ns": 13160400,
+            "cpu_seconds": 0.0,
+            "cpu_percent_one_core": 0.0,
+            "rss_sampled_max_bytes": 2215936,
+            "peak_rss_bytes": 12156928,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 19,
+          "elapsed_ns": 13071300,
+          "operations": 1,
+          "ns_per_op": 13071300,
+          "resources": {
+            "wall_ns": 13071300,
+            "cpu_seconds": 0.0,
+            "cpu_percent_one_core": 0.0,
+            "rss_sampled_max_bytes": 6295552,
+            "peak_rss_bytes": 12140544,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        }
+      ]
+    },
+    {
+      "name": "Codex native",
+      "round": 1,
+      "version": "codex-cli 0.153.4",
+      "samples": [
+        {
+          "sample": 0,
+          "elapsed_ns": 17566000,
+          "operations": 1,
+          "ns_per_op": 17566000,
+          "resources": {
+            "wall_ns": 17566000,
+            "cpu_seconds": 0.015625,
+            "cpu_percent_one_core": 88.95024479107367,
+            "rss_sampled_max_bytes": 11374592,
+            "peak_rss_bytes": 14106624,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 1,
+          "elapsed_ns": 16928300,
+          "operations": 1,
+          "ns_per_op": 16928300,
+          "resources": {
+            "wall_ns": 16928300,
+            "cpu_seconds": 0.015625,
+            "cpu_percent_one_core": 92.30105799164711,
+            "rss_sampled_max_bytes": 14012416,
+            "peak_rss_bytes": 14012416,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 2,
+          "elapsed_ns": 17653700,
+          "operations": 1,
+          "ns_per_op": 17653700,
+          "resources": {
+            "wall_ns": 17653700,
+            "cpu_seconds": 0.015625,
+            "cpu_percent_one_core": 88.50835802126466,
+            "rss_sampled_max_bytes": 13180928,
+            "peak_rss_bytes": 14057472,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 3,
+          "elapsed_ns": 17680200,
+          "operations": 1,
+          "ns_per_op": 17680200,
+          "resources": {
+            "wall_ns": 17680200,
+            "cpu_seconds": 0.0,
+            "cpu_percent_one_core": 0.0,
+            "rss_sampled_max_bytes": 11137024,
+            "peak_rss_bytes": 14200832,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 4,
+          "elapsed_ns": 18359500,
+          "operations": 1,
+          "ns_per_op": 18359500,
+          "resources": {
+            "wall_ns": 18359500,
+            "cpu_seconds": 0.015625,
+            "cpu_percent_one_core": 85.10580353495465,
+            "rss_sampled_max_bytes": 6950912,
+            "peak_rss_bytes": 14049280,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 5,
+          "elapsed_ns": 18805300,
+          "operations": 1,
+          "ns_per_op": 18805300,
+          "resources": {
+            "wall_ns": 18805300,
+            "cpu_seconds": 0.015625,
+            "cpu_percent_one_core": 83.08827830452053,
+            "rss_sampled_max_bytes": 14090240,
+            "peak_rss_bytes": 14090240,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 6,
+          "elapsed_ns": 17256400,
+          "operations": 1,
+          "ns_per_op": 17256400,
+          "resources": {
+            "wall_ns": 17256400,
+            "cpu_seconds": 0.015625,
+            "cpu_percent_one_core": 90.54611622354604,
+            "rss_sampled_max_bytes": 2220032,
+            "peak_rss_bytes": 14217216,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 7,
+          "elapsed_ns": 17810600,
+          "operations": 1,
+          "ns_per_op": 17810600,
+          "resources": {
+            "wall_ns": 17810600,
+            "cpu_seconds": 0.015625,
+            "cpu_percent_one_core": 87.7286559689174,
+            "rss_sampled_max_bytes": 9486336,
+            "peak_rss_bytes": 14254080,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 8,
+          "elapsed_ns": 18285300,
+          "operations": 1,
+          "ns_per_op": 18285300,
+          "resources": {
+            "wall_ns": 18285300,
+            "cpu_seconds": 0.0,
+            "cpu_percent_one_core": 0.0,
+            "rss_sampled_max_bytes": 13127680,
+            "peak_rss_bytes": 14065664,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 9,
+          "elapsed_ns": 17533100,
+          "operations": 1,
+          "ns_per_op": 17533100,
+          "resources": {
+            "wall_ns": 17533100,
+            "cpu_seconds": 0.015625,
+            "cpu_percent_one_core": 89.11715555149974,
+            "rss_sampled_max_bytes": 10534912,
+            "peak_rss_bytes": 14102528,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 10,
+          "elapsed_ns": 16641200,
+          "operations": 1,
+          "ns_per_op": 16641200,
+          "resources": {
+            "wall_ns": 16641200,
+            "cpu_seconds": 0.0625,
+            "cpu_percent_one_core": 375.5738768838786,
+            "rss_sampled_max_bytes": 10346496,
+            "peak_rss_bytes": 14082048,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 11,
+          "elapsed_ns": 16674400,
+          "operations": 1,
+          "ns_per_op": 16674400,
+          "resources": {
+            "wall_ns": 16674400,
+            "cpu_seconds": 0.03125,
+            "cpu_percent_one_core": 187.41304034927794,
+            "rss_sampled_max_bytes": 11395072,
+            "peak_rss_bytes": 14163968,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 12,
+          "elapsed_ns": 17714900,
+          "operations": 1,
+          "ns_per_op": 17714900,
+          "resources": {
+            "wall_ns": 17714900,
+            "cpu_seconds": 0.015625,
+            "cpu_percent_one_core": 88.20258652320928,
+            "rss_sampled_max_bytes": 14225408,
+            "peak_rss_bytes": 14225408,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 13,
+          "elapsed_ns": 16266200,
+          "operations": 1,
+          "ns_per_op": 16266200,
+          "resources": {
+            "wall_ns": 16266200,
+            "cpu_seconds": 0.015625,
+            "cpu_percent_one_core": 96.05808363354686,
+            "rss_sampled_max_bytes": 2220032,
+            "peak_rss_bytes": 14200832,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 14,
+          "elapsed_ns": 17893500,
+          "operations": 1,
+          "ns_per_op": 17893500,
+          "resources": {
+            "wall_ns": 17893500,
+            "cpu_seconds": 0.015625,
+            "cpu_percent_one_core": 87.32221197641601,
+            "rss_sampled_max_bytes": 9936896,
+            "peak_rss_bytes": 14127104,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 15,
+          "elapsed_ns": 16535900,
+          "operations": 1,
+          "ns_per_op": 16535900,
+          "resources": {
+            "wall_ns": 16535900,
+            "cpu_seconds": 0.015625,
+            "cpu_percent_one_core": 94.49137936247801,
+            "rss_sampled_max_bytes": 10137600,
+            "peak_rss_bytes": 14082048,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 16,
+          "elapsed_ns": 16477700,
+          "operations": 1,
+          "ns_per_op": 16477700,
+          "resources": {
+            "wall_ns": 16477700,
+            "cpu_seconds": 0.0,
+            "cpu_percent_one_core": 0.0,
+            "rss_sampled_max_bytes": 11268096,
+            "peak_rss_bytes": 14094336,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 17,
+          "elapsed_ns": 16266000,
+          "operations": 1,
+          "ns_per_op": 16266000,
+          "resources": {
+            "wall_ns": 16266000,
+            "cpu_seconds": 0.0,
+            "cpu_percent_one_core": 0.0,
+            "rss_sampled_max_bytes": 9338880,
+            "peak_rss_bytes": 14090240,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 18,
+          "elapsed_ns": 16572200,
+          "operations": 1,
+          "ns_per_op": 16572200,
+          "resources": {
+            "wall_ns": 16572200,
+            "cpu_seconds": 0.015625,
+            "cpu_percent_one_core": 94.28440400188268,
+            "rss_sampled_max_bytes": 14106624,
+            "peak_rss_bytes": 14106624,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 19,
+          "elapsed_ns": 16576900,
+          "operations": 1,
+          "ns_per_op": 16576900,
+          "resources": {
+            "wall_ns": 16576900,
+            "cpu_seconds": 0.015625,
+            "cpu_percent_one_core": 94.25767182042482,
+            "rss_sampled_max_bytes": 13819904,
+            "peak_rss_bytes": 14155776,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        }
+      ]
+    },
+    {
+      "name": "OpenCode",
+      "round": 1,
+      "version": "opencode v2.0.26",
+      "samples": [
+        {
+          "sample": 0,
+          "elapsed_ns": 90456700,
+          "operations": 1,
+          "ns_per_op": 90456700,
+          "resources": {
+            "wall_ns": 90456700,
+            "cpu_seconds": 0.09375,
+            "cpu_percent_one_core": 103.6407474515431,
+            "rss_sampled_max_bytes": 89415680,
+            "peak_rss_bytes": 90423296,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 1,
+          "elapsed_ns": 91961900,
+          "operations": 1,
+          "ns_per_op": 91961900,
+          "resources": {
+            "wall_ns": 91961900,
+            "cpu_seconds": 0.125,
+            "cpu_percent_one_core": 135.92585625133887,
+            "rss_sampled_max_bytes": 89661440,
+            "peak_rss_bytes": 90664960,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 2,
+          "elapsed_ns": 87260700,
+          "operations": 1,
+          "ns_per_op": 87260700,
+          "resources": {
+            "wall_ns": 87260700,
+            "cpu_seconds": 0.109375,
+            "cpu_percent_one_core": 125.34279463721928,
+            "rss_sampled_max_bytes": 86208512,
+            "peak_rss_bytes": 90140672,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 3,
+          "elapsed_ns": 86041700,
+          "operations": 1,
+          "ns_per_op": 86041700,
+          "resources": {
+            "wall_ns": 86041700,
+            "cpu_seconds": 0.109375,
+            "cpu_percent_one_core": 127.11859482088337,
+            "rss_sampled_max_bytes": 89640960,
+            "peak_rss_bytes": 90259456,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 4,
+          "elapsed_ns": 86931900,
+          "operations": 1,
+          "ns_per_op": 86931900,
+          "resources": {
+            "wall_ns": 86931900,
+            "cpu_seconds": 0.140625,
+            "cpu_percent_one_core": 161.7645536333613,
+            "rss_sampled_max_bytes": 82305024,
+            "peak_rss_bytes": 90501120,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 5,
+          "elapsed_ns": 89612900,
+          "operations": 1,
+          "ns_per_op": 89612900,
+          "resources": {
+            "wall_ns": 89612900,
+            "cpu_seconds": 0.109375,
+            "cpu_percent_one_core": 122.05274017468469,
+            "rss_sampled_max_bytes": 91127808,
+            "peak_rss_bytes": 91127808,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 6,
+          "elapsed_ns": 86011700,
+          "operations": 1,
+          "ns_per_op": 86011700,
+          "resources": {
+            "wall_ns": 86011700,
+            "cpu_seconds": 0.125,
+            "cpu_percent_one_core": 145.32906569687614,
+            "rss_sampled_max_bytes": 90558464,
+            "peak_rss_bytes": 90714112,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 7,
+          "elapsed_ns": 86223300,
+          "operations": 1,
+          "ns_per_op": 86223300,
+          "resources": {
+            "wall_ns": 86223300,
+            "cpu_seconds": 0.09375,
+            "cpu_percent_one_core": 108.72931098670544,
+            "rss_sampled_max_bytes": 84721664,
+            "peak_rss_bytes": 90513408,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 8,
+          "elapsed_ns": 86995300,
+          "operations": 1,
+          "ns_per_op": 86995300,
+          "resources": {
+            "wall_ns": 86995300,
+            "cpu_seconds": 0.109375,
+            "cpu_percent_one_core": 125.72518285470595,
+            "rss_sampled_max_bytes": 89759744,
+            "peak_rss_bytes": 90656768,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 9,
+          "elapsed_ns": 86837800,
+          "operations": 1,
+          "ns_per_op": 86837800,
+          "resources": {
+            "wall_ns": 86837800,
+            "cpu_seconds": 0.109375,
+            "cpu_percent_one_core": 125.95321392296901,
+            "rss_sampled_max_bytes": 88571904,
+            "peak_rss_bytes": 90427392,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 10,
+          "elapsed_ns": 89474700,
+          "operations": 1,
+          "ns_per_op": 89474700,
+          "resources": {
+            "wall_ns": 89474700,
+            "cpu_seconds": 0.109375,
+            "cpu_percent_one_core": 122.24125926099781,
+            "rss_sampled_max_bytes": 85520384,
+            "peak_rss_bytes": 90468352,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 11,
+          "elapsed_ns": 88782100,
+          "operations": 1,
+          "ns_per_op": 88782100,
+          "resources": {
+            "wall_ns": 88782100,
+            "cpu_seconds": 0.109375,
+            "cpu_percent_one_core": 123.1948782468538,
+            "rss_sampled_max_bytes": 88838144,
+            "peak_rss_bytes": 90554368,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 12,
+          "elapsed_ns": 88936500,
+          "operations": 1,
+          "ns_per_op": 88936500,
+          "resources": {
+            "wall_ns": 88936500,
+            "cpu_seconds": 0.09375,
+            "cpu_percent_one_core": 105.41228854294917,
+            "rss_sampled_max_bytes": 83578880,
+            "peak_rss_bytes": 90361856,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 13,
+          "elapsed_ns": 89548200,
+          "operations": 1,
+          "ns_per_op": 89548200,
+          "resources": {
+            "wall_ns": 89548200,
+            "cpu_seconds": 0.09375,
+            "cpu_percent_one_core": 104.69222161919502,
+            "rss_sampled_max_bytes": 88215552,
+            "peak_rss_bytes": 90324992,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 14,
+          "elapsed_ns": 90593700,
+          "operations": 1,
+          "ns_per_op": 90593700,
+          "resources": {
+            "wall_ns": 90593700,
+            "cpu_seconds": 0.09375,
+            "cpu_percent_one_core": 103.48401710052686,
+            "rss_sampled_max_bytes": 88219648,
+            "peak_rss_bytes": 90206208,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 15,
+          "elapsed_ns": 87006600,
+          "operations": 1,
+          "ns_per_op": 87006600,
+          "resources": {
+            "wall_ns": 87006600,
+            "cpu_seconds": 0.078125,
+            "cpu_percent_one_core": 89.7920387648753,
+            "rss_sampled_max_bytes": 88698880,
+            "peak_rss_bytes": 90406912,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 16,
+          "elapsed_ns": 88490300,
+          "operations": 1,
+          "ns_per_op": 88490300,
+          "resources": {
+            "wall_ns": 88490300,
+            "cpu_seconds": 0.140625,
+            "cpu_percent_one_core": 158.91572296624602,
+            "rss_sampled_max_bytes": 90263552,
+            "peak_rss_bytes": 90263552,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 17,
+          "elapsed_ns": 86095800,
+          "operations": 1,
+          "ns_per_op": 86095800,
+          "resources": {
+            "wall_ns": 86095800,
+            "cpu_seconds": 0.09375,
+            "cpu_percent_one_core": 108.89032914497572,
+            "rss_sampled_max_bytes": 89038848,
+            "peak_rss_bytes": 90136576,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 18,
+          "elapsed_ns": 85595700,
+          "operations": 1,
+          "ns_per_op": 85595700,
+          "resources": {
+            "wall_ns": 85595700,
+            "cpu_seconds": 0.109375,
+            "cpu_percent_one_core": 127.78095161322356,
+            "rss_sampled_max_bytes": 88539136,
+            "peak_rss_bytes": 90263552,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 19,
+          "elapsed_ns": 86001800,
+          "operations": 1,
+          "ns_per_op": 86001800,
+          "resources": {
+            "wall_ns": 86001800,
+            "cpu_seconds": 0.109375,
+            "cpu_percent_one_core": 127.17757070200857,
+            "rss_sampled_max_bytes": 86806528,
+            "peak_rss_bytes": 90427392,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        }
+      ]
+    },
+    {
+      "name": "Pi",
+      "round": 1,
+      "version": "1.2.0",
+      "samples": [
+        {
+          "sample": 0,
+          "elapsed_ns": 204614100,
+          "operations": 1,
+          "ns_per_op": 204614100,
+          "resources": {
+            "wall_ns": 204614100,
+            "cpu_seconds": 0.234375,
+            "cpu_percent_one_core": 114.54489206755547,
+            "rss_sampled_max_bytes": 80433152,
+            "peak_rss_bytes": 82067456,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 1,
+          "elapsed_ns": 199767400,
+          "operations": 1,
+          "ns_per_op": 199767400,
+          "resources": {
+            "wall_ns": 199767400,
+            "cpu_seconds": 0.265625,
+            "cpu_percent_one_core": 132.96714078473263,
+            "rss_sampled_max_bytes": 80998400,
+            "peak_rss_bytes": 81559552,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 2,
+          "elapsed_ns": 200518200,
+          "operations": 1,
+          "ns_per_op": 200518200,
+          "resources": {
+            "wall_ns": 200518200,
+            "cpu_seconds": 0.28125,
+            "cpu_percent_one_core": 140.26158224041507,
+            "rss_sampled_max_bytes": 80928768,
+            "peak_rss_bytes": 81911808,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 3,
+          "elapsed_ns": 202721100,
+          "operations": 1,
+          "ns_per_op": 202721100,
+          "resources": {
+            "wall_ns": 202721100,
+            "cpu_seconds": 0.265625,
+            "cpu_percent_one_core": 131.02977440434174,
+            "rss_sampled_max_bytes": 80285696,
+            "peak_rss_bytes": 82530304,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 4,
+          "elapsed_ns": 203758500,
+          "operations": 1,
+          "ns_per_op": 203758500,
+          "resources": {
+            "wall_ns": 203758500,
+            "cpu_seconds": 0.25,
+            "cpu_percent_one_core": 122.69426796918901,
+            "rss_sampled_max_bytes": 80928768,
+            "peak_rss_bytes": 81854464,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 5,
+          "elapsed_ns": 210004200,
+          "operations": 1,
+          "ns_per_op": 210004200,
+          "resources": {
+            "wall_ns": 210004200,
+            "cpu_seconds": 0.203125,
+            "cpu_percent_one_core": 96.72425599107065,
+            "rss_sampled_max_bytes": 80142336,
+            "peak_rss_bytes": 82542592,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 6,
+          "elapsed_ns": 200627000,
+          "operations": 1,
+          "ns_per_op": 200627000,
+          "resources": {
+            "wall_ns": 200627000,
+            "cpu_seconds": 0.28125,
+            "cpu_percent_one_core": 140.18551839981657,
+            "rss_sampled_max_bytes": 79912960,
+            "peak_rss_bytes": 81641472,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 7,
+          "elapsed_ns": 198375300,
+          "operations": 1,
+          "ns_per_op": 198375300,
+          "resources": {
+            "wall_ns": 198375300,
+            "cpu_seconds": 0.21875,
+            "cpu_percent_one_core": 110.27078471967025,
+            "rss_sampled_max_bytes": 80953344,
+            "peak_rss_bytes": 81682432,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 8,
+          "elapsed_ns": 195993600,
+          "operations": 1,
+          "ns_per_op": 195993600,
+          "resources": {
+            "wall_ns": 195993600,
+            "cpu_seconds": 0.203125,
+            "cpu_percent_one_core": 103.63858819879835,
+            "rss_sampled_max_bytes": 81125376,
+            "peak_rss_bytes": 81555456,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 9,
+          "elapsed_ns": 203655400,
+          "operations": 1,
+          "ns_per_op": 203655400,
+          "resources": {
+            "wall_ns": 203655400,
+            "cpu_seconds": 0.21875,
+            "cpu_percent_one_core": 107.41183391159774,
+            "rss_sampled_max_bytes": 79794176,
+            "peak_rss_bytes": 81653760,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 10,
+          "elapsed_ns": 206356600,
+          "operations": 1,
+          "ns_per_op": 206356600,
+          "resources": {
+            "wall_ns": 206356600,
+            "cpu_seconds": 0.21875,
+            "cpu_percent_one_core": 106.00581711464523,
+            "rss_sampled_max_bytes": 79663104,
+            "peak_rss_bytes": 81887232,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 11,
+          "elapsed_ns": 199809300,
+          "operations": 1,
+          "ns_per_op": 199809300,
+          "resources": {
+            "wall_ns": 199809300,
+            "cpu_seconds": 0.25,
+            "cpu_percent_one_core": 125.11930125374545,
+            "rss_sampled_max_bytes": 80367616,
+            "peak_rss_bytes": 81793024,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 12,
+          "elapsed_ns": 204922400,
+          "operations": 1,
+          "ns_per_op": 204922400,
+          "resources": {
+            "wall_ns": 204922400,
+            "cpu_seconds": 0.28125,
+            "cpu_percent_one_core": 137.24707499033778,
+            "rss_sampled_max_bytes": 80257024,
+            "peak_rss_bytes": 81768448,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 13,
+          "elapsed_ns": 200733700,
+          "operations": 1,
+          "ns_per_op": 200733700,
+          "resources": {
+            "wall_ns": 200733700,
+            "cpu_seconds": 0.21875,
+            "cpu_percent_one_core": 108.97522438932776,
+            "rss_sampled_max_bytes": 82665472,
+            "peak_rss_bytes": 82907136,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 14,
+          "elapsed_ns": 202323000,
+          "operations": 1,
+          "ns_per_op": 202323000,
+          "resources": {
+            "wall_ns": 202323000,
+            "cpu_seconds": 0.21875,
+            "cpu_percent_one_core": 108.11919554375923,
+            "rss_sampled_max_bytes": 81104896,
+            "peak_rss_bytes": 82538496,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 15,
+          "elapsed_ns": 204388200,
+          "operations": 1,
+          "ns_per_op": 204388200,
+          "resources": {
+            "wall_ns": 204388200,
+            "cpu_seconds": 0.234375,
+            "cpu_percent_one_core": 114.67149277698027,
+            "rss_sampled_max_bytes": 80351232,
+            "peak_rss_bytes": 81494016,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 16,
+          "elapsed_ns": 206299600,
+          "operations": 1,
+          "ns_per_op": 206299600,
+          "resources": {
+            "wall_ns": 206299600,
+            "cpu_seconds": 0.203125,
+            "cpu_percent_one_core": 98.4611700652837,
+            "rss_sampled_max_bytes": 79597568,
+            "peak_rss_bytes": 81776640,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 17,
+          "elapsed_ns": 210041300,
+          "operations": 1,
+          "ns_per_op": 210041300,
+          "resources": {
+            "wall_ns": 210041300,
+            "cpu_seconds": 0.21875,
+            "cpu_percent_one_core": 104.14618458369856,
+            "rss_sampled_max_bytes": 79843328,
+            "peak_rss_bytes": 81752064,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 18,
+          "elapsed_ns": 200092600,
+          "operations": 1,
+          "ns_per_op": 200092600,
+          "resources": {
+            "wall_ns": 200092600,
+            "cpu_seconds": 0.21875,
+            "cpu_percent_one_core": 109.32438281075862,
+            "rss_sampled_max_bytes": 80658432,
+            "peak_rss_bytes": 81911808,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 19,
+          "elapsed_ns": 204472600,
+          "operations": 1,
+          "ns_per_op": 204472600,
+          "resources": {
+            "wall_ns": 204472600,
+            "cpu_seconds": 0.265625,
+            "cpu_percent_one_core": 129.90738123347577,
+            "rss_sampled_max_bytes": 81604608,
+            "peak_rss_bytes": 81772544,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        }
+      ]
+    },
+    {
+      "name": "Codex npm launcher",
+      "round": 1,
+      "version": "codex-cli 0.153.4",
+      "samples": [
+        {
+          "sample": 0,
+          "elapsed_ns": 62477100,
+          "operations": 1,
+          "ns_per_op": 62477100,
+          "resources": {
+            "wall_ns": 62477100,
+            "cpu_seconds": 0.03125,
+            "cpu_percent_one_core": 50.01832671490835,
+            "rss_sampled_max_bytes": 38146048,
+            "peak_rss_bytes": 38567936,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 1,
+          "elapsed_ns": 61022800,
+          "operations": 1,
+          "ns_per_op": 61022800,
+          "resources": {
+            "wall_ns": 61022800,
+            "cpu_seconds": 0.046875,
+            "cpu_percent_one_core": 76.81555090884062,
+            "rss_sampled_max_bytes": 38055936,
+            "peak_rss_bytes": 38502400,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 2,
+          "elapsed_ns": 62288500,
+          "operations": 1,
+          "ns_per_op": 62288500,
+          "resources": {
+            "wall_ns": 62288500,
+            "cpu_seconds": 0.078125,
+            "cpu_percent_one_core": 125.42443629241353,
+            "rss_sampled_max_bytes": 38141952,
+            "peak_rss_bytes": 38457344,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 3,
+          "elapsed_ns": 60842700,
+          "operations": 1,
+          "ns_per_op": 60842700,
+          "resources": {
+            "wall_ns": 60842700,
+            "cpu_seconds": 0.03125,
+            "cpu_percent_one_core": 51.36195467985477,
+            "rss_sampled_max_bytes": 38256640,
+            "peak_rss_bytes": 38711296,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 4,
+          "elapsed_ns": 60811500,
+          "operations": 1,
+          "ns_per_op": 60811500,
+          "resources": {
+            "wall_ns": 60811500,
+            "cpu_seconds": 0.125,
+            "cpu_percent_one_core": 205.5532259523281,
+            "rss_sampled_max_bytes": 38088704,
+            "peak_rss_bytes": 38506496,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 5,
+          "elapsed_ns": 65771200,
+          "operations": 1,
+          "ns_per_op": 65771200,
+          "resources": {
+            "wall_ns": 65771200,
+            "cpu_seconds": 0.046875,
+            "cpu_percent_one_core": 71.26979589850878,
+            "rss_sampled_max_bytes": 38076416,
+            "peak_rss_bytes": 38502400,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 6,
+          "elapsed_ns": 75097600,
+          "operations": 1,
+          "ns_per_op": 75097600,
+          "resources": {
+            "wall_ns": 75097600,
+            "cpu_seconds": 0.03125,
+            "cpu_percent_one_core": 41.612514913925345,
+            "rss_sampled_max_bytes": 38490112,
+            "peak_rss_bytes": 38490112,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 7,
+          "elapsed_ns": 69496200,
+          "operations": 1,
+          "ns_per_op": 69496200,
+          "resources": {
+            "wall_ns": 69496200,
+            "cpu_seconds": 0.0625,
+            "cpu_percent_one_core": 89.93297475257641,
+            "rss_sampled_max_bytes": 38555648,
+            "peak_rss_bytes": 38555648,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 8,
+          "elapsed_ns": 65938300,
+          "operations": 1,
+          "ns_per_op": 65938300,
+          "resources": {
+            "wall_ns": 65938300,
+            "cpu_seconds": 0.03125,
+            "cpu_percent_one_core": 47.39278992634023,
+            "rss_sampled_max_bytes": 38699008,
+            "peak_rss_bytes": 38699008,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 9,
+          "elapsed_ns": 65785100,
+          "operations": 1,
+          "ns_per_op": 65785100,
+          "resources": {
+            "wall_ns": 65785100,
+            "cpu_seconds": 0.078125,
+            "cpu_percent_one_core": 118.75789502486126,
+            "rss_sampled_max_bytes": 38440960,
+            "peak_rss_bytes": 38440960,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 10,
+          "elapsed_ns": 66118500,
+          "operations": 1,
+          "ns_per_op": 66118500,
+          "resources": {
+            "wall_ns": 66118500,
+            "cpu_seconds": 0.046875,
+            "cpu_percent_one_core": 70.89543773679077,
+            "rss_sampled_max_bytes": 38457344,
+            "peak_rss_bytes": 38457344,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 11,
+          "elapsed_ns": 68257500,
+          "operations": 1,
+          "ns_per_op": 68257500,
+          "resources": {
+            "wall_ns": 68257500,
+            "cpu_seconds": 0.046875,
+            "cpu_percent_one_core": 68.67377211295462,
+            "rss_sampled_max_bytes": 38006784,
+            "peak_rss_bytes": 38453248,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 12,
+          "elapsed_ns": 67104600,
+          "operations": 1,
+          "ns_per_op": 67104600,
+          "resources": {
+            "wall_ns": 67104600,
+            "cpu_seconds": 0.0625,
+            "cpu_percent_one_core": 93.13817532628165,
+            "rss_sampled_max_bytes": 38432768,
+            "peak_rss_bytes": 38440960,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 13,
+          "elapsed_ns": 64660900,
+          "operations": 1,
+          "ns_per_op": 64660900,
+          "resources": {
+            "wall_ns": 64660900,
+            "cpu_seconds": 0.046875,
+            "cpu_percent_one_core": 72.4935780355671,
+            "rss_sampled_max_bytes": 38158336,
+            "peak_rss_bytes": 38547456,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 14,
+          "elapsed_ns": 64866700,
+          "operations": 1,
+          "ns_per_op": 64866700,
+          "resources": {
+            "wall_ns": 64866700,
+            "cpu_seconds": 0.046875,
+            "cpu_percent_one_core": 72.26358054286715,
+            "rss_sampled_max_bytes": 37937152,
+            "peak_rss_bytes": 38436864,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 15,
+          "elapsed_ns": 69431000,
+          "operations": 1,
+          "ns_per_op": 69431000,
+          "resources": {
+            "wall_ns": 69431000,
+            "cpu_seconds": 0.03125,
+            "cpu_percent_one_core": 45.00871368696979,
+            "rss_sampled_max_bytes": 38580224,
+            "peak_rss_bytes": 38580224,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 16,
+          "elapsed_ns": 63926800,
+          "operations": 1,
+          "ns_per_op": 63926800,
+          "resources": {
+            "wall_ns": 63926800,
+            "cpu_seconds": 0.0625,
+            "cpu_percent_one_core": 97.76807223261605,
+            "rss_sampled_max_bytes": 37986304,
+            "peak_rss_bytes": 38449152,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 17,
+          "elapsed_ns": 62439000,
+          "operations": 1,
+          "ns_per_op": 62439000,
+          "resources": {
+            "wall_ns": 62439000,
+            "cpu_seconds": 0.046875,
+            "cpu_percent_one_core": 75.07327151299668,
+            "rss_sampled_max_bytes": 38174720,
+            "peak_rss_bytes": 38608896,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 18,
+          "elapsed_ns": 62524500,
+          "operations": 1,
+          "ns_per_op": 62524500,
+          "resources": {
+            "wall_ns": 62524500,
+            "cpu_seconds": 0.046875,
+            "cpu_percent_one_core": 74.97061152028405,
+            "rss_sampled_max_bytes": 38039552,
+            "peak_rss_bytes": 38457344,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 19,
+          "elapsed_ns": 71065800,
+          "operations": 1,
+          "ns_per_op": 71065800,
+          "resources": {
+            "wall_ns": 71065800,
+            "cpu_seconds": 0.03125,
+            "cpu_percent_one_core": 43.97333175732913,
+            "rss_sampled_max_bytes": 38383616,
+            "peak_rss_bytes": 38383616,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        }
+      ]
+    },
+    {
+      "name": "Codex native",
+      "round": 2,
+      "version": "codex-cli 0.153.4",
+      "samples": [
+        {
+          "sample": 0,
+          "elapsed_ns": 17635300,
+          "operations": 1,
+          "ns_per_op": 17635300,
+          "resources": {
+            "wall_ns": 17635300,
+            "cpu_seconds": 0.015625,
+            "cpu_percent_one_core": 88.6007042692781,
+            "rss_sampled_max_bytes": 14278656,
+            "peak_rss_bytes": 14278656,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 1,
+          "elapsed_ns": 17362000,
+          "operations": 1,
+          "ns_per_op": 17362000,
+          "resources": {
+            "wall_ns": 17362000,
+            "cpu_seconds": 0.015625,
+            "cpu_percent_one_core": 89.99539223591752,
+            "rss_sampled_max_bytes": 5447680,
+            "peak_rss_bytes": 14172160,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 2,
+          "elapsed_ns": 18399800,
+          "operations": 1,
+          "ns_per_op": 18399800,
+          "resources": {
+            "wall_ns": 18399800,
+            "cpu_seconds": 0.0,
+            "cpu_percent_one_core": 0.0,
+            "rss_sampled_max_bytes": 3805184,
+            "peak_rss_bytes": 14065664,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 3,
+          "elapsed_ns": 19270700,
+          "operations": 1,
+          "ns_per_op": 19270700,
+          "resources": {
+            "wall_ns": 19270700,
+            "cpu_seconds": 0.140625,
+            "cpu_percent_one_core": 729.7347787054958,
+            "rss_sampled_max_bytes": 2224128,
+            "peak_rss_bytes": 14077952,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 4,
+          "elapsed_ns": 18080700,
+          "operations": 1,
+          "ns_per_op": 18080700,
+          "resources": {
+            "wall_ns": 18080700,
+            "cpu_seconds": 0.015625,
+            "cpu_percent_one_core": 86.41811434291813,
+            "rss_sampled_max_bytes": 6156288,
+            "peak_rss_bytes": 14241792,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 5,
+          "elapsed_ns": 20652300,
+          "operations": 1,
+          "ns_per_op": 20652300,
+          "resources": {
+            "wall_ns": 20652300,
+            "cpu_seconds": 0.015625,
+            "cpu_percent_one_core": 75.65743282830483,
+            "rss_sampled_max_bytes": 10706944,
+            "peak_rss_bytes": 14241792,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 6,
+          "elapsed_ns": 17422300,
+          "operations": 1,
+          "ns_per_op": 17422300,
+          "resources": {
+            "wall_ns": 17422300,
+            "cpu_seconds": 0.0,
+            "cpu_percent_one_core": 0.0,
+            "rss_sampled_max_bytes": 2215936,
+            "peak_rss_bytes": 14168064,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 7,
+          "elapsed_ns": 19032300,
+          "operations": 1,
+          "ns_per_op": 19032300,
+          "resources": {
+            "wall_ns": 19032300,
+            "cpu_seconds": 0.015625,
+            "cpu_percent_one_core": 82.09727673481399,
+            "rss_sampled_max_bytes": 12009472,
+            "peak_rss_bytes": 14077952,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 8,
+          "elapsed_ns": 17651000,
+          "operations": 1,
+          "ns_per_op": 17651000,
+          "resources": {
+            "wall_ns": 17651000,
+            "cpu_seconds": 0.015625,
+            "cpu_percent_one_core": 88.52189677638661,
+            "rss_sampled_max_bytes": 14069760,
+            "peak_rss_bytes": 14069760,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 9,
+          "elapsed_ns": 19411800,
+          "operations": 1,
+          "ns_per_op": 19411800,
+          "resources": {
+            "wall_ns": 19411800,
+            "cpu_seconds": 0.03125,
+            "cpu_percent_one_core": 160.98455578565617,
+            "rss_sampled_max_bytes": 10276864,
+            "peak_rss_bytes": 14077952,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 10,
+          "elapsed_ns": 18621700,
+          "operations": 1,
+          "ns_per_op": 18621700,
+          "resources": {
+            "wall_ns": 18621700,
+            "cpu_seconds": 0.015625,
+            "cpu_percent_one_core": 83.90748427909374,
+            "rss_sampled_max_bytes": 12075008,
+            "peak_rss_bytes": 14094336,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 11,
+          "elapsed_ns": 19258900,
+          "operations": 1,
+          "ns_per_op": 19258900,
+          "resources": {
+            "wall_ns": 19258900,
+            "cpu_seconds": 0.015625,
+            "cpu_percent_one_core": 81.13132110348982,
+            "rss_sampled_max_bytes": 7761920,
+            "peak_rss_bytes": 14090240,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 12,
+          "elapsed_ns": 18604100,
+          "operations": 1,
+          "ns_per_op": 18604100,
+          "resources": {
+            "wall_ns": 18604100,
+            "cpu_seconds": 0.015625,
+            "cpu_percent_one_core": 83.98686311081967,
+            "rss_sampled_max_bytes": 9486336,
+            "peak_rss_bytes": 14114816,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 13,
+          "elapsed_ns": 18230700,
+          "operations": 1,
+          "ns_per_op": 18230700,
+          "resources": {
+            "wall_ns": 18230700,
+            "cpu_seconds": 0.015625,
+            "cpu_percent_one_core": 85.70707652476318,
+            "rss_sampled_max_bytes": 6901760,
+            "peak_rss_bytes": 14024704,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 14,
+          "elapsed_ns": 18062800,
+          "operations": 1,
+          "ns_per_op": 18062800,
+          "resources": {
+            "wall_ns": 18062800,
+            "cpu_seconds": 0.015625,
+            "cpu_percent_one_core": 86.50375357087495,
+            "rss_sampled_max_bytes": 4882432,
+            "peak_rss_bytes": 14090240,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 15,
+          "elapsed_ns": 18983200,
+          "operations": 1,
+          "ns_per_op": 18983200,
+          "resources": {
+            "wall_ns": 18983200,
+            "cpu_seconds": 0.015625,
+            "cpu_percent_one_core": 82.30962113869106,
+            "rss_sampled_max_bytes": 11489280,
+            "peak_rss_bytes": 14200832,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 16,
+          "elapsed_ns": 18617000,
+          "operations": 1,
+          "ns_per_op": 18617000,
+          "resources": {
+            "wall_ns": 18617000,
+            "cpu_seconds": 0.03125,
+            "cpu_percent_one_core": 167.85733469409678,
+            "rss_sampled_max_bytes": 7577600,
+            "peak_rss_bytes": 14147584,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 17,
+          "elapsed_ns": 18934900,
+          "operations": 1,
+          "ns_per_op": 18934900,
+          "resources": {
+            "wall_ns": 18934900,
+            "cpu_seconds": 0.015625,
+            "cpu_percent_one_core": 82.51958024600077,
+            "rss_sampled_max_bytes": 13848576,
+            "peak_rss_bytes": 14098432,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 18,
+          "elapsed_ns": 17798800,
+          "operations": 1,
+          "ns_per_op": 17798800,
+          "resources": {
+            "wall_ns": 17798800,
+            "cpu_seconds": 0.015625,
+            "cpu_percent_one_core": 87.7868170887925,
+            "rss_sampled_max_bytes": 13668352,
+            "peak_rss_bytes": 14045184,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 19,
+          "elapsed_ns": 18801300,
+          "operations": 1,
+          "ns_per_op": 18801300,
+          "resources": {
+            "wall_ns": 18801300,
+            "cpu_seconds": 0.0,
+            "cpu_percent_one_core": 0.0,
+            "rss_sampled_max_bytes": 8953856,
+            "peak_rss_bytes": 14090240,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        }
+      ]
+    },
+    {
+      "name": "OpenCode",
+      "round": 2,
+      "version": "opencode v2.0.26",
+      "samples": [
+        {
+          "sample": 0,
+          "elapsed_ns": 89291800,
+          "operations": 1,
+          "ns_per_op": 89291800,
+          "resources": {
+            "wall_ns": 89291800,
+            "cpu_seconds": 0.078125,
+            "cpu_percent_one_core": 87.49403640647853,
+            "rss_sampled_max_bytes": 88240128,
+            "peak_rss_bytes": 90333184,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 1,
+          "elapsed_ns": 87957800,
+          "operations": 1,
+          "ns_per_op": 87957800,
+          "resources": {
+            "wall_ns": 87957800,
+            "cpu_seconds": 0.109375,
+            "cpu_percent_one_core": 124.34940391869738,
+            "rss_sampled_max_bytes": 90267648,
+            "peak_rss_bytes": 90271744,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 2,
+          "elapsed_ns": 87594300,
+          "operations": 1,
+          "ns_per_op": 87594300,
+          "resources": {
+            "wall_ns": 87594300,
+            "cpu_seconds": 0.109375,
+            "cpu_percent_one_core": 124.86543074149803,
+            "rss_sampled_max_bytes": 86974464,
+            "peak_rss_bytes": 90423296,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 3,
+          "elapsed_ns": 95828400,
+          "operations": 1,
+          "ns_per_op": 95828400,
+          "resources": {
+            "wall_ns": 95828400,
+            "cpu_seconds": 0.171875,
+            "cpu_percent_one_core": 179.35705907643248,
+            "rss_sampled_max_bytes": 89747456,
+            "peak_rss_bytes": 90066944,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 4,
+          "elapsed_ns": 94473000,
+          "operations": 1,
+          "ns_per_op": 94473000,
+          "resources": {
+            "wall_ns": 94473000,
+            "cpu_seconds": 0.171875,
+            "cpu_percent_one_core": 181.93028696029555,
+            "rss_sampled_max_bytes": 90587136,
+            "peak_rss_bytes": 90587136,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 5,
+          "elapsed_ns": 89891900,
+          "operations": 1,
+          "ns_per_op": 89891900,
+          "resources": {
+            "wall_ns": 89891900,
+            "cpu_seconds": 0.109375,
+            "cpu_percent_one_core": 121.67392167703652,
+            "rss_sampled_max_bytes": 88403968,
+            "peak_rss_bytes": 90644480,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 6,
+          "elapsed_ns": 89638600,
+          "operations": 1,
+          "ns_per_op": 89638600,
+          "resources": {
+            "wall_ns": 89638600,
+            "cpu_seconds": 0.125,
+            "cpu_percent_one_core": 139.448853507306,
+            "rss_sampled_max_bytes": 86806528,
+            "peak_rss_bytes": 90329088,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 7,
+          "elapsed_ns": 90919600,
+          "operations": 1,
+          "ns_per_op": 90919600,
+          "resources": {
+            "wall_ns": 90919600,
+            "cpu_seconds": 0.171875,
+            "cpu_percent_one_core": 189.04064690121822,
+            "rss_sampled_max_bytes": 89804800,
+            "peak_rss_bytes": 90443776,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 8,
+          "elapsed_ns": 88171600,
+          "operations": 1,
+          "ns_per_op": 88171600,
+          "resources": {
+            "wall_ns": 88171600,
+            "cpu_seconds": 0.09375,
+            "cpu_percent_one_core": 106.32675373929928,
+            "rss_sampled_max_bytes": 88494080,
+            "peak_rss_bytes": 90447872,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 9,
+          "elapsed_ns": 86386300,
+          "operations": 1,
+          "ns_per_op": 86386300,
+          "resources": {
+            "wall_ns": 86386300,
+            "cpu_seconds": 0.140625,
+            "cpu_percent_one_core": 162.7862288348963,
+            "rss_sampled_max_bytes": 83341312,
+            "peak_rss_bytes": 90562560,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 10,
+          "elapsed_ns": 89659200,
+          "operations": 1,
+          "ns_per_op": 89659200,
+          "resources": {
+            "wall_ns": 89659200,
+            "cpu_seconds": 0.109375,
+            "cpu_percent_one_core": 121.98971215446936,
+            "rss_sampled_max_bytes": 89190400,
+            "peak_rss_bytes": 90337280,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 11,
+          "elapsed_ns": 87297900,
+          "operations": 1,
+          "ns_per_op": 87297900,
+          "resources": {
+            "wall_ns": 87297900,
+            "cpu_seconds": 0.109375,
+            "cpu_percent_one_core": 125.28938267701744,
+            "rss_sampled_max_bytes": 86532096,
+            "peak_rss_bytes": 90451968,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 12,
+          "elapsed_ns": 86836600,
+          "operations": 1,
+          "ns_per_op": 86836600,
+          "resources": {
+            "wall_ns": 86836600,
+            "cpu_seconds": 0.078125,
+            "cpu_percent_one_core": 89.96782462694301,
+            "rss_sampled_max_bytes": 84963328,
+            "peak_rss_bytes": 90570752,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 13,
+          "elapsed_ns": 86966400,
+          "operations": 1,
+          "ns_per_op": 86966400,
+          "resources": {
+            "wall_ns": 86966400,
+            "cpu_seconds": 0.125,
+            "cpu_percent_one_core": 143.7336718548773,
+            "rss_sampled_max_bytes": 88350720,
+            "peak_rss_bytes": 89968640,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 14,
+          "elapsed_ns": 91787500,
+          "operations": 1,
+          "ns_per_op": 91787500,
+          "resources": {
+            "wall_ns": 91787500,
+            "cpu_seconds": 0.09375,
+            "cpu_percent_one_core": 102.13809069862454,
+            "rss_sampled_max_bytes": 89432064,
+            "peak_rss_bytes": 90443776,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 15,
+          "elapsed_ns": 90716900,
+          "operations": 1,
+          "ns_per_op": 90716900,
+          "resources": {
+            "wall_ns": 90716900,
+            "cpu_seconds": 0.140625,
+            "cpu_percent_one_core": 155.0152176716797,
+            "rss_sampled_max_bytes": 82460672,
+            "peak_rss_bytes": 90189824,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 16,
+          "elapsed_ns": 88957200,
+          "operations": 1,
+          "ns_per_op": 88957200,
+          "resources": {
+            "wall_ns": 88957200,
+            "cpu_seconds": 0.109375,
+            "cpu_percent_one_core": 122.95238609128884,
+            "rss_sampled_max_bytes": 87851008,
+            "peak_rss_bytes": 90611712,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 17,
+          "elapsed_ns": 91520800,
+          "operations": 1,
+          "ns_per_op": 91520800,
+          "resources": {
+            "wall_ns": 91520800,
+            "cpu_seconds": 0.109375,
+            "cpu_percent_one_core": 119.50835219971853,
+            "rss_sampled_max_bytes": 90497024,
+            "peak_rss_bytes": 90497024,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 18,
+          "elapsed_ns": 89036900,
+          "operations": 1,
+          "ns_per_op": 89036900,
+          "resources": {
+            "wall_ns": 89036900,
+            "cpu_seconds": 0.125,
+            "cpu_percent_one_core": 140.39123105139555,
+            "rss_sampled_max_bytes": 89034752,
+            "peak_rss_bytes": 90587136,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 19,
+          "elapsed_ns": 90536000,
+          "operations": 1,
+          "ns_per_op": 90536000,
+          "resources": {
+            "wall_ns": 90536000,
+            "cpu_seconds": 0.109375,
+            "cpu_percent_one_core": 120.80829725192189,
+            "rss_sampled_max_bytes": 89243648,
+            "peak_rss_bytes": 90583040,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        }
+      ]
+    },
+    {
+      "name": "Pi",
+      "round": 2,
+      "version": "1.2.0",
+      "samples": [
+        {
+          "sample": 0,
+          "elapsed_ns": 199260600,
+          "operations": 1,
+          "ns_per_op": 199260600,
+          "resources": {
+            "wall_ns": 199260600,
+            "cpu_seconds": 0.1875,
+            "cpu_percent_one_core": 94.09787986184925,
+            "rss_sampled_max_bytes": 82055168,
+            "peak_rss_bytes": 82489344,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 1,
+          "elapsed_ns": 202099000,
+          "operations": 1,
+          "ns_per_op": 202099000,
+          "resources": {
+            "wall_ns": 202099000,
+            "cpu_seconds": 0.28125,
+            "cpu_percent_one_core": 139.164468898906,
+            "rss_sampled_max_bytes": 79519744,
+            "peak_rss_bytes": 82161664,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 2,
+          "elapsed_ns": 205215900,
+          "operations": 1,
+          "ns_per_op": 205215900,
+          "resources": {
+            "wall_ns": 205215900,
+            "cpu_seconds": 0.328125,
+            "cpu_percent_one_core": 159.89258142278447,
+            "rss_sampled_max_bytes": 80150528,
+            "peak_rss_bytes": 81698816,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 3,
+          "elapsed_ns": 202297500,
+          "operations": 1,
+          "ns_per_op": 202297500,
+          "resources": {
+            "wall_ns": 202297500,
+            "cpu_seconds": 0.21875,
+            "cpu_percent_one_core": 108.13282418220692,
+            "rss_sampled_max_bytes": 79876096,
+            "peak_rss_bytes": 81620992,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 4,
+          "elapsed_ns": 201831900,
+          "operations": 1,
+          "ns_per_op": 201831900,
+          "resources": {
+            "wall_ns": 201831900,
+            "cpu_seconds": 0.21875,
+            "cpu_percent_one_core": 108.3822725743552,
+            "rss_sampled_max_bytes": 80961536,
+            "peak_rss_bytes": 81874944,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 5,
+          "elapsed_ns": 201553400,
+          "operations": 1,
+          "ns_per_op": 201553400,
+          "resources": {
+            "wall_ns": 201553400,
+            "cpu_seconds": 0.234375,
+            "cpu_percent_one_core": 116.28431968897573,
+            "rss_sampled_max_bytes": 81686528,
+            "peak_rss_bytes": 81743872,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 6,
+          "elapsed_ns": 197912300,
+          "operations": 1,
+          "ns_per_op": 197912300,
+          "resources": {
+            "wall_ns": 197912300,
+            "cpu_seconds": 0.25,
+            "cpu_percent_one_core": 126.31857646038169,
+            "rss_sampled_max_bytes": 81633280,
+            "peak_rss_bytes": 81772544,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 7,
+          "elapsed_ns": 202364900,
+          "operations": 1,
+          "ns_per_op": 202364900,
+          "resources": {
+            "wall_ns": 202364900,
+            "cpu_seconds": 0.234375,
+            "cpu_percent_one_core": 115.81800994144736,
+            "rss_sampled_max_bytes": 80789504,
+            "peak_rss_bytes": 81006592,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 8,
+          "elapsed_ns": 210284600,
+          "operations": 1,
+          "ns_per_op": 210284600,
+          "resources": {
+            "wall_ns": 210284600,
+            "cpu_seconds": 0.296875,
+            "cpu_percent_one_core": 141.17771819714807,
+            "rss_sampled_max_bytes": 81518592,
+            "peak_rss_bytes": 81719296,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 9,
+          "elapsed_ns": 206964700,
+          "operations": 1,
+          "ns_per_op": 206964700,
+          "resources": {
+            "wall_ns": 206964700,
+            "cpu_seconds": 0.203125,
+            "cpu_percent_one_core": 98.1447560864244,
+            "rss_sampled_max_bytes": 80191488,
+            "peak_rss_bytes": 81862656,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 10,
+          "elapsed_ns": 200158800,
+          "operations": 1,
+          "ns_per_op": 200158800,
+          "resources": {
+            "wall_ns": 200158800,
+            "cpu_seconds": 0.25,
+            "cpu_percent_one_core": 124.90082874197887,
+            "rss_sampled_max_bytes": 79515648,
+            "peak_rss_bytes": 81600512,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 11,
+          "elapsed_ns": 201455000,
+          "operations": 1,
+          "ns_per_op": 201455000,
+          "resources": {
+            "wall_ns": 201455000,
+            "cpu_seconds": 0.25,
+            "cpu_percent_one_core": 124.09719292149613,
+            "rss_sampled_max_bytes": 79892480,
+            "peak_rss_bytes": 81563648,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 12,
+          "elapsed_ns": 208545700,
+          "operations": 1,
+          "ns_per_op": 208545700,
+          "resources": {
+            "wall_ns": 208545700,
+            "cpu_seconds": 0.25,
+            "cpu_percent_one_core": 119.87780136440118,
+            "rss_sampled_max_bytes": 79880192,
+            "peak_rss_bytes": 81825792,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 13,
+          "elapsed_ns": 202021600,
+          "operations": 1,
+          "ns_per_op": 202021600,
+          "resources": {
+            "wall_ns": 202021600,
+            "cpu_seconds": 0.28125,
+            "cpu_percent_one_core": 139.21778661291663,
+            "rss_sampled_max_bytes": 80461824,
+            "peak_rss_bytes": 82853888,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 14,
+          "elapsed_ns": 198645300,
+          "operations": 1,
+          "ns_per_op": 198645300,
+          "resources": {
+            "wall_ns": 198645300,
+            "cpu_seconds": 0.234375,
+            "cpu_percent_one_core": 117.98668279591816,
+            "rss_sampled_max_bytes": 80044032,
+            "peak_rss_bytes": 81756160,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 15,
+          "elapsed_ns": 201923200,
+          "operations": 1,
+          "ns_per_op": 201923200,
+          "resources": {
+            "wall_ns": 201923200,
+            "cpu_seconds": 0.28125,
+            "cpu_percent_one_core": 139.28562938780684,
+            "rss_sampled_max_bytes": 81584128,
+            "peak_rss_bytes": 82272256,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 16,
+          "elapsed_ns": 201165600,
+          "operations": 1,
+          "ns_per_op": 201165600,
+          "resources": {
+            "wall_ns": 201165600,
+            "cpu_seconds": 0.234375,
+            "cpu_percent_one_core": 116.50848852885385,
+            "rss_sampled_max_bytes": 81231872,
+            "peak_rss_bytes": 81317888,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 17,
+          "elapsed_ns": 203816700,
+          "operations": 1,
+          "ns_per_op": 203816700,
+          "resources": {
+            "wall_ns": 203816700,
+            "cpu_seconds": 0.25,
+            "cpu_percent_one_core": 122.65923253590114,
+            "rss_sampled_max_bytes": 80228352,
+            "peak_rss_bytes": 82644992,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 18,
+          "elapsed_ns": 204579100,
+          "operations": 1,
+          "ns_per_op": 204579100,
+          "resources": {
+            "wall_ns": 204579100,
+            "cpu_seconds": 0.265625,
+            "cpu_percent_one_core": 129.83975391425614,
+            "rss_sampled_max_bytes": 80908288,
+            "peak_rss_bytes": 81620992,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 19,
+          "elapsed_ns": 199215200,
+          "operations": 1,
+          "ns_per_op": 199215200,
+          "resources": {
+            "wall_ns": 199215200,
+            "cpu_seconds": 0.265625,
+            "cpu_percent_one_core": 133.33570932338498,
+            "rss_sampled_max_bytes": 79601664,
+            "peak_rss_bytes": 82841600,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        }
+      ]
+    },
+    {
+      "name": "Codex npm launcher",
+      "round": 2,
+      "version": "codex-cli 0.153.4",
+      "samples": [
+        {
+          "sample": 0,
+          "elapsed_ns": 67324900,
+          "operations": 1,
+          "ns_per_op": 67324900,
+          "resources": {
+            "wall_ns": 67324900,
+            "cpu_seconds": 0.0625,
+            "cpu_percent_one_core": 92.83340933295112,
+            "rss_sampled_max_bytes": 38129664,
+            "peak_rss_bytes": 38555648,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 1,
+          "elapsed_ns": 69073700,
+          "operations": 1,
+          "ns_per_op": 69073700,
+          "resources": {
+            "wall_ns": 69073700,
+            "cpu_seconds": 0.03125,
+            "cpu_percent_one_core": 45.2415318710305,
+            "rss_sampled_max_bytes": 38137856,
+            "peak_rss_bytes": 38510592,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 2,
+          "elapsed_ns": 69240900,
+          "operations": 1,
+          "ns_per_op": 69240900,
+          "resources": {
+            "wall_ns": 69240900,
+            "cpu_seconds": 0.0625,
+            "cpu_percent_one_core": 90.26456906250498,
+            "rss_sampled_max_bytes": 38035456,
+            "peak_rss_bytes": 38645760,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 3,
+          "elapsed_ns": 66951700,
+          "operations": 1,
+          "ns_per_op": 66951700,
+          "resources": {
+            "wall_ns": 66951700,
+            "cpu_seconds": 0.03125,
+            "cpu_percent_one_core": 46.67543915987197,
+            "rss_sampled_max_bytes": 38273024,
+            "peak_rss_bytes": 38612992,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 4,
+          "elapsed_ns": 64512400,
+          "operations": 1,
+          "ns_per_op": 64512400,
+          "resources": {
+            "wall_ns": 64512400,
+            "cpu_seconds": 0.0625,
+            "cpu_percent_one_core": 96.88059969866258,
+            "rss_sampled_max_bytes": 38133760,
+            "peak_rss_bytes": 38547456,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 5,
+          "elapsed_ns": 66704500,
+          "operations": 1,
+          "ns_per_op": 66704500,
+          "resources": {
+            "wall_ns": 66704500,
+            "cpu_seconds": 0.0625,
+            "cpu_percent_one_core": 93.69682705064875,
+            "rss_sampled_max_bytes": 38498304,
+            "peak_rss_bytes": 38506496,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 6,
+          "elapsed_ns": 63999800,
+          "operations": 1,
+          "ns_per_op": 63999800,
+          "resources": {
+            "wall_ns": 63999800,
+            "cpu_seconds": 0.046875,
+            "cpu_percent_one_core": 73.2424163825512,
+            "rss_sampled_max_bytes": 38277120,
+            "peak_rss_bytes": 38621184,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 7,
+          "elapsed_ns": 63259700,
+          "operations": 1,
+          "ns_per_op": 63259700,
+          "resources": {
+            "wall_ns": 63259700,
+            "cpu_seconds": 0.046875,
+            "cpu_percent_one_core": 74.09930809030078,
+            "rss_sampled_max_bytes": 38031360,
+            "peak_rss_bytes": 38510592,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 8,
+          "elapsed_ns": 66385700,
+          "operations": 1,
+          "ns_per_op": 66385700,
+          "resources": {
+            "wall_ns": 66385700,
+            "cpu_seconds": 0.03125,
+            "cpu_percent_one_core": 47.073390805549984,
+            "rss_sampled_max_bytes": 38363136,
+            "peak_rss_bytes": 38739968,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 9,
+          "elapsed_ns": 65444400,
+          "operations": 1,
+          "ns_per_op": 65444400,
+          "resources": {
+            "wall_ns": 65444400,
+            "cpu_seconds": 0.0625,
+            "cpu_percent_one_core": 95.50091375274279,
+            "rss_sampled_max_bytes": 38010880,
+            "peak_rss_bytes": 38477824,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 10,
+          "elapsed_ns": 65320400,
+          "operations": 1,
+          "ns_per_op": 65320400,
+          "resources": {
+            "wall_ns": 65320400,
+            "cpu_seconds": 0.078125,
+            "cpu_percent_one_core": 119.60275809701105,
+            "rss_sampled_max_bytes": 37933056,
+            "peak_rss_bytes": 38383616,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 11,
+          "elapsed_ns": 62161600,
+          "operations": 1,
+          "ns_per_op": 62161600,
+          "resources": {
+            "wall_ns": 62161600,
+            "cpu_seconds": 0.03125,
+            "cpu_percent_one_core": 50.27219376592623,
+            "rss_sampled_max_bytes": 38240256,
+            "peak_rss_bytes": 38580224,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 12,
+          "elapsed_ns": 61423000,
+          "operations": 1,
+          "ns_per_op": 61423000,
+          "resources": {
+            "wall_ns": 61423000,
+            "cpu_seconds": 0.03125,
+            "cpu_percent_one_core": 50.876707422301095,
+            "rss_sampled_max_bytes": 37994496,
+            "peak_rss_bytes": 38461440,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 13,
+          "elapsed_ns": 62997500,
+          "operations": 1,
+          "ns_per_op": 62997500,
+          "resources": {
+            "wall_ns": 62997500,
+            "cpu_seconds": 0.03125,
+            "cpu_percent_one_core": 49.605143061232596,
+            "rss_sampled_max_bytes": 38117376,
+            "peak_rss_bytes": 38391808,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 14,
+          "elapsed_ns": 69981000,
+          "operations": 1,
+          "ns_per_op": 69981000,
+          "resources": {
+            "wall_ns": 69981000,
+            "cpu_seconds": 0.046875,
+            "cpu_percent_one_core": 66.98246666952458,
+            "rss_sampled_max_bytes": 38076416,
+            "peak_rss_bytes": 38555648,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 15,
+          "elapsed_ns": 66740000,
+          "operations": 1,
+          "ns_per_op": 66740000,
+          "resources": {
+            "wall_ns": 66740000,
+            "cpu_seconds": 0.03125,
+            "cpu_percent_one_core": 46.823494156427934,
+            "rss_sampled_max_bytes": 38182912,
+            "peak_rss_bytes": 38555648,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 16,
+          "elapsed_ns": 64081900,
+          "operations": 1,
+          "ns_per_op": 64081900,
+          "resources": {
+            "wall_ns": 64081900,
+            "cpu_seconds": 0.046875,
+            "cpu_percent_one_core": 73.14858017630563,
+            "rss_sampled_max_bytes": 38178816,
+            "peak_rss_bytes": 38486016,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 17,
+          "elapsed_ns": 63937900,
+          "operations": 1,
+          "ns_per_op": 63937900,
+          "resources": {
+            "wall_ns": 63937900,
+            "cpu_seconds": 0.046875,
+            "cpu_percent_one_core": 73.31332433501882,
+            "rss_sampled_max_bytes": 38117376,
+            "peak_rss_bytes": 38494208,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 18,
+          "elapsed_ns": 68909500,
+          "operations": 1,
+          "ns_per_op": 68909500,
+          "resources": {
+            "wall_ns": 68909500,
+            "cpu_seconds": 0.03125,
+            "cpu_percent_one_core": 45.3493349973516,
+            "rss_sampled_max_bytes": 38133760,
+            "peak_rss_bytes": 38424576,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 19,
+          "elapsed_ns": 63226000,
+          "operations": 1,
+          "ns_per_op": 63226000,
+          "resources": {
+            "wall_ns": 63226000,
+            "cpu_seconds": 0.046875,
+            "cpu_percent_one_core": 74.1388036567235,
+            "rss_sampled_max_bytes": 38170624,
+            "peak_rss_bytes": 38449152,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        }
+      ]
+    },
+    {
+      "name": "AX",
+      "round": 2,
+      "version": "ax 0.3.16",
+      "samples": [
+        {
+          "sample": 0,
+          "elapsed_ns": 12347600,
+          "operations": 1,
+          "ns_per_op": 12347600,
+          "resources": {
+            "wall_ns": 12347600,
+            "cpu_seconds": 0.0,
+            "cpu_percent_one_core": 0.0,
+            "rss_sampled_max_bytes": 7516160,
+            "peak_rss_bytes": 12099584,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 1,
+          "elapsed_ns": 13414600,
+          "operations": 1,
+          "ns_per_op": 13414600,
+          "resources": {
+            "wall_ns": 13414600,
+            "cpu_seconds": 0.0,
+            "cpu_percent_one_core": 0.0,
+            "rss_sampled_max_bytes": 11177984,
+            "peak_rss_bytes": 12173312,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 2,
+          "elapsed_ns": 13072300,
+          "operations": 1,
+          "ns_per_op": 13072300,
+          "resources": {
+            "wall_ns": 13072300,
+            "cpu_seconds": 0.0,
+            "cpu_percent_one_core": 0.0,
+            "rss_sampled_max_bytes": 9277440,
+            "peak_rss_bytes": 12128256,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 3,
+          "elapsed_ns": 12469300,
+          "operations": 1,
+          "ns_per_op": 12469300,
+          "resources": {
+            "wall_ns": 12469300,
+            "cpu_seconds": 0.015625,
+            "cpu_percent_one_core": 125.3077558483636,
+            "rss_sampled_max_bytes": 8327168,
+            "peak_rss_bytes": 12050432,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 4,
+          "elapsed_ns": 12256500,
+          "operations": 1,
+          "ns_per_op": 12256500,
+          "resources": {
+            "wall_ns": 12256500,
+            "cpu_seconds": 0.015625,
+            "cpu_percent_one_core": 127.48337616774772,
+            "rss_sampled_max_bytes": 7520256,
+            "peak_rss_bytes": 12087296,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 5,
+          "elapsed_ns": 12134700,
+          "operations": 1,
+          "ns_per_op": 12134700,
+          "resources": {
+            "wall_ns": 12134700,
+            "cpu_seconds": 0.015625,
+            "cpu_percent_one_core": 128.7629690062383,
+            "rss_sampled_max_bytes": 7577600,
+            "peak_rss_bytes": 12034048,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 6,
+          "elapsed_ns": 12257900,
+          "operations": 1,
+          "ns_per_op": 12257900,
+          "resources": {
+            "wall_ns": 12257900,
+            "cpu_seconds": 0.015625,
+            "cpu_percent_one_core": 127.4688160288467,
+            "rss_sampled_max_bytes": 11526144,
+            "peak_rss_bytes": 12115968,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 7,
+          "elapsed_ns": 12513800,
+          "operations": 1,
+          "ns_per_op": 12513800,
+          "resources": {
+            "wall_ns": 12513800,
+            "cpu_seconds": 0.0,
+            "cpu_percent_one_core": 0.0,
+            "rss_sampled_max_bytes": 2138112,
+            "peak_rss_bytes": 12140544,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 8,
+          "elapsed_ns": 12743200,
+          "operations": 1,
+          "ns_per_op": 12743200,
+          "resources": {
+            "wall_ns": 12743200,
+            "cpu_seconds": 0.0,
+            "cpu_percent_one_core": 0.0,
+            "rss_sampled_max_bytes": 4358144,
+            "peak_rss_bytes": 12058624,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 9,
+          "elapsed_ns": 15393300,
+          "operations": 1,
+          "ns_per_op": 15393300,
+          "resources": {
+            "wall_ns": 15393300,
+            "cpu_seconds": 0.0,
+            "cpu_percent_one_core": 0.0,
+            "rss_sampled_max_bytes": 5988352,
+            "peak_rss_bytes": 12156928,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 10,
+          "elapsed_ns": 12314600,
+          "operations": 1,
+          "ns_per_op": 12314600,
+          "resources": {
+            "wall_ns": 12314600,
+            "cpu_seconds": 0.015625,
+            "cpu_percent_one_core": 126.88191252659445,
+            "rss_sampled_max_bytes": 12181504,
+            "peak_rss_bytes": 12189696,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 11,
+          "elapsed_ns": 12139400,
+          "operations": 1,
+          "ns_per_op": 12139400,
+          "resources": {
+            "wall_ns": 12139400,
+            "cpu_seconds": 0.015625,
+            "cpu_percent_one_core": 128.71311596948777,
+            "rss_sampled_max_bytes": 10924032,
+            "peak_rss_bytes": 12140544,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 12,
+          "elapsed_ns": 12117700,
+          "operations": 1,
+          "ns_per_op": 12117700,
+          "resources": {
+            "wall_ns": 12117700,
+            "cpu_seconds": 0.015625,
+            "cpu_percent_one_core": 128.94361141140644,
+            "rss_sampled_max_bytes": 10899456,
+            "peak_rss_bytes": 12038144,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 13,
+          "elapsed_ns": 13109100,
+          "operations": 1,
+          "ns_per_op": 13109100,
+          "resources": {
+            "wall_ns": 13109100,
+            "cpu_seconds": 0.015625,
+            "cpu_percent_one_core": 119.1920116560252,
+            "rss_sampled_max_bytes": 9498624,
+            "peak_rss_bytes": 12177408,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 14,
+          "elapsed_ns": 12246700,
+          "operations": 1,
+          "ns_per_op": 12246700,
+          "resources": {
+            "wall_ns": 12246700,
+            "cpu_seconds": 0.0,
+            "cpu_percent_one_core": 0.0,
+            "rss_sampled_max_bytes": 8048640,
+            "peak_rss_bytes": 12128256,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 15,
+          "elapsed_ns": 11304800,
+          "operations": 1,
+          "ns_per_op": 11304800,
+          "resources": {
+            "wall_ns": 11304800,
+            "cpu_seconds": 0.0,
+            "cpu_percent_one_core": 0.0,
+            "rss_sampled_max_bytes": 11501568,
+            "peak_rss_bytes": 12038144,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 16,
+          "elapsed_ns": 11686300,
+          "operations": 1,
+          "ns_per_op": 11686300,
+          "resources": {
+            "wall_ns": 11686300,
+            "cpu_seconds": 0.03125,
+            "cpu_percent_one_core": 267.4071348502092,
+            "rss_sampled_max_bytes": 10379264,
+            "peak_rss_bytes": 12070912,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 17,
+          "elapsed_ns": 11408600,
+          "operations": 1,
+          "ns_per_op": 11408600,
+          "resources": {
+            "wall_ns": 11408600,
+            "cpu_seconds": 0.015625,
+            "cpu_percent_one_core": 136.95808425223078,
+            "rss_sampled_max_bytes": 4612096,
+            "peak_rss_bytes": 12050432,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 18,
+          "elapsed_ns": 11971300,
+          "operations": 1,
+          "ns_per_op": 11971300,
+          "resources": {
+            "wall_ns": 11971300,
+            "cpu_seconds": 0.015625,
+            "cpu_percent_one_core": 130.52049485018335,
+            "rss_sampled_max_bytes": 5971968,
+            "peak_rss_bytes": 12058624,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 19,
+          "elapsed_ns": 12742700,
+          "operations": 1,
+          "ns_per_op": 12742700,
+          "resources": {
+            "wall_ns": 12742700,
+            "cpu_seconds": 0.0,
+            "cpu_percent_one_core": 0.0,
+            "rss_sampled_max_bytes": 9404416,
+            "peak_rss_bytes": 12132352,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        }
+      ]
+    },
+    {
+      "name": "OpenCode",
+      "round": 3,
+      "version": "opencode v2.0.26",
+      "samples": [
+        {
+          "sample": 0,
+          "elapsed_ns": 89436500,
+          "operations": 1,
+          "ns_per_op": 89436500,
+          "resources": {
+            "wall_ns": 89436500,
+            "cpu_seconds": 0.125,
+            "cpu_percent_one_core": 139.76396661318364,
+            "rss_sampled_max_bytes": 90329088,
+            "peak_rss_bytes": 90329088,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 1,
+          "elapsed_ns": 89540900,
+          "operations": 1,
+          "ns_per_op": 89540900,
+          "resources": {
+            "wall_ns": 89540900,
+            "cpu_seconds": 0.109375,
+            "cpu_percent_one_core": 122.15088300430305,
+            "rss_sampled_max_bytes": 88842240,
+            "peak_rss_bytes": 91168768,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 2,
+          "elapsed_ns": 88208500,
+          "operations": 1,
+          "ns_per_op": 88208500,
+          "resources": {
+            "wall_ns": 88208500,
+            "cpu_seconds": 0.1875,
+            "cpu_percent_one_core": 212.56454876797588,
+            "rss_sampled_max_bytes": 87142400,
+            "peak_rss_bytes": 90562560,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 3,
+          "elapsed_ns": 89390800,
+          "operations": 1,
+          "ns_per_op": 89390800,
+          "resources": {
+            "wall_ns": 89390800,
+            "cpu_seconds": 0.140625,
+            "cpu_percent_one_core": 157.31484671800678,
+            "rss_sampled_max_bytes": 88752128,
+            "peak_rss_bytes": 90394624,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 4,
+          "elapsed_ns": 89615000,
+          "operations": 1,
+          "ns_per_op": 89615000,
+          "resources": {
+            "wall_ns": 89615000,
+            "cpu_seconds": 0.109375,
+            "cpu_percent_one_core": 122.04988004240363,
+            "rss_sampled_max_bytes": 89804800,
+            "peak_rss_bytes": 90353664,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 5,
+          "elapsed_ns": 88298600,
+          "operations": 1,
+          "ns_per_op": 88298600,
+          "resources": {
+            "wall_ns": 88298600,
+            "cpu_seconds": 0.109375,
+            "cpu_percent_one_core": 123.86946112395891,
+            "rss_sampled_max_bytes": 88608768,
+            "peak_rss_bytes": 90484736,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 6,
+          "elapsed_ns": 89851800,
+          "operations": 1,
+          "ns_per_op": 89851800,
+          "resources": {
+            "wall_ns": 89851800,
+            "cpu_seconds": 0.15625,
+            "cpu_percent_one_core": 173.89746226564188,
+            "rss_sampled_max_bytes": 88829952,
+            "peak_rss_bytes": 90263552,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 7,
+          "elapsed_ns": 88221400,
+          "operations": 1,
+          "ns_per_op": 88221400,
+          "resources": {
+            "wall_ns": 88221400,
+            "cpu_seconds": 0.140625,
+            "cpu_percent_one_core": 159.4001002024452,
+            "rss_sampled_max_bytes": 88322048,
+            "peak_rss_bytes": 90849280,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 8,
+          "elapsed_ns": 87959900,
+          "operations": 1,
+          "ns_per_op": 87959900,
+          "resources": {
+            "wall_ns": 87959900,
+            "cpu_seconds": 0.125,
+            "cpu_percent_one_core": 142.11021158505184,
+            "rss_sampled_max_bytes": 90333184,
+            "peak_rss_bytes": 90333184,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 9,
+          "elapsed_ns": 88648800,
+          "operations": 1,
+          "ns_per_op": 88648800,
+          "resources": {
+            "wall_ns": 88648800,
+            "cpu_seconds": 0.140625,
+            "cpu_percent_one_core": 158.63158892167746,
+            "rss_sampled_max_bytes": 90402816,
+            "peak_rss_bytes": 90501120,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 10,
+          "elapsed_ns": 89625700,
+          "operations": 1,
+          "ns_per_op": 89625700,
+          "resources": {
+            "wall_ns": 89625700,
+            "cpu_seconds": 0.078125,
+            "cpu_percent_one_core": 87.16807790622556,
+            "rss_sampled_max_bytes": 88698880,
+            "peak_rss_bytes": 91176960,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 11,
+          "elapsed_ns": 89776100,
+          "operations": 1,
+          "ns_per_op": 89776100,
+          "resources": {
+            "wall_ns": 89776100,
+            "cpu_seconds": 0.125,
+            "cpu_percent_one_core": 139.2352753126946,
+            "rss_sampled_max_bytes": 88465408,
+            "peak_rss_bytes": 90521600,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 12,
+          "elapsed_ns": 90273600,
+          "operations": 1,
+          "ns_per_op": 90273600,
+          "resources": {
+            "wall_ns": 90273600,
+            "cpu_seconds": 0.109375,
+            "cpu_percent_one_core": 121.15945304053454,
+            "rss_sampled_max_bytes": 88338432,
+            "peak_rss_bytes": 90451968,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 13,
+          "elapsed_ns": 89871700,
+          "operations": 1,
+          "ns_per_op": 89871700,
+          "resources": {
+            "wall_ns": 89871700,
+            "cpu_seconds": 0.09375,
+            "cpu_percent_one_core": 104.31537402764164,
+            "rss_sampled_max_bytes": 90468352,
+            "peak_rss_bytes": 90468352,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 14,
+          "elapsed_ns": 87031000,
+          "operations": 1,
+          "ns_per_op": 87031000,
+          "resources": {
+            "wall_ns": 87031000,
+            "cpu_seconds": 0.109375,
+            "cpu_percent_one_core": 125.67361055256174,
+            "rss_sampled_max_bytes": 89382912,
+            "peak_rss_bytes": 90271744,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 15,
+          "elapsed_ns": 91232700,
+          "operations": 1,
+          "ns_per_op": 91232700,
+          "resources": {
+            "wall_ns": 91232700,
+            "cpu_seconds": 0.109375,
+            "cpu_percent_one_core": 119.88574272163379,
+            "rss_sampled_max_bytes": 86769664,
+            "peak_rss_bytes": 90292224,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 16,
+          "elapsed_ns": 87178700,
+          "operations": 1,
+          "ns_per_op": 87178700,
+          "resources": {
+            "wall_ns": 87178700,
+            "cpu_seconds": 0.125,
+            "cpu_percent_one_core": 143.38364761117109,
+            "rss_sampled_max_bytes": 89010176,
+            "peak_rss_bytes": 90570752,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 17,
+          "elapsed_ns": 89732800,
+          "operations": 1,
+          "ns_per_op": 89732800,
+          "resources": {
+            "wall_ns": 89732800,
+            "cpu_seconds": 0.15625,
+            "cpu_percent_one_core": 174.12807802720965,
+            "rss_sampled_max_bytes": 85938176,
+            "peak_rss_bytes": 90103808,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 18,
+          "elapsed_ns": 88940600,
+          "operations": 1,
+          "ns_per_op": 88940600,
+          "resources": {
+            "wall_ns": 88940600,
+            "cpu_seconds": 0.09375,
+            "cpu_percent_one_core": 105.4074292280466,
+            "rss_sampled_max_bytes": 88797184,
+            "peak_rss_bytes": 90406912,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 19,
+          "elapsed_ns": 87150400,
+          "operations": 1,
+          "ns_per_op": 87150400,
+          "resources": {
+            "wall_ns": 87150400,
+            "cpu_seconds": 0.109375,
+            "cpu_percent_one_core": 125.50143200719674,
+            "rss_sampled_max_bytes": 87891968,
+            "peak_rss_bytes": 90189824,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        }
+      ]
+    },
+    {
+      "name": "Pi",
+      "round": 3,
+      "version": "1.2.0",
+      "samples": [
+        {
+          "sample": 0,
+          "elapsed_ns": 205680700,
+          "operations": 1,
+          "ns_per_op": 205680700,
+          "resources": {
+            "wall_ns": 205680700,
+            "cpu_seconds": 0.265625,
+            "cpu_percent_one_core": 129.1443484974526,
+            "rss_sampled_max_bytes": 79941632,
+            "peak_rss_bytes": 81854464,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 1,
+          "elapsed_ns": 211777700,
+          "operations": 1,
+          "ns_per_op": 211777700,
+          "resources": {
+            "wall_ns": 211777700,
+            "cpu_seconds": 0.265625,
+            "cpu_percent_one_core": 125.42633147871565,
+            "rss_sampled_max_bytes": 80842752,
+            "peak_rss_bytes": 81362944,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 2,
+          "elapsed_ns": 204598200,
+          "operations": 1,
+          "ns_per_op": 204598200,
+          "resources": {
+            "wall_ns": 204598200,
+            "cpu_seconds": 0.234375,
+            "cpu_percent_one_core": 114.55379372839056,
+            "rss_sampled_max_bytes": 81203200,
+            "peak_rss_bytes": 81694720,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 3,
+          "elapsed_ns": 199414300,
+          "operations": 1,
+          "ns_per_op": 199414300,
+          "resources": {
+            "wall_ns": 199414300,
+            "cpu_seconds": 0.203125,
+            "cpu_percent_one_core": 101.86079935089911,
+            "rss_sampled_max_bytes": 81817600,
+            "peak_rss_bytes": 81829888,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 4,
+          "elapsed_ns": 196165300,
+          "operations": 1,
+          "ns_per_op": 196165300,
+          "resources": {
+            "wall_ns": 196165300,
+            "cpu_seconds": 0.1875,
+            "cpu_percent_one_core": 95.58265401679094,
+            "rss_sampled_max_bytes": 81559552,
+            "peak_rss_bytes": 81747968,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 5,
+          "elapsed_ns": 200995000,
+          "operations": 1,
+          "ns_per_op": 200995000,
+          "resources": {
+            "wall_ns": 200995000,
+            "cpu_seconds": 0.3125,
+            "cpu_percent_one_core": 155.4765043906565,
+            "rss_sampled_max_bytes": 80793600,
+            "peak_rss_bytes": 81514496,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 6,
+          "elapsed_ns": 204633000,
+          "operations": 1,
+          "ns_per_op": 204633000,
+          "resources": {
+            "wall_ns": 204633000,
+            "cpu_seconds": 0.25,
+            "cpu_percent_one_core": 122.16993349068821,
+            "rss_sampled_max_bytes": 79994880,
+            "peak_rss_bytes": 81944576,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 7,
+          "elapsed_ns": 196897800,
+          "operations": 1,
+          "ns_per_op": 196897800,
+          "resources": {
+            "wall_ns": 196897800,
+            "cpu_seconds": 0.25,
+            "cpu_percent_one_core": 126.96942271574389,
+            "rss_sampled_max_bytes": 81711104,
+            "peak_rss_bytes": 82378752,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 8,
+          "elapsed_ns": 206538200,
+          "operations": 1,
+          "ns_per_op": 206538200,
+          "resources": {
+            "wall_ns": 206538200,
+            "cpu_seconds": 0.203125,
+            "cpu_percent_one_core": 98.34742435055597,
+            "rss_sampled_max_bytes": 80846848,
+            "peak_rss_bytes": 81498112,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 9,
+          "elapsed_ns": 201391900,
+          "operations": 1,
+          "ns_per_op": 201391900,
+          "resources": {
+            "wall_ns": 201391900,
+            "cpu_seconds": 0.265625,
+            "cpu_percent_one_core": 131.89457967276738,
+            "rss_sampled_max_bytes": 80289792,
+            "peak_rss_bytes": 81969152,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 10,
+          "elapsed_ns": 200133900,
+          "operations": 1,
+          "ns_per_op": 200133900,
+          "resources": {
+            "wall_ns": 200133900,
+            "cpu_seconds": 0.234375,
+            "cpu_percent_one_core": 117.10909546058915,
+            "rss_sampled_max_bytes": 80285696,
+            "peak_rss_bytes": 81862656,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 11,
+          "elapsed_ns": 202862900,
+          "operations": 1,
+          "ns_per_op": 202862900,
+          "resources": {
+            "wall_ns": 202862900,
+            "cpu_seconds": 0.21875,
+            "cpu_percent_one_core": 107.83144675541953,
+            "rss_sampled_max_bytes": 80531456,
+            "peak_rss_bytes": 81526784,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 12,
+          "elapsed_ns": 200241000,
+          "operations": 1,
+          "ns_per_op": 200241000,
+          "resources": {
+            "wall_ns": 200241000,
+            "cpu_seconds": 0.21875,
+            "cpu_percent_one_core": 109.24336174909234,
+            "rss_sampled_max_bytes": 80375808,
+            "peak_rss_bytes": 81555456,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 13,
+          "elapsed_ns": 202255400,
+          "operations": 1,
+          "ns_per_op": 202255400,
+          "resources": {
+            "wall_ns": 202255400,
+            "cpu_seconds": 0.25,
+            "cpu_percent_one_core": 123.60609407709262,
+            "rss_sampled_max_bytes": 79958016,
+            "peak_rss_bytes": 81702912,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 14,
+          "elapsed_ns": 201844700,
+          "operations": 1,
+          "ns_per_op": 201844700,
+          "resources": {
+            "wall_ns": 201844700,
+            "cpu_seconds": 0.265625,
+            "cpu_percent_one_core": 131.5986993961199,
+            "rss_sampled_max_bytes": 79233024,
+            "peak_rss_bytes": 81432576,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 15,
+          "elapsed_ns": 203460600,
+          "operations": 1,
+          "ns_per_op": 203460600,
+          "resources": {
+            "wall_ns": 203460600,
+            "cpu_seconds": 0.265625,
+            "cpu_percent_one_core": 130.5535322317933,
+            "rss_sampled_max_bytes": 80773120,
+            "peak_rss_bytes": 81772544,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 16,
+          "elapsed_ns": 203985700,
+          "operations": 1,
+          "ns_per_op": 203985700,
+          "resources": {
+            "wall_ns": 203985700,
+            "cpu_seconds": 0.1875,
+            "cpu_percent_one_core": 91.91820799203082,
+            "rss_sampled_max_bytes": 81596416,
+            "peak_rss_bytes": 81600512,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 17,
+          "elapsed_ns": 199148200,
+          "operations": 1,
+          "ns_per_op": 199148200,
+          "resources": {
+            "wall_ns": 199148200,
+            "cpu_seconds": 0.21875,
+            "cpu_percent_one_core": 109.84282057281965,
+            "rss_sampled_max_bytes": 81162240,
+            "peak_rss_bytes": 81780736,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 18,
+          "elapsed_ns": 202274900,
+          "operations": 1,
+          "ns_per_op": 202274900,
+          "resources": {
+            "wall_ns": 202274900,
+            "cpu_seconds": 0.234375,
+            "cpu_percent_one_core": 115.86954189570729,
+            "rss_sampled_max_bytes": 79548416,
+            "peak_rss_bytes": 80580608,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 19,
+          "elapsed_ns": 200405100,
+          "operations": 1,
+          "ns_per_op": 200405100,
+          "resources": {
+            "wall_ns": 200405100,
+            "cpu_seconds": 0.25,
+            "cpu_percent_one_core": 124.74732429464119,
+            "rss_sampled_max_bytes": 82182144,
+            "peak_rss_bytes": 82726912,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        }
+      ]
+    },
+    {
+      "name": "Codex npm launcher",
+      "round": 3,
+      "version": "codex-cli 0.153.4",
+      "samples": [
+        {
+          "sample": 0,
+          "elapsed_ns": 65809500,
+          "operations": 1,
+          "ns_per_op": 65809500,
+          "resources": {
+            "wall_ns": 65809500,
+            "cpu_seconds": 0.0625,
+            "cpu_percent_one_core": 94.97109079996048,
+            "rss_sampled_max_bytes": 38137856,
+            "peak_rss_bytes": 38604800,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 1,
+          "elapsed_ns": 63644500,
+          "operations": 1,
+          "ns_per_op": 63644500,
+          "resources": {
+            "wall_ns": 63644500,
+            "cpu_seconds": 0.03125,
+            "cpu_percent_one_core": 49.10086496083714,
+            "rss_sampled_max_bytes": 38072320,
+            "peak_rss_bytes": 38526976,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 2,
+          "elapsed_ns": 64450000,
+          "operations": 1,
+          "ns_per_op": 64450000,
+          "resources": {
+            "wall_ns": 64450000,
+            "cpu_seconds": 0.03125,
+            "cpu_percent_one_core": 48.48719937936386,
+            "rss_sampled_max_bytes": 38227968,
+            "peak_rss_bytes": 38658048,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 3,
+          "elapsed_ns": 61683400,
+          "operations": 1,
+          "ns_per_op": 61683400,
+          "resources": {
+            "wall_ns": 61683400,
+            "cpu_seconds": 0.03125,
+            "cpu_percent_one_core": 50.66192849291705,
+            "rss_sampled_max_bytes": 38125568,
+            "peak_rss_bytes": 38506496,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 4,
+          "elapsed_ns": 61827700,
+          "operations": 1,
+          "ns_per_op": 61827700,
+          "resources": {
+            "wall_ns": 61827700,
+            "cpu_seconds": 0.0625,
+            "cpu_percent_one_core": 101.08737669361791,
+            "rss_sampled_max_bytes": 38133760,
+            "peak_rss_bytes": 38588416,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 5,
+          "elapsed_ns": 61236800,
+          "operations": 1,
+          "ns_per_op": 61236800,
+          "resources": {
+            "wall_ns": 61236800,
+            "cpu_seconds": 0.03125,
+            "cpu_percent_one_core": 51.031405951976595,
+            "rss_sampled_max_bytes": 38010880,
+            "peak_rss_bytes": 38461440,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 6,
+          "elapsed_ns": 61979700,
+          "operations": 1,
+          "ns_per_op": 61979700,
+          "resources": {
+            "wall_ns": 61979700,
+            "cpu_seconds": 0.03125,
+            "cpu_percent_one_core": 50.4197342032956,
+            "rss_sampled_max_bytes": 38014976,
+            "peak_rss_bytes": 38424576,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 7,
+          "elapsed_ns": 63239800,
+          "operations": 1,
+          "ns_per_op": 63239800,
+          "resources": {
+            "wall_ns": 63239800,
+            "cpu_seconds": 0.03125,
+            "cpu_percent_one_core": 49.41508353916363,
+            "rss_sampled_max_bytes": 38060032,
+            "peak_rss_bytes": 38387712,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 8,
+          "elapsed_ns": 61838500,
+          "operations": 1,
+          "ns_per_op": 61838500,
+          "resources": {
+            "wall_ns": 61838500,
+            "cpu_seconds": 0.046875,
+            "cpu_percent_one_core": 75.80229145273576,
+            "rss_sampled_max_bytes": 38096896,
+            "peak_rss_bytes": 38518784,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 9,
+          "elapsed_ns": 64666800,
+          "operations": 1,
+          "ns_per_op": 64666800,
+          "resources": {
+            "wall_ns": 64666800,
+            "cpu_seconds": 0.09375,
+            "cpu_percent_one_core": 144.97392788880848,
+            "rss_sampled_max_bytes": 38035456,
+            "peak_rss_bytes": 38359040,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 10,
+          "elapsed_ns": 62491000,
+          "operations": 1,
+          "ns_per_op": 62491000,
+          "resources": {
+            "wall_ns": 62491000,
+            "cpu_seconds": 0.0625,
+            "cpu_percent_one_core": 100.01440207389865,
+            "rss_sampled_max_bytes": 38080512,
+            "peak_rss_bytes": 38428672,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 11,
+          "elapsed_ns": 65781900,
+          "operations": 1,
+          "ns_per_op": 65781900,
+          "resources": {
+            "wall_ns": 65781900,
+            "cpu_seconds": 0.0625,
+            "cpu_percent_one_core": 95.01093765914331,
+            "rss_sampled_max_bytes": 37965824,
+            "peak_rss_bytes": 38461440,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 12,
+          "elapsed_ns": 63626200,
+          "operations": 1,
+          "ns_per_op": 63626200,
+          "resources": {
+            "wall_ns": 63626200,
+            "cpu_seconds": 0.046875,
+            "cpu_percent_one_core": 73.67248083336739,
+            "rss_sampled_max_bytes": 38481920,
+            "peak_rss_bytes": 38481920,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 13,
+          "elapsed_ns": 65198400,
+          "operations": 1,
+          "ns_per_op": 65198400,
+          "resources": {
+            "wall_ns": 65198400,
+            "cpu_seconds": 0.046875,
+            "cpu_percent_one_core": 71.89593609659133,
+            "rss_sampled_max_bytes": 38113280,
+            "peak_rss_bytes": 38395904,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 14,
+          "elapsed_ns": 67256200,
+          "operations": 1,
+          "ns_per_op": 67256200,
+          "resources": {
+            "wall_ns": 67256200,
+            "cpu_seconds": 0.046875,
+            "cpu_percent_one_core": 69.69617670935914,
+            "rss_sampled_max_bytes": 38047744,
+            "peak_rss_bytes": 38490112,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 15,
+          "elapsed_ns": 65565600,
+          "operations": 1,
+          "ns_per_op": 65565600,
+          "resources": {
+            "wall_ns": 65565600,
+            "cpu_seconds": 0.046875,
+            "cpu_percent_one_core": 71.49328306306965,
+            "rss_sampled_max_bytes": 38486016,
+            "peak_rss_bytes": 38486016,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 16,
+          "elapsed_ns": 68423400,
+          "operations": 1,
+          "ns_per_op": 68423400,
+          "resources": {
+            "wall_ns": 68423400,
+            "cpu_seconds": 0.03125,
+            "cpu_percent_one_core": 45.671510038963284,
+            "rss_sampled_max_bytes": 37978112,
+            "peak_rss_bytes": 38506496,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 17,
+          "elapsed_ns": 66475200,
+          "operations": 1,
+          "ns_per_op": 66475200,
+          "resources": {
+            "wall_ns": 66475200,
+            "cpu_seconds": 0.046875,
+            "cpu_percent_one_core": 70.5150191349556,
+            "rss_sampled_max_bytes": 38006784,
+            "peak_rss_bytes": 38477824,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 18,
+          "elapsed_ns": 63851600,
+          "operations": 1,
+          "ns_per_op": 63851600,
+          "resources": {
+            "wall_ns": 63851600,
+            "cpu_seconds": 0.0625,
+            "cpu_percent_one_core": 97.8832167087434,
+            "rss_sampled_max_bytes": 38039552,
+            "peak_rss_bytes": 38514688,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 19,
+          "elapsed_ns": 60275900,
+          "operations": 1,
+          "ns_per_op": 60275900,
+          "resources": {
+            "wall_ns": 60275900,
+            "cpu_seconds": 0.046875,
+            "cpu_percent_one_core": 77.76739957429089,
+            "rss_sampled_max_bytes": 37945344,
+            "peak_rss_bytes": 38440960,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        }
+      ]
+    },
+    {
+      "name": "AX",
+      "round": 3,
+      "version": "ax 0.3.16",
+      "samples": [
+        {
+          "sample": 0,
+          "elapsed_ns": 11426100,
+          "operations": 1,
+          "ns_per_op": 11426100,
+          "resources": {
+            "wall_ns": 11426100,
+            "cpu_seconds": 0.0,
+            "cpu_percent_one_core": 0.0,
+            "rss_sampled_max_bytes": 4546560,
+            "peak_rss_bytes": 12124160,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 1,
+          "elapsed_ns": 11455400,
+          "operations": 1,
+          "ns_per_op": 11455400,
+          "resources": {
+            "wall_ns": 11455400,
+            "cpu_seconds": 0.046875,
+            "cpu_percent_one_core": 409.1956631806834,
+            "rss_sampled_max_bytes": 11558912,
+            "peak_rss_bytes": 12103680,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 2,
+          "elapsed_ns": 11622300,
+          "operations": 1,
+          "ns_per_op": 11622300,
+          "resources": {
+            "wall_ns": 11622300,
+            "cpu_seconds": 0.015625,
+            "cpu_percent_one_core": 134.4398268845237,
+            "rss_sampled_max_bytes": 2215936,
+            "peak_rss_bytes": 12169216,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 3,
+          "elapsed_ns": 12687200,
+          "operations": 1,
+          "ns_per_op": 12687200,
+          "resources": {
+            "wall_ns": 12687200,
+            "cpu_seconds": 0.015625,
+            "cpu_percent_one_core": 123.1556214137083,
+            "rss_sampled_max_bytes": 11137024,
+            "peak_rss_bytes": 12132352,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 4,
+          "elapsed_ns": 11799600,
+          "operations": 1,
+          "ns_per_op": 11799600,
+          "resources": {
+            "wall_ns": 11799600,
+            "cpu_seconds": 0.0,
+            "cpu_percent_one_core": 0.0,
+            "rss_sampled_max_bytes": 11239424,
+            "peak_rss_bytes": 12152832,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 5,
+          "elapsed_ns": 12304500,
+          "operations": 1,
+          "ns_per_op": 12304500,
+          "resources": {
+            "wall_ns": 12304500,
+            "cpu_seconds": 0.0,
+            "cpu_percent_one_core": 0.0,
+            "rss_sampled_max_bytes": 5054464,
+            "peak_rss_bytes": 12128256,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 6,
+          "elapsed_ns": 11461600,
+          "operations": 1,
+          "ns_per_op": 11461600,
+          "resources": {
+            "wall_ns": 11461600,
+            "cpu_seconds": 0.03125,
+            "cpu_percent_one_core": 272.6495428212466,
+            "rss_sampled_max_bytes": 10981376,
+            "peak_rss_bytes": 12128256,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 7,
+          "elapsed_ns": 11800000,
+          "operations": 1,
+          "ns_per_op": 11800000,
+          "resources": {
+            "wall_ns": 11800000,
+            "cpu_seconds": 0.015625,
+            "cpu_percent_one_core": 132.41525423728814,
+            "rss_sampled_max_bytes": 11816960,
+            "peak_rss_bytes": 12144640,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 8,
+          "elapsed_ns": 11543800,
+          "operations": 1,
+          "ns_per_op": 11543800,
+          "resources": {
+            "wall_ns": 11543800,
+            "cpu_seconds": 0.015625,
+            "cpu_percent_one_core": 135.35404286283546,
+            "rss_sampled_max_bytes": 2215936,
+            "peak_rss_bytes": 12124160,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 9,
+          "elapsed_ns": 11974900,
+          "operations": 1,
+          "ns_per_op": 11974900,
+          "resources": {
+            "wall_ns": 11974900,
+            "cpu_seconds": 0.0,
+            "cpu_percent_one_core": 0.0,
+            "rss_sampled_max_bytes": 5087232,
+            "peak_rss_bytes": 12132352,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 10,
+          "elapsed_ns": 12799100,
+          "operations": 1,
+          "ns_per_op": 12799100,
+          "resources": {
+            "wall_ns": 12799100,
+            "cpu_seconds": 0.015625,
+            "cpu_percent_one_core": 122.07889617238712,
+            "rss_sampled_max_bytes": 11603968,
+            "peak_rss_bytes": 12148736,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 11,
+          "elapsed_ns": 11379600,
+          "operations": 1,
+          "ns_per_op": 11379600,
+          "resources": {
+            "wall_ns": 11379600,
+            "cpu_seconds": 0.015625,
+            "cpu_percent_one_core": 137.30711097050863,
+            "rss_sampled_max_bytes": 2220032,
+            "peak_rss_bytes": 12083200,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 12,
+          "elapsed_ns": 12002500,
+          "operations": 1,
+          "ns_per_op": 12002500,
+          "resources": {
+            "wall_ns": 12002500,
+            "cpu_seconds": 0.015625,
+            "cpu_percent_one_core": 130.18121224744846,
+            "rss_sampled_max_bytes": 12115968,
+            "peak_rss_bytes": 12115968,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 13,
+          "elapsed_ns": 12347800,
+          "operations": 1,
+          "ns_per_op": 12347800,
+          "resources": {
+            "wall_ns": 12347800,
+            "cpu_seconds": 0.015625,
+            "cpu_percent_one_core": 126.5407602973809,
+            "rss_sampled_max_bytes": 5165056,
+            "peak_rss_bytes": 12054528,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 14,
+          "elapsed_ns": 11560700,
+          "operations": 1,
+          "ns_per_op": 11560700,
+          "resources": {
+            "wall_ns": 11560700,
+            "cpu_seconds": 0.0,
+            "cpu_percent_one_core": 0.0,
+            "rss_sampled_max_bytes": 9986048,
+            "peak_rss_bytes": 12115968,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 15,
+          "elapsed_ns": 12503900,
+          "operations": 1,
+          "ns_per_op": 12503900,
+          "resources": {
+            "wall_ns": 12503900,
+            "cpu_seconds": 0.015625,
+            "cpu_percent_one_core": 124.96101216420476,
+            "rss_sampled_max_bytes": 11419648,
+            "peak_rss_bytes": 12075008,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 16,
+          "elapsed_ns": 11432700,
+          "operations": 1,
+          "ns_per_op": 11432700,
+          "resources": {
+            "wall_ns": 11432700,
+            "cpu_seconds": 0.0625,
+            "cpu_percent_one_core": 546.6775127485196,
+            "rss_sampled_max_bytes": 2215936,
+            "peak_rss_bytes": 12070912,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 17,
+          "elapsed_ns": 12133800,
+          "operations": 1,
+          "ns_per_op": 12133800,
+          "resources": {
+            "wall_ns": 12133800,
+            "cpu_seconds": 0.015625,
+            "cpu_percent_one_core": 128.77251973825184,
+            "rss_sampled_max_bytes": 5394432,
+            "peak_rss_bytes": 12169216,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 18,
+          "elapsed_ns": 12572900,
+          "operations": 1,
+          "ns_per_op": 12572900,
+          "resources": {
+            "wall_ns": 12572900,
+            "cpu_seconds": 0.015625,
+            "cpu_percent_one_core": 124.27522687685419,
+            "rss_sampled_max_bytes": 11173888,
+            "peak_rss_bytes": 12136448,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 19,
+          "elapsed_ns": 12348300,
+          "operations": 1,
+          "ns_per_op": 12348300,
+          "resources": {
+            "wall_ns": 12348300,
+            "cpu_seconds": 0.0,
+            "cpu_percent_one_core": 0.0,
+            "rss_sampled_max_bytes": 12038144,
+            "peak_rss_bytes": 12038144,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        }
+      ]
+    },
+    {
+      "name": "Codex native",
+      "round": 3,
+      "version": "codex-cli 0.153.4",
+      "samples": [
+        {
+          "sample": 0,
+          "elapsed_ns": 17211600,
+          "operations": 1,
+          "ns_per_op": 17211600,
+          "resources": {
+            "wall_ns": 17211600,
+            "cpu_seconds": 0.0,
+            "cpu_percent_one_core": 0.0,
+            "rss_sampled_max_bytes": 13262848,
+            "peak_rss_bytes": 14098432,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 1,
+          "elapsed_ns": 18003300,
+          "operations": 1,
+          "ns_per_op": 18003300,
+          "resources": {
+            "wall_ns": 18003300,
+            "cpu_seconds": 0.015625,
+            "cpu_percent_one_core": 86.78964412080008,
+            "rss_sampled_max_bytes": 10428416,
+            "peak_rss_bytes": 14237696,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 2,
+          "elapsed_ns": 19823600,
+          "operations": 1,
+          "ns_per_op": 19823600,
+          "resources": {
+            "wall_ns": 19823600,
+            "cpu_seconds": 0.015625,
+            "cpu_percent_one_core": 78.82019411206844,
+            "rss_sampled_max_bytes": 11575296,
+            "peak_rss_bytes": 14254080,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 3,
+          "elapsed_ns": 17185600,
+          "operations": 1,
+          "ns_per_op": 17185600,
+          "resources": {
+            "wall_ns": 17185600,
+            "cpu_seconds": 0.015625,
+            "cpu_percent_one_core": 90.91914160692673,
+            "rss_sampled_max_bytes": 9920512,
+            "peak_rss_bytes": 14192640,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 4,
+          "elapsed_ns": 17608700,
+          "operations": 1,
+          "ns_per_op": 17608700,
+          "resources": {
+            "wall_ns": 17608700,
+            "cpu_seconds": 0.03125,
+            "cpu_percent_one_core": 177.46909198294023,
+            "rss_sampled_max_bytes": 13234176,
+            "peak_rss_bytes": 14082048,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 5,
+          "elapsed_ns": 18128400,
+          "operations": 1,
+          "ns_per_op": 18128400,
+          "resources": {
+            "wall_ns": 18128400,
+            "cpu_seconds": 0.015625,
+            "cpu_percent_one_core": 86.19072835992145,
+            "rss_sampled_max_bytes": 5922816,
+            "peak_rss_bytes": 14004224,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 6,
+          "elapsed_ns": 17521200,
+          "operations": 1,
+          "ns_per_op": 17521200,
+          "resources": {
+            "wall_ns": 17521200,
+            "cpu_seconds": 0.015625,
+            "cpu_percent_one_core": 89.1776818939342,
+            "rss_sampled_max_bytes": 7839744,
+            "peak_rss_bytes": 14123008,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 7,
+          "elapsed_ns": 17342500,
+          "operations": 1,
+          "ns_per_op": 17342500,
+          "resources": {
+            "wall_ns": 17342500,
+            "cpu_seconds": 0.0625,
+            "cpu_percent_one_core": 360.386334150209,
+            "rss_sampled_max_bytes": 5238784,
+            "peak_rss_bytes": 14237696,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 8,
+          "elapsed_ns": 17574300,
+          "operations": 1,
+          "ns_per_op": 17574300,
+          "resources": {
+            "wall_ns": 17574300,
+            "cpu_seconds": 0.015625,
+            "cpu_percent_one_core": 88.90823532089472,
+            "rss_sampled_max_bytes": 9527296,
+            "peak_rss_bytes": 14139392,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 9,
+          "elapsed_ns": 16803800,
+          "operations": 1,
+          "ns_per_op": 16803800,
+          "resources": {
+            "wall_ns": 16803800,
+            "cpu_seconds": 0.015625,
+            "cpu_percent_one_core": 92.9849200776015,
+            "rss_sampled_max_bytes": 9449472,
+            "peak_rss_bytes": 14123008,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 10,
+          "elapsed_ns": 17839300,
+          "operations": 1,
+          "ns_per_op": 17839300,
+          "resources": {
+            "wall_ns": 17839300,
+            "cpu_seconds": 0.015625,
+            "cpu_percent_one_core": 87.58751744743348,
+            "rss_sampled_max_bytes": 6901760,
+            "peak_rss_bytes": 14209024,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 11,
+          "elapsed_ns": 17468200,
+          "operations": 1,
+          "ns_per_op": 17468200,
+          "resources": {
+            "wall_ns": 17468200,
+            "cpu_seconds": 0.0,
+            "cpu_percent_one_core": 0.0,
+            "rss_sampled_max_bytes": 5136384,
+            "peak_rss_bytes": 14209024,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 12,
+          "elapsed_ns": 17536800,
+          "operations": 1,
+          "ns_per_op": 17536800,
+          "resources": {
+            "wall_ns": 17536800,
+            "cpu_seconds": 0.0,
+            "cpu_percent_one_core": 0.0,
+            "rss_sampled_max_bytes": 13131776,
+            "peak_rss_bytes": 14073856,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 13,
+          "elapsed_ns": 17968000,
+          "operations": 1,
+          "ns_per_op": 17968000,
+          "resources": {
+            "wall_ns": 17968000,
+            "cpu_seconds": 0.015625,
+            "cpu_percent_one_core": 86.96015138023152,
+            "rss_sampled_max_bytes": 13721600,
+            "peak_rss_bytes": 14176256,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 14,
+          "elapsed_ns": 16807600,
+          "operations": 1,
+          "ns_per_op": 16807600,
+          "resources": {
+            "wall_ns": 16807600,
+            "cpu_seconds": 0.03125,
+            "cpu_percent_one_core": 185.9277945691235,
+            "rss_sampled_max_bytes": 2220032,
+            "peak_rss_bytes": 14073856,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 15,
+          "elapsed_ns": 17655800,
+          "operations": 1,
+          "ns_per_op": 17655800,
+          "resources": {
+            "wall_ns": 17655800,
+            "cpu_seconds": 0.015625,
+            "cpu_percent_one_core": 88.49783074117288,
+            "rss_sampled_max_bytes": 14204928,
+            "peak_rss_bytes": 14204928,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 16,
+          "elapsed_ns": 16974400,
+          "operations": 1,
+          "ns_per_op": 16974400,
+          "resources": {
+            "wall_ns": 16974400,
+            "cpu_seconds": 0.015625,
+            "cpu_percent_one_core": 92.0503817513432,
+            "rss_sampled_max_bytes": 2220032,
+            "peak_rss_bytes": 14082048,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 17,
+          "elapsed_ns": 17697500,
+          "operations": 1,
+          "ns_per_op": 17697500,
+          "resources": {
+            "wall_ns": 17697500,
+            "cpu_seconds": 0.03125,
+            "cpu_percent_one_core": 176.57861279841785,
+            "rss_sampled_max_bytes": 10690560,
+            "peak_rss_bytes": 14098432,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 18,
+          "elapsed_ns": 17403300,
+          "operations": 1,
+          "ns_per_op": 17403300,
+          "resources": {
+            "wall_ns": 17403300,
+            "cpu_seconds": 0.0,
+            "cpu_percent_one_core": 0.0,
+            "rss_sampled_max_bytes": 14184448,
+            "peak_rss_bytes": 14184448,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        },
+        {
+          "sample": 19,
+          "elapsed_ns": 16228700,
+          "operations": 1,
+          "ns_per_op": 16228700,
+          "resources": {
+            "wall_ns": 16228700,
+            "cpu_seconds": 0.0,
+            "cpu_percent_one_core": 0.0,
+            "rss_sampled_max_bytes": 12378112,
+            "peak_rss_bytes": 14082048,
+            "resource_scope": "entire_worker_including_setup_warmup_and_teardown",
+            "resource_method": "Win32 process counters",
+            "monitor_interval_ms": 2
+          }
+        }
+      ]
+    }
+  ],
+  "failures": []
+}
