@@ -7,7 +7,7 @@ One source workspace builds for Windows, Linux and macOS. See
 installation and capability limits; new platform archives require a release
 containing those assets before they can be downloaded.
 
-[![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue)](Cargo.toml)
+[![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue)](Cargo.toml)
 [![Rust 1.92+](https://img.shields.io/badge/rust-1.92+-orange)](https://www.rust-lang.org)
 
 **English** | [简体中文](README.zh-CN.md)
@@ -246,4 +246,4 @@ submitting PRs and the review process.
 
 ## License
 
-MIT OR Apache-2.0.
+Apache-2.0.
