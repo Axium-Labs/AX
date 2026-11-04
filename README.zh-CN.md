@@ -190,4 +190,4 @@ AX 刻意不一次性加载所有东西。技能、MCP 服务器、供应商与�
 
 ## 许可证
 
-Apache-2.0。
+[Apache-2.0](LICENSE-APACHE)。

@@ -246,4 +246,4 @@ submitting PRs and the review process.
 
 ## License
 
-Apache-2.0.
+[Apache-2.0](LICENSE-APACHE).
