@@ -2,6 +2,8 @@
 
 用 Rust 构建的快速、轻量终端 AI Agent。
 
+同一源码工作区可构建 Windows、Linux 和 macOS 版本。原生构建目标、Shell 设置、安装方式及能力限制见[平台支持](docs/platforms.md)；新平台压缩包需要对应 Release 发布后才能下载。
+
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue)](Cargo.toml)
 [![Rust 1.92+](https://img.shields.io/badge/rust-1.92+-orange)](https://www.rust-lang.org)
 
@@ -12,7 +14,7 @@ AX 是一个小巧的原生终端 Agent：启动快、流式响应，会话、�
 AX 是 Agent；[AX Crew](https://github.com/Axium-Labs/AXCrew) 是与它一同构建的控制平面——编排并控制多台机器上的 AX，并在机器掉线时让工作继续运行。参见 [ACP 与 Crew 集成](docs/acp-crew.md)。
 
 - **Rust 原生** — 核心终端 Agent 为单一二进制，不需要 Node 或 Docker；可选的浏览器操作需要 Node 和 Playwright。
-- **独立界面权限** — 应用、网站访问与具体操作审批分别管理，不改变文件和终端的沙箱。Windows 电脑操作默认关闭；平台支持和浏览器限制见 [主机访问权限](docs/host-permissions.md)。
+- **独立界面权限** — 应用、网站访问与具体操作审批分别管理，不改变文件和终端的沙箱。电脑操作默认开启，并保留用户显式关闭的设置；Windows UIA、Linux AT-SPI 和 macOS Accessibility 适配器有各自的平台要求与限制。参见[电脑操作](docs/computer-use.md)和[主机访问权限](docs/host-permissions.md)。
 - **启动快** — 供应商、技能、MCP 服务器与记忆按需加载。
 - **本机资源** — `/system` 按需采集真实 CPU、内存以及受支持 NVIDIA 显卡的使用率与显存；读取失败明确显示不可用。
 - **标准技能与聚焦工具** — Agent Skills `SKILL.md` 包（惰性指令 + 可选资源）、只读的 web 搜索/抓取（并发批量查询与页面抓取并去重结果）、通过可配置 MCP 服务器接入的 LSP，以及受支持视觉模型上的原生图片输入。
@@ -140,7 +142,7 @@ ax --provider openai-codex --model <model-id>
 ax run "explain this repo" --provider deepseek
 ```
 
-`--provider` 接收目录中的供应商 id，而不仅是 `deepseek` / `openai` / `codex` / `compatible` 别名。供应商出现多次时使用其名称——小米的普通条目与 CN/SGP/AMS token 套餐区域共享模型 id 但端点不同：
+`--provider` 接收目录中的供应商 id，而不仅是 `deepseek` / `openai` / `codex` / `compatible` 别名。同一供应商有多个条目时，请明确指定其 id——小米的普通条目与 CN/SGP/AMS token 套餐区域共享模型 id 但端点不同：
 
 ```bash
 ax run "explain this repo" --provider xiaomi-token-plan-cn --model mimo-v2.5
@@ -189,22 +191,3 @@ AX 刻意不一次性加载所有东西。技能、MCP 服务器、供应商与�
 ## 许可证
 
 Apache-2.0。
-
-### 导入技能与 MCP
-
-```powershell
-ax skill import C:/downloads/my-skill           # 项目 skills/
-ax skill import C:/downloads/my-skill --global  # <install-dir>/.ax/skills
-ax mcp import C:/downloads/mcp.json             # 安装目录 .ax/projects/<project-key>/mcp.toml
-ax mcp import C:/downloads/mcp.toml --global     # <install-dir>/.ax/mcp.toml
-```
-
-导入会校验内容、保留现有名称，不运行脚本或 MCP 服务器。MCP JSON 接受常见的 `mcpServers` 格式。
-
-## 本地编码基准
-
-见 `benchmark/README.md`：固定的三任务 AX vs Codex 运行器、隔离要求与实测结果。包含的这次运行在编码前被网关 403 阻断，不构成性能排名。
-
-## 可选的分布式协作
-
-AX 0.3.7 / AXCrew 0.3.3 新增基于 Durable Task、Event、Artifact 与 Workflow State 的协作层。AXCrew 按 AX 能力与 Host 资源统一分配任务；AX 保持现有推理、Memory 和 Subagent 能力，无须持续存活的 Coordinator Agent。在 AXCrew 侧边栏「分布式协作」注册实例、下载配置，再在目标机器运行 `ax crew worker worker.json`。支持一台 Host 多个 AX、一个 AX 多个 Execution，普通单机与原有设备控制仍可独立使用。见 [配置与恢复边界](docs/distributed-collaboration.md)。
