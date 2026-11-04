@@ -204,52 +204,16 @@ existing separate redirect/domain permission checks.
 
 ## Execution evidence and remaining limits
 
-New maintained tests live in `test/web/`: TCP/SSE native protocols, real MCP wire
-handshake and tool calls, entire registry classification, native→remote errors,
-401/403/429/503, cooldown/recovery, expired session without replay, proxy routing,
-query deduplication, cancellation and deadlines; actual AgentKernel/forked child
-and SubagentManager model override. Existing router and fetch regressions remain.
-Windows full-workspace serial tests pass (689 passed, 6 ignored); formatting,
-workspace compilation and all-target Clippy pass (one existing CLI warning).
-Linux/WSL full-workspace serial tests also pass (686 passed, 6 ignored, plus the
-real CLI Strict-sandbox target). Workspace compilation and all-target Clippy
-pass on both platforms; Linux retains two existing desktop warnings in addition
-to the CLI warning. All 62 search-specific tests pass on both platforms. See `logs/2026-10-11-web-search-audit.md` for
-commands, intermediate concurrent-edit failures and final outcomes.
+Native protocol support does not establish live entitlement for every account,
+model or region. Remote access depends on service limits and network availability;
+DeepSeek uses Remote rather than proving a native-search path. No universal
+provider acceptance or reachability claim is made.
 
-Real authorized runs succeeded: anonymous Exa and Parallel on Windows and Linux
-(WSL Ubuntu); Windows DeepSeek CLI Agent Loop, real isolated Subagent and ACP;
-Linux DeepSeek CLI and isolated Subagent. Parent/child session tool records were inspected to confirm
-actual `web` calls and backend sources, beyond final model text.
+Proxy environment changes require rebuilding clients or restarting AX. They do
+not hot-reload existing model or Remote connections. Known-URL fetch retains its
+own permission and redirect checks.
 
-No native service has a successful live credential check in this environment:
-the available OpenAI key returns 401; existing Codex OAuth refresh returns 401;
-no authorized Anthropic/Gemini/Vertex/Azure/Moonshot/OpenRouter/Groq/general
-Z.AI/Model Studio credentials were found. TCP protocol fixtures do not establish
-live model entitlement. These paths are implemented but their live acceptance
-remains unverified. DeepSeek validates Remote, not Native.
-
-Linux validation infrastructure was repaired rather than suppressing failures:
-the obsolete private-module `linux_child_sandbox` target was replaced by
-`test/web/linux_runtime.rs`, which launches the real AX CLI with production
-composition, a TCP model fixture, Strict sandbox and hosted MCP fixtures. It
-checks dirty Git inheritance/commit, denied host credentials and private child
-SQLite access, actual Subagent search, retained JSONL citations and terminal
-workspace cleanup. Lifecycle unit fixtures explicitly initialize their existing
-Off policy once; they no longer try to execute a libtest program as a broker.
-The backup rollback test removes its deliberately created directory obstruction
-before checking database/session rollback, respecting Linux JSONL recovery.
-Original failures remain recorded in logs as intermediate audit evidence.
-
-Native
-Linux hosts beyond WSL, Windows proxy environment switching, authenticated/SOCKS
-proxies, domestic/international reachability permutations, paid Brave/Bocha and
-the actual AXCrew desktop UI were not live-tested. Loopback explicit HTTP proxy replacement, DNS/TLS failures,
-timeouts, permissions and cancellation are tested on both OS builds. Proxy
-environment changes require rebuilding clients/restarting AX; they are not
-hot-reloaded into existing model and Remote connections.
-
-Ordinary users need no extra **search** key for the authorized anonymous Remote
-services, and this is proven through production execution. This does not imply
-free model inference, universal network availability or full native-provider
-live acceptance. The complete requested live-validation matrix is not yet met.
+Maintainer fixtures and machine-specific validation results are local work-log
+material, not public commands or current product guarantees. For published
+measurement tooling and its boundaries, see [runtime benchmarks](runtime-benchmarks.md)
+and [Agent benchmarks](agent-benchmarks.md).

@@ -1,7 +1,8 @@
 # AX documentation
 
 This directory documents current AX behavior, architecture and development.
-Version-specific changes are recorded under [release notes](release-notes/).
+Version-specific changes are recorded under [releases](releases/) and
+[older release notes](release-notes/).
 Long-lived design decisions are recorded as [ADRs](adr/README.md).
 
 ## Documentation map
@@ -30,6 +31,9 @@ are documented in [host-permissions.md](host-permissions.md).
 | [backup.md](backup.md) | Versioned axpack export/import, data boundaries and project remapping |
 | [tools.md](tools.md) | Tools, permissions, safety |
 | [security.md](security.md) | Runtime Workspace Sandbox, OS enforcement and escape tests |
+| [browser-desktop-quickstart.md](browser-desktop-quickstart.md) | Browser transports and native desktop first steps |
+| [web-search-quickstart.md](web-search-quickstart.md) | Search usage and configuration |
+| [web-search-implementation-guide.md](web-search-implementation-guide.md) | Search adapter maintenance |
 | [web-search-architecture.md](web-search-architecture.md) | Web search: two-tier native-first routing, provider capabilities, configuration |
 | [mcp.md](mcp.md) | MCP integration: configuration, transports, lazy connection |
 | [skills.md](skills.md) | Skills: package format, routing, enable/disable |
@@ -39,11 +43,11 @@ are documented in [host-permissions.md](host-permissions.md).
 | [providers.md](providers.md) | Models, providers, authentication |
 | [contributing/README.md](contributing/README.md) | Contribution workflow, issues, PRs and review policy |
 | [development.md](development.md) | Building, testing, extending and releasing AX |
-| [release-notes/0.3.15.md](release-notes/0.3.15.md) | Current release |
+| [releases/0.3.17.md](releases/0.3.17.md) | Current release |
 | [adr/README.md](adr/README.md) | Architecture Decision Records (index) |
 
-Older AX release notes are kept by version in the same `release-notes/`
-directory. The local [Web Search scheduling benchmark](web-latency.md) is a
+Older AX release notes are kept by version in `release-notes/`.
+The local [Web Search scheduling benchmark](web-latency.md) is a
 maintainer reference, not part of the product feature guide.
 
 ## How to read

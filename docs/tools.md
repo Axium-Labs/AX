@@ -627,7 +627,9 @@ Agents, using the selected global/project scope. Changes are loaded before the n
 turn, including in a running TUI/ACP session. The JSON section is:
 
 ```json
+{
 "subagent": { "max_concurrent": 8, "max_depth": 1 }
+}
 ```
 
 Legacy `config.toml` sections that still carry an `enabled` key migrate through
@@ -693,6 +695,7 @@ other calls. Noninteractive explicit Ask fails closed. Rules are enforced in
 Runtime/transport, never through model instructions.
 
 ```json
+{
 "permissions": {
   "rules": [
     {"decision":"allow", "matcher":{"kind":"command","pattern":"cargo *"}},
@@ -704,6 +707,7 @@ Runtime/transport, never through model instructions.
        "pointer":"/arguments/action","pattern":"delete"}}
   ],
   "boundary": {"read_only":false, "deny_network":false}
+}
 }
 ```
 
@@ -762,7 +766,9 @@ Model overrides must be configured by the parent. Embedders call
 `register_child_model`; CLI uses the optional local `child_models` map:
 
 ```json
+{
 "child_models": { "reviewer": { "provider":"openai", "model":"gpt-4.1" } }
+}
 ```
 
 Building an approved provider performs no model/network request. An unknown

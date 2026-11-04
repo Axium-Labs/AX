@@ -318,7 +318,7 @@ lifecycle decision table the engine enforces), `storage.rs` (atomic writes,
 digests, territory guards, credential screening) and `worker.rs` (the
 off-startup analysis thread). `lib.rs` only re-exports.
 
-Thresholds live centrally in `evolution::Config`. For example:
+Active scheduling and growth settings live in `evolution::Config`. For example:
 
 ```json
 {
@@ -332,15 +332,8 @@ Thresholds live centrally in `evolution::Config`. For example:
   "max_tombstones": 24,
   "max_skill_bytes": 12000,
   "max_actions": 4,
-  "similarity": 0.86,
   "minimum_evidence": 2,
-  "independent_sessions": 2,
-  "create_score": 0.90,
-  "trial_score": 0.65,
-  "active_score": 0.78,
-  "retire_score": 0.25,
-  "half_life_secs": 2592000,
-  "weights": [0.25, 0.20, 0.15, 0.10, 0.10, 0.20]
+  "independent_sessions": 2
 }
 ```
 

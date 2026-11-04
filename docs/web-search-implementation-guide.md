@@ -32,4 +32,4 @@ its failure must not be described as a native pass. `AX_HOME` may point to an
 existing credential home; live CLI data should use an isolated directory.
 Compile, format, Clippy, router/fetch regressions and platform tests are still
 required. Record failures and untested account/region environments explicitly
-in docs/logs. See the audit for current known Linux harness limitations.
+in local work logs. See the audit for current provider and network limits.

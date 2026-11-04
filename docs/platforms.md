@@ -8,8 +8,8 @@ executable replacement; no second agent runtime is introduced.
 ## Build and install
 
 Build natively with `cargo build --release --locked`. Windows uses `ax.exe`;
-Linux/macOS use `ax`. The release matrix builds Windows x64, Linux x64/arm64
-musl and macOS Intel/Apple Silicon. Unix archives contain executable `ax`,
+Linux/macOS use `ax`. The release matrix builds Windows x64, Linux x64 GNU,
+Linux x64/arm64 musl and macOS Intel/Apple Silicon. Unix archives contain executable `ax`,
 `skills/` and `mcp.example.toml`, using the asset names expected by the installer
 and updater. Platform check CI runs native build/lint/workspace tests on pull
 requests or manual dispatch; release jobs remain tag-triggered. New assets are

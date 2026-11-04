@@ -46,9 +46,11 @@ conversation.
 the next-request reserve:
 
 ```json
+{
 "context_pool": { "next_request_reserve": 1024,
                   "tool_result_maximum": 4096, "recent_raw_maximum": 4096,
                   "memory_maximum": 8192, "skill_metadata_maximum": 4096 }
+}
 ```
 
 ### Minimum window capacity

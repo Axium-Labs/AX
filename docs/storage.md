@@ -94,7 +94,7 @@ Notes:
 One file per session, `sessions/<session-uuid>.jsonl`; each line is a complete
 `StoredMessage` JSON object:
 
-```json
+```jsonl
 {"id":1,"session_id":"...","role":"user","kind":"message","content":"user input","metadata":null,"created_at":1234567890}
 {"id":2,"session_id":"...","role":"assistant","kind":"message","content":"AI response","metadata":{"tokens":150},"created_at":1234567891}
 ```

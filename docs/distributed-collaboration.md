@@ -183,7 +183,7 @@ The current control plane is one authoritative AXCrew process backed by SQLite.
 Use durable storage and backups. Physical multi-host deployment and hardware
 resource isolation require deployment-level verification.
 
-See [AXCrew's control-plane contract](../../axcrew/docs/distributed-collaboration.md)
+See [AXCrew's control-plane contract](https://github.com/Axium-Labs/AXCrew/blob/main/docs/distributed-collaboration.md)
 and [ADR 0021](adr/0021-durable-distributed-collaboration.md).
 
 

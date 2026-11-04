@@ -38,7 +38,9 @@ cli ───────────────┬──> runtime-core ──>
 The explicit `ax --update` path belongs to the CLI and exits before normal
 runtime setup. It checks the latest GitHub Release, verifies its archive against
 `SHA256SUMS`, and replaces the current executable. On Windows replacement is
-deferred until the running process exits. It never touches user or project data.
+deferred until the running process exits. It also refreshes bundled skills and the
+MCP example without replacing existing user configuration; see
+[development](development.md#releasing) for payload and update behavior.
 
 ### Local system resources
 

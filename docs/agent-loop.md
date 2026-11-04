@@ -53,8 +53,11 @@ input arriving during streaming or a blocking guard is consumed before completio
 This API does not start a turn by itself.
 
 Provider finish reasons `length`, `max_tokens`, `incomplete`, `pause_turn`,
-`tool_calls` and `function_call` request continuation. Missing finish reasons
-remain compatible with providers that signal final through an empty tool list.
+`tool_calls` and `function_call` request continuation. Protocol adapters validate their own completion boundary: Chat Completions streams
+require a terminal `finish_reason`, and Responses streams require a completed
+response. Transport EOF alone is not successful completion. The kernel can still
+accept a provider-neutral response without a finish reason when the adapter has
+already validated completion.
 There is no prose matching. Explicit cancellation, global failures and execution
 budgets keep their distinct stop/suspension semantics.
 
@@ -106,16 +109,11 @@ Raw history remains intact.
 
 ## Verification and references
 
-`test/harness/continuation.rs` and `subagent_continuation.rs` assert request counts,
-stream timing, real pending approval/retry/input, queued tasks, unfinished and
-unconsumed subagents, deterministic checks, model Goal opt-in and denial/recovery.
-`test/harness/runtime_neutrality.rs` asserts the runtime contract: a plain request
-is answered directly and its goal queue completes, context cannot hijack it,
-explicit investigation and fixes run to completion, a long-running request
-creates a resumable queue, and repeated identical calls are reminded at 3/5/8
-rather than blocked.
-Ordinary successful paths retain their request counts. After recoverable errors,
-bounded handoff feedback uses the same execution model, not a default reviewer.
+Continuation validation covers request counts, streaming, pending approvals,
+retries and input, queue/child completion, Goal denial/recovery and repeated-call
+reminders. Ordinary successful paths retain their request counts; recoverable
+errors use bounded feedback through the execution model. Private fixture paths
+and machine-specific outcomes belong in local work logs.
 
 Design references: [OpenAI's Codex agent loop](https://openai.com/index/unrolling-the-codex-agent-loop/)
 and [Claude Code Stop hooks](https://code.claude.com/docs/en/hooks#stop). AX adopts

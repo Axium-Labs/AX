@@ -7,9 +7,10 @@ How to build, test and extend AX. For how the pieces fit together, start with
 ## Prerequisites
 
 - Rust **1.92+** (workspace `rust-version`, edition 2024)
-- No runtime, Node or Docker required to *run* AX; Linux musl and macOS
-  release builds use `zig` / `cargo-zigbuild` via CI (see
-  [Releasing](#releasing)).
+- The core AX binary does not require Node or Docker; standalone Browser Use
+  has separate Node and Playwright dependencies (see [host permissions](host-permissions.md)).
+  Release CI uses native runners and installs `musl-tools` for Linux musl
+  targets (see [Releasing](#releasing)).
 
 ## Workspace layout
 

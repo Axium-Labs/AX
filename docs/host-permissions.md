@@ -31,6 +31,8 @@ The native desktop worker is a host transport, separately authorized from confin
 
 ## Browser Use
 
+### AXCrew embedded transport
+
 When a local AXCrew desktop starts AX with `AX_CREW_BROWSER_URL` and its launch
 secret, `browser` uses that desktop's authenticated loopback bridge and actual
 sidebar WebViews. CLI defaults remain unchanged. The same HostPermissionStore
@@ -47,6 +49,8 @@ Desktop bridge environment credentials are scrubbed from shell, sandbox, MCP and
 Mod children. Only trusted local AX/ACP execution retains the bridge; SSH and
 paired remote Hosts do not inherit it. No credentials are written to settings.
 
+
+### Standalone Playwright transport
 
 Outside that explicit AXCrew desktop transport, `browser.rs` starts the embedded `browser_worker.mjs` lazily, through Node and Playwright, outside the file/terminal worker. It creates AX-owned, nonpersistent Chromium contexts with the Chromium sandbox enabled and no personal browser profile. Contexts are shared across turns only within the same controller permission scope. Closing the final session closes Chromium; dropping a scope closes the driver's input pipe, allowing normal browser cleanup. A worker deadline closes owned sessions; the Rust exchange has a separate timeout.
 

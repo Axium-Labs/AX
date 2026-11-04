@@ -436,8 +436,10 @@ successful request resets its retry sequence; model steps/task counts do not
 increase for transport retries.
 
 ```json
+{
 "retry": { "max_attempts":5, "time_budget_ms":30000,
            "base_delay_ms":200, "max_delay_ms":5000 }
+}
 ```
 
 `max_attempts` includes the initial request; 0/1 disables retries and values above
