@@ -1,5 +1,7 @@
 # Desktop platforms
 
+**English** | [简体中文](platforms.zh-CN.md)
+
 AX uses one Rust workspace for Windows, Linux and macOS. CLI, TUI, ACP,
 providers, sessions, memory and distributed workers share the same runtime.
 Platform branches own shell processes, paths, credential permissions and

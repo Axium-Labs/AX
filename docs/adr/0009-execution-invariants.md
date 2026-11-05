@@ -1,5 +1,7 @@
 # 0009. Goal-bound execution invariants
 
+**English** | [简体中文](0009-execution-invariants.zh-CN.md)
+
 Status: amended by [0014](0014-advisory-execution-policy.md)
 
 The predecessor-progress and recovery admission decisions below are historical.

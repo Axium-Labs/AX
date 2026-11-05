@@ -1,5 +1,7 @@
 # 0034. Reviewed Evolution promotion and bounded analysis recovery
 
+**English** | [简体中文](0034-reviewed-evolution-and-analysis-recovery.zh-CN.md)
+
 Status: accepted; supplements ADR 0006 and ADR 0017.
 
 ## Context

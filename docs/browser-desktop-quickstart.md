@@ -1,5 +1,7 @@
 # Browser and Computer Use quickstart
 
+**English** | [简体中文](browser-desktop-quickstart.zh-CN.md)
+
 ## Computer Use
 
 Computer Use defaults on unless explicitly disabled. Run `ax computer-use` to

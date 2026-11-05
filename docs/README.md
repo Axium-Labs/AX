@@ -1,5 +1,7 @@
 # AX documentation
 
+**English** | [简体中文](README.zh-CN.md)
+
 This directory documents current AX behavior, architecture and development.
 Version-specific changes are recorded under [releases](releases/) and
 [older release notes](release-notes/).

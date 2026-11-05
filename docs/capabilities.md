@@ -1,5 +1,7 @@
 # Scoped capabilities
 
+**English** | [简体中文](capabilities.zh-CN.md)
+
 Skills, MCP servers, named Agents and Mods share `scoped::ScopedRegistry<T>`, the
 same configuration parser and the same management operations. The CLI supplies
 only their metadata adapters; Crew uses AX's ACP interface instead of merging

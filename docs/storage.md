@@ -1,5 +1,7 @@
 # Storage
 
+**English** | [简体中文](storage.zh-CN.md)
+
 AX uses a hybrid storage architecture combining SQLite, JSONL and JSON: SQLite
 for fast metadata queries and indexes, JSONL for a complete immutable event
 stream per session, and JSON for lightweight configuration. Raw history is

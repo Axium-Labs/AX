@@ -1,5 +1,7 @@
 # Memory
 
+**English** | [简体中文](memory.zh-CN.md)
+
 AX stores raw session history, effective-context snapshots and scoped facts in
 SQLite. Context compaction only changes effective context — it never promotes
 a summary to global or project memory and never deletes raw messages. The

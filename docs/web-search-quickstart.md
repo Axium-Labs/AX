@@ -1,5 +1,7 @@
 # Web Search quickstart
 
+**English** | [简体中文](web-search-quickstart.zh-CN.md)
+
 Use any configured AX Agent model and request web research. AX calls the selected
 provider's actual native protocol when available, otherwise anonymous Exa or
 Parallel MCP, with anonymous Keenable MCP as the last fallback. No extra search

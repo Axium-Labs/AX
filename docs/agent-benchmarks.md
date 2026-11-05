@@ -1,5 +1,7 @@
 # Agent capability and advanced benchmarks
 
+**English** | [简体中文](agent-benchmarks.zh-CN.md)
+
 [AX-Bench Agent](../benchmarks/agent/README.md) implements production CLI capability
 execution and Advanced controllers without changing AX/AXCrew runtime logic.
 The standard suite has 60 deterministic custom tasks; the 24-scenario Advanced

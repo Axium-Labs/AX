@@ -1,5 +1,7 @@
 # 0013: Workspace runtime sandbox
 
+**English** | [简体中文](0013-workspace-runtime-sandbox.zh-CN.md)
+
 Status: accepted
 
 ## Context

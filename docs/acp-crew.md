@@ -1,5 +1,7 @@
 # ACP and AX Crew integration
 
+**English** | [简体中文](acp-crew.zh-CN.md)
+
 `ax acp` is an additive [Agent Client Protocol v1](https://agentclientprotocol.com/protocol/v1/initialization) stdio adapter in `crates/cli/src/acp.rs`. It uses the existing CLI composition root: `ReplState` (`crates/cli/src/repl/state.rs`) creates or restores sessions and `run_prompt_with` (`crates/cli/src/commands/run.rs`) invokes `AgentKernel::run_turn_checkpointed`. It does not implement a second model loop, tool registry, memory store, or credential store.
 
 

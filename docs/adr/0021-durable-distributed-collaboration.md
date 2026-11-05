@@ -1,5 +1,7 @@
 # 0021. Durable distributed collaboration at the CLI boundary
 
+**English** | [简体中文](0021-durable-distributed-collaboration.zh-CN.md)
+
 Status: accepted
 
 ## Context

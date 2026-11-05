@@ -1,5 +1,7 @@
 # ADR 0030: Unified model-selected delegation
 
+**English** | [简体中文](0030-unified-model-selected-delegation.zh-CN.md)
+
 Status: Accepted, 2026-10-20.
 
 ## Context

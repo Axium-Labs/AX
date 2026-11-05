@@ -1,5 +1,7 @@
 # Agent runtime: request, execution, capabilities
 
+**English** | [简体中文](agent-runtime.zh-CN.md)
+
 AX is a **coding execution harness**. The current user request defines the work,
 and the runtime drives requested
 deliverables to a terminal state: completed, failed with evidence, or waiting

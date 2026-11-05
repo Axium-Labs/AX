@@ -1,5 +1,7 @@
 # ADR 0020: Native model providers and configuration status
 
+**English** | [简体中文](0020-native-model-providers.zh-CN.md)
+
 Status: Accepted, 2026-10-05
 
 ## Context

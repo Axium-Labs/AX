@@ -1,5 +1,7 @@
 # Web Search maintenance
 
+**English** | [简体中文](web-search-implementation-guide.zh-CN.md)
+
 The canonical [architecture](web-search-architecture.md) and
 [provider audit](web-search-audit.md) replace the former placeholder roadmap.
 

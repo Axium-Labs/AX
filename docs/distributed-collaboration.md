@@ -1,5 +1,7 @@
 # Distributed collaboration (optional)
 
+**English** | [简体中文](distributed-collaboration.zh-CN.md)
+
 This is an additive CLI adapter and Tool, introduced in AX 0.3.7 with AXCrew 0.3.3.
 Ordinary AX, local Subagents, Task Queue and the existing Crew device bridge
 continue to work independently. No cluster connection is made during ordinary

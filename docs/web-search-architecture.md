@@ -1,5 +1,7 @@
 # Web Search architecture
 
+**English** | [简体中文](web-search-architecture.zh-CN.md)
+
 AX preserves the unified `web(search)` interface. Kernel tool binding connects
 it to the selected concrete model adapter, including registered tools and Mods.
 Subagent model overrides rebind native capability; configured clients, remote

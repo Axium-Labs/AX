@@ -1,5 +1,7 @@
 # Models, Providers & Auth
 
+**English** | [简体中文](providers.zh-CN.md)
+
 This document covers provider abstraction, credentials, model discovery and
 selection in AX.
 

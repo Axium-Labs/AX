@@ -1,5 +1,7 @@
 # 0024 — Separate workspace confinement from host UI access
 
+**English** | [简体中文](0024-independent-host-access.zh-CN.md)
+
 Status: accepted, 2026-10-10.
 
 Previously desktop use required sandbox off and used generic Process permission. The browser relied on an external CLI whose sessions and redirect behavior could not reliably enforce AX website grants. Workspace access, application/site access and approval of a particular operation must be independent decisions.

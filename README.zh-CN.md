@@ -2,19 +2,19 @@
 
 用 Rust 构建的快速、轻量终端 AI Agent。
 
-同一源码工作区可构建 Windows、Linux 和 macOS 版本。原生构建目标、Shell 设置、安装方式及能力限制见[平台支持](docs/platforms.md)；新平台压缩包需要对应 Release 发布后才能下载。
+同一源码工作区可构建 Windows、Linux 和 macOS 版本。原生构建目标、Shell 设置、安装方式及能力限制见[平台支持](docs/platforms.zh-CN.md)；新平台压缩包需要对应 Release 发布后才能下载。
 
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue)](Cargo.toml)
 [![Rust 1.92+](https://img.shields.io/badge/rust-1.92+-orange)](https://www.rust-lang.org)
 
-[English](README.md) | **简体中文**
+[English](README.zh-CN.md) | **简体中文**
 
 AX 是一个小巧的原生终端 Agent：启动快、流式响应，会话、记忆、凭证与模型配置都留在你的机器上——无需注册任何服务，没有远程遥测。
 
-AX 是 Agent；[AX Crew](https://github.com/Axium-Labs/AXCrew) 是与它一同构建的控制平面——编排并控制多台机器上的 AX，并在机器掉线时让工作继续运行。参见 [ACP 与 Crew 集成](docs/acp-crew.md)。
+AX 是 Agent；[AX Crew](https://github.com/Axium-Labs/AXCrew) 是与它一同构建的控制平面——编排并控制多台机器上的 AX，并在机器掉线时让工作继续运行。参见 [ACP 与 Crew 集成](docs/acp-crew.zh-CN.md)。
 
 - **Rust 原生** — 核心终端 Agent 为单一二进制，不需要 Node 或 Docker；可选的浏览器操作需要 Node 和 Playwright。
-- **独立界面权限** — 应用、网站访问与具体操作审批分别管理，不改变文件和终端的沙箱。电脑操作默认开启，并保留用户显式关闭的设置；Windows UIA、Linux AT-SPI 和 macOS Accessibility 适配器有各自的平台要求与限制。参见[电脑操作](docs/computer-use.md)和[主机访问权限](docs/host-permissions.md)。
+- **独立界面权限** — 应用、网站访问与具体操作审批分别管理，不改变文件和终端的沙箱。电脑操作默认开启，并保留用户显式关闭的设置；Windows UIA、Linux AT-SPI 和 macOS Accessibility 适配器有各自的平台要求与限制。参见[电脑操作](docs/computer-use.zh-CN.md)和[主机访问权限](docs/host-permissions.zh-CN.md)。
 - **启动快** — 供应商、技能、MCP 服务器与记忆按需加载。
 - **本机资源** — `/system` 按需采集真实 CPU、内存以及受支持 NVIDIA 显卡的使用率与显存；读取失败明确显示不可用。
 - **标准技能与聚焦工具** — Agent Skills `SKILL.md` 包（惰性指令 + 可选资源）、只读的 web 搜索/抓取（并发批量查询与页面抓取并去重结果）、通过可配置 MCP 服务器接入的 LSP，以及受支持视觉模型上的原生图片输入。
@@ -26,7 +26,7 @@ AX 是 Agent；[AX Crew](https://github.com/Axium-Labs/AXCrew) 是与它一同�
 
 默认情况下，AX 将持久化数据存放在 `<install-dir>/.ax` 下，项目级数据在 `projects/<project-key>/` 下。打开其他工作目录不会把数据搬过去；删除工作区不会删除其历史。首次启动时，旧版 `~/.ax` 与已知项目 `.ax` 存储会被复制（不删除原文件）。`AX_HOME` 与 `--data-dir` 仍是显式覆盖项。
 
-便携备份：`ax export backup.axpack` 导出会话与记忆；用 `--memory` 或 `--sessions` 选择类型。先运行 `ax import backup.axpack --dry-run` 检查冲突，再运行 `ax import backup.axpack` 合并。凭证与缓存不包含在内。详见 [备份细节](docs/backup.md)。
+便携备份：`ax export backup.axpack` 导出会话与记忆；用 `--memory` 或 `--sessions` 选择类型。先运行 `ax import backup.axpack --dry-run` 检查冲突，再运行 `ax import backup.axpack` 合并。凭证与缓存不包含在内。详见 [备份细节](docs/backup.zh-CN.md)。
 
 ## 快速开始
 
@@ -168,7 +168,7 @@ ax run "summarize the TODOs in ./src"
 ax agents "review pr #12" "write changelog" --concurrency 2
 ```
 
-要把 AX 现有运行时暴露给 ACP 客户端，运行 `ax acp`。要把本机连接到 AX Crew 后端，先运行 `ax crew pair <code> --gateway <https-url>` 一次，再运行 `ax crew connect <https-url>`。参见 [ACP 与 Crew 集成](docs/acp-crew.md)。
+要把 AX 现有运行时暴露给 ACP 客户端，运行 `ax acp`。要把本机连接到 AX Crew 后端，先运行 `ax crew pair <code> --gateway <https-url>` 一次，再运行 `ax crew connect <https-url>`。参见 [ACP 与 Crew 集成](docs/acp-crew.zh-CN.md)。
 
 ## 设计
 
@@ -178,7 +178,7 @@ AX 刻意不一次性加载所有东西。技能、MCP 服务器、供应商与�
 
 ## 文档
 
-内部架构——Agent 循环、上下文管理、多 Agent 调度、SQLite schema、模块布局——记录在 [docs/README.md](docs/README.md)。从 [docs/architecture.md](docs/architecture.md) 开始。
+内部架构——Agent 循环、上下文管理、多 Agent 调度、SQLite schema、模块布局——记录在 [docs/README.md](docs/README.zh-CN.md)。从 [docs/architecture.md](docs/architecture.zh-CN.md) 开始。
 
 ## 参与贡献
 

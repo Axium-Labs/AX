@@ -1,5 +1,7 @@
 # 0025: Native-first hosted search
 
+**English** | [简体中文](0025-native-first-hosted-search.zh-CN.md)
+
 Status: Accepted, 2026-10-11. Supersedes the backend selection in ADR 0019.
 
 ## Decision

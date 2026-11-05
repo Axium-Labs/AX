@@ -1,5 +1,7 @@
 # Architecture Decision Records
 
+**English** | [简体中文](README.zh-CN.md)
+
 ADRs record design decisions with lasting consequences: the context, the
 decision, and the trade-offs accepted. They make the *why* behind the code
 discoverable.

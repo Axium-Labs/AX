@@ -1,5 +1,7 @@
 # ADR 0029: Evidence-driven handoff after recoverable errors
 
+**English** | [简体中文](0029-evidence-driven-handoff.zh-CN.md)
+
 Status: Accepted, 2026-10-18.
 
 ## Context

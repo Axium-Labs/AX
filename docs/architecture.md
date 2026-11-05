@@ -1,5 +1,7 @@
 # AX Architecture
 
+**English** | [简体中文](architecture.zh-CN.md)
+
 This document describes the overall system architecture of AX: the crate
 layout, the agent loop, and the cold-start path. Topic-specific details live
 in their own documents — see [docs/README.md](README.md) for the full index.

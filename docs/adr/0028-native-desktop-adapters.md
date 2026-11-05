@@ -1,5 +1,7 @@
 # 0028 - Native desktop adapters
 
+**English** | [简体中文](0028-native-desktop-adapters.zh-CN.md)
+
 Date: 2026-10-14
 
 ## Decision

@@ -1,5 +1,7 @@
 # 0033. Sandbox process, protocol and cache boundaries
 
+**English** | [简体中文](0033-sandbox-process-and-protocol-boundaries.zh-CN.md)
+
 Status: accepted
 
 ## Context

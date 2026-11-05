@@ -1,5 +1,7 @@
 # 0023. Scoped recursive subagent limits
 
+**English** | [简体中文](0023-scoped-subagent-depth.zh-CN.md)
+
 ## Decision
 
 Allow non-negative `max_depth` values, preserving defaults of depth 1 and

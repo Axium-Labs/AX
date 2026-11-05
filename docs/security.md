@@ -1,5 +1,7 @@
 # Workspace Sandbox
 
+**English** | [简体中文](security.zh-CN.md)
+
 AX separates willingness from enforcement. Permission decides whether AX requests
 an action; Sandbox decides what the operating system permits that action to do.
 An approval does not mutate a prepared sandbox or retry a denied command on the

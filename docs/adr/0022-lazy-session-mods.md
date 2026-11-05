@@ -1,5 +1,7 @@
 # 0022: Lazy session Mods
 
+**English** | [简体中文](0022-lazy-session-mods.zh-CN.md)
+
 Status: Accepted
 Date: 2026-10-08
 

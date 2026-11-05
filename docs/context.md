@@ -1,5 +1,7 @@
 # Context, Compression & Resume
 
+**English** | [简体中文](context.zh-CN.md)
+
 This document covers how AX budgets the model's context window, compresses it
 when it grows too large, and restores sessions across runs. The storage that
 backs these flows is documented in [storage.md](storage.md).

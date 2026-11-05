@@ -1,5 +1,7 @@
 # 0018. Continuation-driven completion
 
+**English** | [简体中文](0018-continuation-driven-completion.zh-CN.md)
+
 Status: accepted
 
 ## Context

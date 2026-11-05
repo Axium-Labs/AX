@@ -1,5 +1,7 @@
 # 0012. Layered local memory retrieval
 
+**English** | [简体中文](0012-layered-memory-retrieval.zh-CN.md)
+
 Status: accepted
 
 ## Context

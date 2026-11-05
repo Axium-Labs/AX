@@ -1,5 +1,7 @@
 # JavaScript Mods
 
+**English** | [简体中文](mods.zh-CN.md)
+
 Mods are executable session extensions, inspired by the local Deepseek-harness
 `register(on, options)` bridge. AX discovers them through its existing scoped
 registry; the CLI composition root lazily starts a Node worker when a prompt

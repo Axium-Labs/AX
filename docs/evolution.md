@@ -1,5 +1,7 @@
 # Self-Evolving Skills
 
+**English** | [简体中文](evolution.zh-CN.md)
+
 AX observes ordinary sessions and learns reusable personal workflows without
 adding a model request to every turn. The `evolution` crate extends the CLI
 composition boundary; it has no dependency on runtime-core, tools, terminal UI

@@ -1,5 +1,7 @@
 # 0001. Scoped memory with portable project identity
 
+**English** | [简体中文](0001-memory-scopes.zh-CN.md)
+
 Status: accepted
 
 ## Context

@@ -1,5 +1,7 @@
 # 0005. Dependency-aware tool-round scheduling
 
+**English** | [简体中文](0005-tool-round-scheduler.zh-CN.md)
+
 Status: accepted
 
 ## Context

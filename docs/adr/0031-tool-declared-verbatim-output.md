@@ -1,5 +1,7 @@
 # 0031. Tool-declared verbatim output
 
+**English** | [简体中文](0031-tool-declared-verbatim-output.zh-CN.md)
+
 Status: accepted
 
 ## Context

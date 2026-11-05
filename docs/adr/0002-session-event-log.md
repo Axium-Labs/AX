@@ -1,5 +1,7 @@
 # 0002. SQLite index + JSONL session event log
 
+**English** | [简体中文](0002-session-event-log.zh-CN.md)
+
 Status: accepted
 
 ## Context

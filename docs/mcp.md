@@ -1,5 +1,7 @@
 # MCP
 
+**English** | [简体中文](mcp.zh-CN.md)
+
 AX integrates Model Context Protocol servers as ordinary tools. This document
 covers configuration, transports, lazy connection behavior, and the `/mcp`
 command.

@@ -1,5 +1,7 @@
 # Agent loop
 
+**English** | [简体中文](agent-loop.zh-CN.md)
+
 This document describes how AX continues and ends a model turn. The broader
 request and capability contract is in [agent-runtime.md](agent-runtime.md);
 task queues, workspaces and recovery are in

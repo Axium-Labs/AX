@@ -1,5 +1,7 @@
 # 0032. Verified patches and bounded receipts
 
+**English** | [简体中文](0032-verified-patches-and-bounded-receipts.zh-CN.md)
+
 Status: accepted
 
 ## Context

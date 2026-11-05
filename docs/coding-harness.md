@@ -1,5 +1,7 @@
 # Coding execution harness
 
+**English** | [简体中文](coding-harness.zh-CN.md)
+
 The coding harness **is** the runtime. Every run — CLI, TUI, ACP, Crew bridge
 and every isolated child — executes requested deliverables under the coding
 policy, with the full environment snapshot and a per-goal task queue. There is

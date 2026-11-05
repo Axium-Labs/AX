@@ -1,5 +1,7 @@
 # Issues and design discussion
 
+**English** | [简体中文](issues.zh-CN.md)
+
 [Contribution entry point](../../CONTRIBUTING.md) · [Navigation](README.md)
 
 ## Search and report

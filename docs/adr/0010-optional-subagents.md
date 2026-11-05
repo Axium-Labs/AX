@@ -1,5 +1,7 @@
 # 0010. Optional model-selected subagents
 
+**English** | [简体中文](0010-optional-subagents.zh-CN.md)
+
 Status: accepted
 
 ## Context

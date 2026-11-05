@@ -1,5 +1,7 @@
 # AX Goal
 
+**English** | [简体中文](goal.zh-CN.md)
+
 Goal is the in-place evolution of the former StopGuard. There is one completion
 validator and one existing model/tool Agent Loop. It is optional and automatic
 use in ordinary tasks defaults off. Harness still owns reliable execution, Task

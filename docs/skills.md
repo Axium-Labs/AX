@@ -1,5 +1,7 @@
 # Skills
 
+**English** | [简体中文](skills.zh-CN.md)
+
 AX uses the [Agent Skills specification](https://agentskills.io/specification).
 Skills provide task instructions without adding their bodies to startup context.
 Skill, MCP and Agent scope management share the [same registry](capabilities.md).

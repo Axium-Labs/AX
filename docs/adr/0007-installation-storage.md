@@ -1,5 +1,7 @@
 # 0007. Installation-owned persistent state
 
+**English** | [简体中文](0007-installation-storage.zh-CN.md)
+
 Status: accepted
 
 ## Context

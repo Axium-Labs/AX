@@ -1,5 +1,7 @@
 # 0014. Advisory execution policy and tool liveness
 
+**English** | [简体中文](0014-advisory-execution-policy.zh-CN.md)
+
 Status: accepted; amends 0009
 
 ## Context

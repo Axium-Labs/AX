@@ -1,5 +1,7 @@
 # Runtime performance measurement
 
+**English** | [简体中文](runtime-benchmarks.zh-CN.md)
+
 For production Agent task execution, see [agent-benchmarks.md](agent-benchmarks.md).
 Phase 1 results below remain offline runtime measurements, not capability scores.
 

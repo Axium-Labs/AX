@@ -1,5 +1,7 @@
 # Host access, sandbox and action approvals
 
+**English** | [简体中文](host-permissions.zh-CN.md)
+
 AX separates three decisions:
 
 - File/terminal confinement: existing `SandboxManager` and `WorkspaceWorker` tools enforce the configured workspace boundary. Host access never changes this mode or retries a rejected command outside it.

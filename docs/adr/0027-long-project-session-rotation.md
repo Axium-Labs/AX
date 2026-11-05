@@ -1,5 +1,7 @@
 # ADR 0027: Optional working context and Session rotation
 
+**English** | [简体中文](0027-long-project-session-rotation.zh-CN.md)
+
 Status: accepted
 
 Long-running Goals need bounded model context and evidence-linked handoff without

@@ -1,5 +1,7 @@
 # 0015. Shared child composition and explicit complete task inputs
 
+**English** | [简体中文](0015-shared-child-composition.zh-CN.md)
+
 Status: accepted; extends 0008
 
 ## Context

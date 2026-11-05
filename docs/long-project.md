@@ -1,5 +1,7 @@
 # Long Project and automatic Session rotation
 
+**English** | [简体中文](long-project.zh-CN.md)
+
 Long Project is an optional Goal working-context projection. It is off by default.
 Enabling it explicitly enables automatic rotation by default. Neither feature
 creates another agent, scheduler, memory service or execution database. Goal,

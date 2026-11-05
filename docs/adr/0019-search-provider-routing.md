@@ -1,5 +1,7 @@
 # ADR 0019: Search provider routing
 
+**English** | [简体中文](0019-search-provider-routing.zh-CN.md)
+
 Backend selection superseded on 2026-10-11 by [ADR 0025](0025-native-first-hosted-search.md). The engine list below is historical.
 
 Date: 2026-10-04

@@ -1,5 +1,7 @@
 # 0017. Authoritative Experience JSONL and Evolution control checkpoints
 
+**English** | [简体中文](0017-evolution-jsonl-authority.zh-CN.md)
+
 Status: accepted
 
 ## Context

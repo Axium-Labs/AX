@@ -1,5 +1,7 @@
 # Contribution guide
 
+**English** | [简体中文](README.zh-CN.md)
+
 Start at [CONTRIBUTING.md](../../CONTRIBUTING.md) for the entry point.
 This directory covers collaboration from reporting a problem to maintainer merge.
 

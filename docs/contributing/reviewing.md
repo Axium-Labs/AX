@@ -1,5 +1,7 @@
 # Reviewing and maintaining contributions
 
+**English** | [简体中文](reviewing.zh-CN.md)
+
 [Contribution entry point](../../CONTRIBUTING.md) · [Navigation](README.md)
 
 ## Roles and authority

@@ -1,5 +1,7 @@
 # Development
 
+**English** | [简体中文](development.zh-CN.md)
+
 How to build, test and extend AX. For how the pieces fit together, start with
 [architecture.md](architecture.md); for the documentation map, see
 [docs/README.md](README.md).

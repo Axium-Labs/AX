@@ -1,5 +1,7 @@
 # Portable backup and restore
 
+**English** | [简体中文](backup.zh-CN.md)
+
 AX exports user data through its storage repository. Commands:
 
     ax export backup.axpack

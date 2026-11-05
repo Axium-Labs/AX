@@ -1,5 +1,7 @@
 # 0026. Optional Goal in the existing execution kernel
 
+**English** | [简体中文](0026-optional-goal.zh-CN.md)
+
 Status: accepted
 
 ## Decision

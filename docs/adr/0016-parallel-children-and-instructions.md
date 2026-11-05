@@ -1,5 +1,7 @@
 # 0016. Parallel child dispatch, structured receipts and resolvable instructions
 
+**English** | [简体中文](0016-parallel-children-and-instructions.zh-CN.md)
+
 Status: accepted; extends 0005, 0008, 0011, 0014, 0015
 
 ## Context

@@ -1,5 +1,7 @@
 # Pull request workflow
 
+**English** | [简体中文](pull-requests.zh-CN.md)
+
 [Contribution entry point](../../CONTRIBUTING.md) · [Navigation](README.md)
 
 ## Confirm scope

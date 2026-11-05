@@ -1,5 +1,7 @@
 # Computer Use
 
+**English** | [简体中文](computer-use.zh-CN.md)
+
 Computer Use is a native host capability enabled by default. Windows uses UI
 Automation, Linux uses AT-SPI, and macOS uses Accessibility. It reads application
 windows and operates exposed controls. Linux requires a graphical desktop session;

@@ -1,5 +1,7 @@
 # 0006. Skill evolution outside the runtime kernel
 
+**English** | [简体中文](0006-skill-evolution.zh-CN.md)
+
 Status: accepted
 
 ## Context

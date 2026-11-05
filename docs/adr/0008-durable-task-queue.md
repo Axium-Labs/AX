@@ -1,5 +1,7 @@
 # 0008. Durable lightweight Task Queue
 
+**English** | [简体中文](0008-durable-task-queue.zh-CN.md)
+
 Status: accepted
 
 ## Context

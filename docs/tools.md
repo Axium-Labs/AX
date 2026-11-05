@@ -1,5 +1,7 @@
 # Tools, Permissions & Safety
 
+**English** | [简体中文](tools.zh-CN.md)
+
 This document covers AX's built-in tools, how tools declare their permission
 requirements, and how the runtime and UI enforce them.
 

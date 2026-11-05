@@ -1,5 +1,7 @@
 # 0011: Model-directed semantics with runtime policy ceilings
 
+**English** | [简体中文](0011-model-directed-policies.zh-CN.md)
+
 Status: accepted. Supersedes automatic list decomposition and retry-once
 portions of ADR 0008 and fixed routing/context/lifecycle decision formulas.
 

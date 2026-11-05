@@ -1,5 +1,7 @@
 # 0004. ACP adapter at the AX CLI composition boundary
 
+**English** | [简体中文](0004-acp-control-plane.zh-CN.md)
+
 Status: accepted
 
 ## Context

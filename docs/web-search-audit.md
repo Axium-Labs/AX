@@ -1,5 +1,7 @@
 # Web Search production audit
 
+**English** | [简体中文](web-search-audit.zh-CN.md)
+
 Audited 2026-10-10–11 against the current registry, model catalog/discovery,
 credential resolution, adapter factory, kernel, child composition, CLI and ACP.
 This report distinguishes protocol candidates from proven account/model access.

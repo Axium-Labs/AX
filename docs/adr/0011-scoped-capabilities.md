@@ -1,5 +1,7 @@
 # ADR 0011: One registry for capability scopes
 
+**English** | [简体中文](0011-scoped-capabilities.zh-CN.md)
+
 Status: Accepted
 
 Skills previously chose duplicate names by directory order, MCP chose one
